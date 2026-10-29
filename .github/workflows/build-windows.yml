@@ -1,0 +1,78 @@
+# MeterBar — Windows CI build.
+#
+# Mirrors build-release.bat step-for-step so a CI installer and a local
+# installer are the same product:
+#   checkout -> version from CMakeLists.txt (the single source) ->
+#   configure + build Release -> run the DSP suite -> stage
+#   dist\MeterBar.exe -> ISCC with /DMyAppVersion -> MeterBar-Setup.exe.
+#
+# Triggers:
+#   - a version tag (vX.Y.Z): ALSO publishes the installer as a GitHub
+#     Release asset — that release is the in-app updater's feed. The
+#     job FAILS if the tag does not match the CMakeLists version:
+#     auto-commit is not auto-release (docs/V019_PLAN.md section 2.3).
+#   - branch pushes / manual runs: the installer is uploaded as a
+#     workflow artifact only (proof CI is green; nothing is released).
+name: build-windows
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed only by the tag-release step
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from CMakeLists.txt (single source of truth)
+        id: ver
+        shell: pwsh
+        run: |
+          $line = Select-String -Path CMakeLists.txt -Pattern 'project\(MeterBar VERSION ([0-9]+\.[0-9]+\.[0-9]+)' | Select-Object -First 1
+          if (-not $line) { throw "project VERSION not found in CMakeLists.txt" }
+          $v = $line.Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "MeterBar version: $v"
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$v") {
+            throw "Tag ${{ github.ref_name }} does not match CMakeLists version v$v — refusing to release."
+          }
+
+      - name: Configure (JUCE is fetched by CMake — no git needed for it)
+        run: cmake -S . -B build-app -DMETERBAR_BUILD_APP=ON -A x64
+
+      - name: Build Release
+        run: cmake --build build-app --config Release
+
+      - name: DSP suite
+        run: |
+          cmake -S . -B build-dsp -A x64
+          cmake --build build-dsp --config Release
+          ./build-dsp/Release/test_dsp.exe
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Stage dist and compile the installer (mirrors build-release.bat)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "build-app/app/MeterBar_artefacts/Release/MeterBar.exe" "dist/MeterBar.exe"
+          ISCC "/DMyAppVersion=${{ steps.ver.outputs.version }}" MeterBar.iss
+
+      - name: Upload installer as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeterBar-Setup-${{ steps.ver.outputs.version }}
+          path: dist/MeterBar-Setup.exe
+
+      - name: Publish the installer on the version tag's GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MeterBar-Setup.exe

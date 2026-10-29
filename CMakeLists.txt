@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
-project(MeterBar VERSION 1.0.0 LANGUAGES C CXX)
+# v0.19: THIS project() VERSION IS THE SINGLE SOURCE OF TRUTH for the
+# app version (kit v0.19 == 0.19.0). It feeds the generated
+# MeterBarVersion.h (UI string, splash, application version, updater),
+# the juce_add_gui_app version in app/CMakeLists.txt, and — via
+# build-release.bat / CI passing ISCC /DMyAppVersion — the installer.
+# Before v0.19 the version was hard-coded in six places and they were
+# guaranteed to drift; do not add a seventh. Bump it here, only here.
+project(MeterBar VERSION 0.19.0 LANGUAGES C CXX)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/app/MeterBarVersion.h.in
+               ${CMAKE_BINARY_DIR}/generated/MeterBarVersion.h)
 # v0.15 distribution: link the MSVC runtime STATICALLY (/MT release,
 # /MTd debug) so a built MeterBar.exe runs on a friend's PC with NO
 # Visual C++ Redistributable installed. Must be set before any target

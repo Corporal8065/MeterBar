@@ -4,6 +4,92 @@
 #include <functional>
 #include "Theme.h" // v0.12: panel headers wear their module's accent colour
 #include "WindowsLoopback.h" // v0.13: the output picker is built from real WASAPI endpoints (name + ID)
+// v0.19: the dark-title-bar call below is Windows-only. The guard tests
+// the COMPILER's own predefined _WIN32 (MSVC and MinGW both predefine
+// it) — never JUCE_WINDOWS: the v0.14 lesson is that a macro a header
+// may or may not have defined is how Windows code silently compiles
+// out. dwmapi is already linked by the app target (ScreenSpace, v0.18).
+#if defined(_WIN32)
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #include <windows.h>
+ #include <dwmapi.h>
+ #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+  #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+ #endif
+#endif
+// v0.19 SETTINGS PALETTE — Settings is DECOUPLED from the bar theme.
+// Before this, SettingsContent painted nothing and coloured nothing:
+// the window inherited theme.panel via MainComponent::applyTheme, which
+// is near-white (0xfffdf3f8) in the Anime theme and pure white
+// (0xffffffff) in Daylight — Jackson: "blinding when I hit Settings" —
+// and its controls fell back to stock JUCE LookAndFeel_V4 whites/slates
+// in every theme. Settings now always uses this one fixed soft
+// pink-dark palette, identical in all five bar themes. (Plan:
+// docs/V019_PLAN.md section 1.2.)
+namespace settingsPalette {
+    inline juce::Colour base()       { return juce::Colour(0xff2a1e2e); } // window/content background
+    inline juce::Colour surface()    { return juce::Colour(0xff3a2438); } // combos, buttons, slider text boxes
+    inline juce::Colour well()       { return juce::Colour(0xff241722); } // slider tracks, tick boxes, scrollbar track
+    inline juce::Colour border()     { return juce::Colour(0xff57304d); } // outlines, dividers
+    inline juce::Colour text()       { return juce::Colour(0xfff6e3ee); } // body text (~13:1 on base)
+    inline juce::Colour dimText()    { return juce::Colour(0xffc9a3bb); } // notes (~7:1 on base)
+    inline juce::Colour accent()     { return juce::Colour(0xffe04c89); } // brand pink: thumbs, ticks, highlights
+    inline juce::Colour softPink()   { return juce::Colour(0xffe77fb1); } // combo arrows, secondary accents
+    inline void applyDarkTitleBar(juce::Component* c) {
+#if defined(_WIN32)
+        if (c == nullptr) return;
+        if (auto* peer = c->getPeer()) {
+            if (auto* hwnd = (HWND) peer->getNativeHandle()) {
+                BOOL dark = TRUE;
+                DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+            }
+        }
+#else
+        (void) c;
+#endif
+    }
+} // namespace settingsPalette
+// Scoped LookAndFeel for the Settings window ONLY (the main bar keeps
+// stock JUCE behaviour — this is set on the Settings content + its
+// viewport, never on any bar component). Seeds every colour the stock
+// V4 look would otherwise take from its own white/slate defaults;
+// the builder helpers in SettingsContent ALSO set explicit colours, so
+// the palette holds even for a control that misses the L&F chain.
+class SettingsLookAndFeel : public juce::LookAndFeel_V4 {
+public:
+    SettingsLookAndFeel() {
+        using namespace settingsPalette;
+        setColour(juce::Label::textColourId, text());
+        setColour(juce::ComboBox::backgroundColourId, surface());
+        setColour(juce::ComboBox::textColourId, text());
+        setColour(juce::ComboBox::arrowColourId, softPink());
+        setColour(juce::ComboBox::outlineColourId, border());
+        setColour(juce::ComboBox::buttonColourId, surface());
+        setColour(juce::PopupMenu::backgroundColourId, base());
+        setColour(juce::PopupMenu::textColourId, text());
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, accent());
+        setColour(juce::PopupMenu::highlightedTextColourId, juce::Colour(0xffffffff));
+        setColour(juce::PopupMenu::headerTextColourId, dimText());
+        setColour(juce::Slider::backgroundColourId, well());
+        setColour(juce::Slider::trackColourId, well());
+        setColour(juce::Slider::thumbColourId, accent());
+        setColour(juce::Slider::textBoxTextColourId, text());
+        setColour(juce::Slider::textBoxBackgroundColourId, surface());
+        setColour(juce::Slider::textBoxOutlineColourId, border());
+        setColour(juce::ToggleButton::textColourId, text());
+        setColour(juce::ToggleButton::tickColourId, accent());
+        setColour(juce::ToggleButton::tickDisabledColourId, dimText());
+        setColour(juce::TextButton::buttonColourId, surface());
+        setColour(juce::TextButton::buttonOnColourId, accent());
+        setColour(juce::TextButton::textColourOffId, text());
+        setColour(juce::TextButton::textColourOnId, juce::Colour(0xffffffff));
+        setColour(juce::ScrollBar::backgroundColourId, well());
+        setColour(juce::ScrollBar::thumbColourId, border());
+        setColour(juce::ScrollBar::trackColourId, well());
+    }
+};
 // Big Settings window content: one panel per module + Audio + Performance.
 // Controls write straight into the shared PresetState and fire onChanged.
 class SettingsContent : public juce::Component {
@@ -13,6 +99,10 @@ public:
     std::function<void()> onChanged, onSourceChanged, onFpsChanged;
     std::function<void()> onArrange, onRestore; // v0.18: Window panel buttons (wired by MainComponent)
     SettingsContent() { setSize(760, 640); }
+    // v0.19: Settings paints its OWN background in the fixed palette —
+    // this is the line that ends the theme.panel inheritance (near-white
+    // in Anime, pure white in Daylight) for the content area.
+    void paint(juce::Graphics& g) override { g.fillAll(settingsPalette::base()); }
     void build() {
         removeAllChildren(); owned.clear(); y_ = 8;
         if (!st) return;
@@ -111,6 +201,22 @@ private:
     std::vector<std::unique_ptr<juce::Component>> owned;
     template <typename T> T* add(T* c) { owned.emplace_back(c); addAndMakeVisible(c); return c; }
     void changed() { if (onChanged) onChanged(); }
+    // v0.19: explicit palette colours for every control the helpers
+    // build (the SettingsLookAndFeel seeds the same palette; setting
+    // both means no control can fall back to stock JUCE whites).
+    void applyComboColours(juce::ComboBox* c) {
+        c->setColour(juce::ComboBox::backgroundColourId, settingsPalette::surface());
+        c->setColour(juce::ComboBox::textColourId, settingsPalette::text());
+        c->setColour(juce::ComboBox::arrowColourId, settingsPalette::softPink());
+        c->setColour(juce::ComboBox::outlineColourId, settingsPalette::border());
+        c->setColour(juce::ComboBox::buttonColourId, settingsPalette::surface());
+    }
+    void applyLabelColour(juce::Label* l) { l->setColour(juce::Label::textColourId, settingsPalette::text()); }
+    void applyToggleColours(juce::ToggleButton* t) {
+        t->setColour(juce::ToggleButton::textColourId, settingsPalette::text());
+        t->setColour(juce::ToggleButton::tickColourId, settingsPalette::accent());
+        t->setColour(juce::ToggleButton::tickDisabledColourId, settingsPalette::dimText());
+    }
     void panel(const juce::String& title, bool* enabledFlag, std::function<void()> body) {
         auto* hdr = add(new juce::Label({}, title)); hdr->setFont(juce::Font(15.f, juce::Font::bold));
         hdr->setColour(juce::Label::textColourId, nextKind_ >= 0 ? th_.moduleAccent(nextKind_) : th_.accent);
@@ -123,6 +229,7 @@ private:
             // was expected — a non-null pointer converts to true, so EVERY
             // module's Enabled box showed ON even when the module was off.
             t->setToggleState(*enabledFlag, juce::dontSendNotification); t->setBounds(560, y_ - 24, 120, 22);
+            applyToggleColours(t);
             t->onClick = [this, t, flag]{ *flag = t->getToggleState(); changed(); };
         }
         body(); y_ += 10;
@@ -132,8 +239,8 @@ private:
     // program's sound source — an input = that mic; an output = loopback of
     // whatever plays through those speakers/headphones.
     void soundSourceCombo() {
-        auto* l = add(new juce::Label({}, "Sound Source")); l->setBounds(24, y_, 200, 22);
-        auto* c = add(new juce::ComboBox()); c->setBounds(230, y_, 500, 22);
+        auto* l = add(new juce::Label({}, "Sound Source")); l->setBounds(24, y_, 200, 22); applyLabelColour(l);
+        auto* c = add(new juce::ComboBox()); c->setBounds(230, y_, 500, 22); applyComboColours(c);
         struct Entry { int id; int kind; juce::String name; juce::String devId; }; // kind: 0 tone, 1 input, 2 output
         auto entries = std::make_shared<std::vector<Entry>>();
         juce::StringArray inNames, outNames; juce::String curIn;
@@ -209,48 +316,75 @@ private:
 #endif
     }
     void combo(const juce::String& label, std::vector<juce::String> items, int sel, std::function<void(int)> fn) {
-        auto* l = add(new juce::Label({}, label)); l->setBounds(24, y_, 200, 22);
-        auto* c = add(new juce::ComboBox()); int id = 1; for (auto& s : items) c->addItem(s, id++);
+        auto* l = add(new juce::Label({}, label)); l->setBounds(24, y_, 200, 22); applyLabelColour(l);
+        auto* c = add(new juce::ComboBox()); applyComboColours(c); int id = 1; for (auto& s : items) c->addItem(s, id++);
         c->setSelectedItemIndex(juce::jlimit(0, (int)items.size() - 1, sel), juce::dontSendNotification);
         c->setBounds(230, y_, 260, 22);
         c->onChange = [this, c, fn]{ fn(c->getSelectedItemIndex()); changed(); };
         y_ += 26;
     }
     void slider(const juce::String& label, double mn, double mx, double val, std::function<void(double)> fn) {
-        auto* l = add(new juce::Label({}, label)); l->setBounds(24, y_, 200, 22);
+        auto* l = add(new juce::Label({}, label)); l->setBounds(24, y_, 200, 22); applyLabelColour(l);
         auto* s = add(new juce::Slider()); s->setRange(mn, mx, 0.01); s->setValue(val, juce::dontSendNotification);
+        s->setColour(juce::Slider::backgroundColourId, settingsPalette::well());
+        s->setColour(juce::Slider::trackColourId, settingsPalette::well());
+        s->setColour(juce::Slider::thumbColourId, settingsPalette::accent());
+        s->setColour(juce::Slider::textBoxTextColourId, settingsPalette::text());
+        s->setColour(juce::Slider::textBoxBackgroundColourId, settingsPalette::surface());
+        s->setColour(juce::Slider::textBoxOutlineColourId, settingsPalette::border());
         s->setBounds(230, y_, 300, 22);
         s->onValueChange = [this, s, fn]{ fn(s->getValue()); changed(); };
         y_ += 26;
     }
     void toggle(const juce::String& label, bool val, std::function<void(bool)> fn, bool disabled = false) {
         auto* t = add(new juce::ToggleButton(label)); t->setToggleState(val, juce::dontSendNotification);
-        t->setBounds(24, y_, 400, 22); t->setEnabled(!disabled);
+        t->setBounds(24, y_, 400, 22); t->setEnabled(!disabled); applyToggleColours(t);
         t->onClick = [this, t, fn]{ fn(t->getToggleState()); changed(); };
         y_ += 26;
     }
     void buttonRow(const juce::String& labelA, const juce::String& labelB) { // v0.18: two action buttons on one row
         auto* a = add(new juce::TextButton(labelA)); a->setBounds(24, y_, 260, 22);
+        a->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+        a->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
         a->onClick = [this]{ if (onArrange) onArrange(); };
         auto* b = add(new juce::TextButton(labelB)); b->setBounds(296, y_, 260, 22);
+        b->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+        b->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
         b->onClick = [this]{ if (onRestore) onRestore(); };
         y_ += 26;
     }
     void note(const juce::String& text) {
-        auto* l = add(new juce::Label({}, text)); l->setFont(11.f); l->setBounds(24, y_, 700, 16); y_ += 18;
+        auto* l = add(new juce::Label({}, text)); l->setFont(11.f); l->setBounds(24, y_, 700, 16);
+        l->setColour(juce::Label::textColourId, settingsPalette::dimText()); y_ += 18;
     }
 };
 class SettingsWindow : public juce::DocumentWindow {
 public:
     SettingsContent content;
-    SettingsWindow() : juce::DocumentWindow("MeterBar Settings", juce::Colour(0xff231f31), juce::DocumentWindow::closeButton) {
+    SettingsWindow() : juce::DocumentWindow("MeterBar Settings", settingsPalette::base(), juce::DocumentWindow::closeButton) {
+        // v0.19: the scoped pink L&F lives as long as the window and is
+        // attached to the content + viewport ONLY — never to the bar.
+        content.setLookAndFeel(&settingsLnf);
+        viewport.setLookAndFeel(&settingsLnf);
         content.build();
         viewport.setViewedComponent(&content, false);
         viewport.setScrollBarsShown(true, false); // v0.8: full settings scroll into view
         setContentNonOwned(&viewport, true);
         setSize(800, 680); setResizable(true, false); setUsingNativeTitleBar(true);
     }
+    ~SettingsWindow() override {
+        content.setLookAndFeel(nullptr);
+        viewport.setLookAndFeel(nullptr);
+    }
+    // v0.19: once the native peer exists (window shown), ask Windows
+    // for a dark title bar — the native frame otherwise renders white
+    // under the default Windows light app mode, in every theme.
+    void visibilityChanged() override {
+        juce::DocumentWindow::visibilityChanged();
+        if (isVisible()) settingsPalette::applyDarkTitleBar(this);
+    }
     void closeButtonPressed() override { setVisible(false); }
 private:
+    SettingsLookAndFeel settingsLnf;
     juce::Viewport viewport;
 };

@@ -3,7 +3,10 @@
  #include <windows.h> // native window move (v0.11)
 #endif
 using namespace meterbar;
-static const char* kVersion = "v1.0.0";
+// v0.19: the version string comes from the GENERATED header — root
+// CMakeLists project(VERSION) is the single source of truth. (Before
+// this it was a hard-coded "v1.0.0" literal here, one of six places.)
+static const juce::String kVersion = juce::String("v") + meterbar::kVersionString;
 MainComponent::MainComponent() {
     setOpaque(false); // v0.13: lets translucent background fills show the desktop (window is non-opaque too)
     theme = themeByName(engine.state.themeName);
@@ -78,7 +81,12 @@ void MainComponent::applyTheme() {
         b->setColour(juce::TextButton::textColourOnId, theme.text);
     }
     if (debugWin) debugWin->setBackgroundColour(theme.panel);
-    if (settingsWin) settingsWin->setBackgroundColour(theme.panel);
+    // v0.19: Settings does NOT follow the bar theme any more — it has a
+    // fixed pink-dark palette of its own (Settings.h, settingsPalette).
+    // This line previously overwrote the Settings background with
+    // theme.panel on every theme change: near-white in Anime, pure
+    // white in Daylight. It now re-pins the fixed palette base instead.
+    if (settingsWin) settingsWin->setBackgroundColour(settingsPalette::base());
     // v0.16: the mascot exists only in the Anime theme, and leaving Anime
     // silences the cute clicks completely (queued sounds dropped too).
     mascot.setVisible(engine.state.themeName == "Anime");
@@ -339,6 +347,7 @@ void MainComponent::layoutModules() {
     }
 }
 void MainComponent::timerCallback() {
+    pollUpdater(); // v0.19: surface a finished background update check / download on the message thread
     auto now = juce::Time::getCurrentTime().toMilliseconds();
     // v0.18.1: NO screen-space work happens here any more. The v0.18
     // ~4x/sec timer poll of syncScreenSpace() was the flicker's engine;
@@ -637,7 +646,7 @@ void MainComponent::showHamburgerMenu() {
     m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(burgerBtn), [this, inNames, outNames](int r){
         auto& s = engine.state;
         if (r == idAbout) juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "MeterBar",
-            "MeterBar v1.0.0\nA compact audio metering bar: Spectrum, Spectrogram, Waveform,\nLoudness, Stereometer, Oscilloscope.\nBuilt with JUCE + a custom DSP core.\nMade with JUCE (juce.com) — free-license attribution.");
+            "MeterBar " + kVersion + "\nA compact audio metering bar: Spectrum, Spectrogram, Waveform,\nLoudness, Stereometer, Oscilloscope.\nBuilt with JUCE + a custom DSP core.\nMade with JUCE (juce.com) — free-license attribution.");
         else if (r == idOpenSettings) { rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true); }
         else if (r == idSrcTone) { s.audioSource = "Test Tone"; engine.applySource(); }
         else if (r >= idInDevBase && r < idInDevBase + inNames.size()) setDeviceByName(true, inNames[r - idInDevBase]);
@@ -657,8 +666,125 @@ void MainComponent::showHamburgerMenu() {
         else if (r == idHint) { s.showRepositionHint = !s.showRepositionHint; resized(); }
         else if (r == idToolbar) { s.showToolbar = !s.showToolbar; resized(); repaint(); }
         else if (r == idDebug) debugWin->setVisible(!debugWin->isVisible());
-        else if (r == idUpdates) juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Updates",
-            "MeterBar v1.0.0 — this build has no update server configured.\nYou are on the version you built.");
+        else if (r == idUpdates) checkForUpdates();
         else if (r == idQuit) juce::JUCEApplication::getInstance()->systemRequestedQuit();
     });
+}
+
+// =====================================================================
+// v0.19 UPDATER — manual Check For Updates + the Update hand-off.
+// Feed: GitHub Releases of the repo named in UpdaterConfig.h. That
+// constant is EMPTY in the shipped v0.19 build (the repo does not
+// exist yet — it waits on Jackson's own GitHub login), so Check shows
+// the honest unconfigured message and makes no network request.
+// =====================================================================
+void MainComponent::checkForUpdates() {
+    if (!mbupdate::configured()) {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Updates",
+            "MeterBar " + kVersion + " — updates are not configured yet.\n"
+            "This build has no update feed set (the GitHub repo for MeterBar\n"
+            "has not been created), so no check was performed.\n"
+            "You are on the version you built.");
+        return;
+    }
+    if (updateCheckPending) return; // a check is already in flight
+    updateState = std::make_shared<mbupdate::SharedState>();
+    updateCheckPending = true;
+    mbupdate::checkLatestAsync(updateState, meterbar::kVersionString);
+    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Updates",
+        "Checking GitHub for the latest MeterBar release...\n"
+        "The result will pop up here when the check finishes.");
+}
+void MainComponent::pollUpdater() {
+    // A finished background check: present its result exactly once.
+    if (updateCheckPending && updateState && updateState->done.load(std::memory_order_acquire)) {
+        updateCheckPending = false;
+        presentUpdateResult(updateState->result);
+    }
+    // A finished installer download: verify, hand off to Inno, quit.
+    if (updateDownloadPending && updateDownload && updateDownload->isFinished()) {
+        updateDownloadPending = false;
+        const bool dlOk = !updateDownload->hadError() && updateDownload->statusCode() == 200;
+        updateDownload.reset();
+        if (!dlOk) {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Update",
+                "The update download did not complete.\n MeterBar has NOT been changed — you are still on " + kVersion + ".");
+            return;
+        }
+        if (pendingRelease.assetSize > 0 && updateInstallerFile.getSize() != pendingRelease.assetSize) {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Update",
+                "The downloaded installer is the wrong size (expected " + juce::String(pendingRelease.assetSize)
+                + " bytes, got " + juce::String(updateInstallerFile.getSize()) + ").\n"
+                "It will NOT be run. MeterBar has not been changed.");
+            return;
+        }
+        if (pendingRelease.assetDigest.isNotEmpty()) {
+            juce::String want = pendingRelease.assetDigest;
+            if (want.startsWithIgnoreCase("sha256:")) want = want.substring(7);
+            const juce::String got = mbupdate::sha256HexOfFile(updateInstallerFile);
+            if (!got.equalsIgnoreCase(want)) {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Update",
+                    "The downloaded installer's SHA-256 does not match the one GitHub published for this release.\n"
+                    "It will NOT be run. MeterBar has not been changed.");
+                return;
+            }
+        }
+        juce::ChildProcess installer;
+        const bool launched = installer.start({ updateInstallerFile.getFullPathName(),
+                                                "/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS", "/NORESTART" });
+        if (!launched) {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Update",
+                "The installer was downloaded to\n" + updateInstallerFile.getFullPathName()
+                + "\nbut could not be started. You can run it by hand;\nMeterBar is still on " + kVersion + ".");
+            return;
+        }
+        // The installer replaces {app} while we exit; its silent-gated
+        // [Run] entry (MeterBar.iss) relaunches the new version.
+        juce::JUCEApplication::getInstance()->systemRequestedQuit();
+    }
+}
+void MainComponent::presentUpdateResult(const mbupdate::ReleaseInfo& r) {
+    pendingRelease = r; // the Update action (if offered) refers to this release
+    if (!r.ok) {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Updates",
+            "Update check failed.\n" + r.error + "\nYou are still on MeterBar " + kVersion + ".");
+        return;
+    }
+    if (!r.newer) {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Updates",
+            "You are up to date.\nMeterBar " + kVersion + " is the latest release (" + r.tag + ").");
+        return;
+    }
+    juce::String notes = r.notes.trim();
+    if (notes.length() > 600) notes = notes.substring(0, 600) + "...";
+    auto* w = new juce::AlertWindow("Update available", 
+        "MeterBar " + r.tag + " is available (you are on " + kVersion + ")."
+        + (notes.isNotEmpty() ? "\n\n" + notes : "")
+        + "\n\nUpdate now? MeterBar will download the installer, close,\n"
+          "install, and relaunch at the new version. Your presets and\n"
+          "settings are stored outside the app folder and are kept.",
+        juce::AlertWindow::NoIcon);
+    w->addButton("Update", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    w->addButton("Later", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    w->enterModalState(true, juce::ModalCallbackFunction::create([this](int result) {
+        if (result == 1) startUpdateDownload();
+    }), true);
+}
+void MainComponent::startUpdateDownload() {
+    if (updateDownloadPending) return;
+    auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("MeterBar-Update");
+    dir.createDirectory();
+    updateInstallerFile = dir.getChildFile("MeterBar-Setup.exe");
+    updateInstallerFile.deleteFile();
+    updateDownload = juce::URL(pendingRelease.assetUrl).downloadToFile(updateInstallerFile, juce::URL::DownloadTaskOptions());
+    if (updateDownload == nullptr) {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Update",
+            "The update download could not be started.\nMeterBar has NOT been changed — you are still on " + kVersion + ".");
+        return;
+    }
+    updateDownloadPending = true; // pollUpdater() finishes the sequence
+    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Update",
+        "Downloading MeterBar " + pendingRelease.tag + "...\n"
+        "When the download finishes, MeterBar will close, install,\n"
+        "and relaunch itself at the new version.");
 }

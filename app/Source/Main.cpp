@@ -1,6 +1,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "MainComponent.h"
+#include "MeterBarVersion.h" // v0.19: generated — single-source version (root CMakeLists project VERSION)
 class MainWindow : public juce::DocumentWindow {
 public:
     explicit MainWindow(const juce::String& name) : juce::DocumentWindow(name, juce::Colour(0x00000000), 0) {
@@ -37,7 +38,7 @@ private:
 class MeterBarApp : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "MeterBar"; }
-    const juce::String getApplicationVersion() override { return "1.0.0"; }
+    const juce::String getApplicationVersion() override { return meterbar::kVersionString; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         // JUCE free-license attribution splash (v0.15 distribution): small,
@@ -52,7 +53,9 @@ public:
             g.setColour(juce::Colour(0xffe04c89)); g.setFont(juce::Font(30.f, juce::Font::bold));
             g.drawText("MeterBar", splashImg.getBounds().withTrimmedBottom(52), juce::Justification::centred);
             g.setColour(juce::Colour(0xfff6eff3)); g.setFont(15.f);
-            g.drawText("Made with JUCE", splashImg.getBounds().withTrimmedTop(88), juce::Justification::centred);
+            g.drawText("Made with JUCE", juce::Rectangle<int>(0, 92, 440, 22), juce::Justification::centred);
+            g.setFont(12.f); g.setColour(juce::Colour(0xffa79fc0));
+            g.drawText(juce::String("v") + meterbar::kVersionString, juce::Rectangle<int>(0, 120, 440, 18), juce::Justification::centred);
         }
         // SplashScreen deletes ITSELF after the delay (and is
         // DeletedAtShutdown if still up at quit) — never own it in a

@@ -13,6 +13,7 @@
 #include "../dsp/include/meterbar/RingBuffer.hpp"
 #include "../dsp/include/meterbar/Arrange.hpp"
 #include "../dsp/include/meterbar/ReserveState.hpp"
+#include "../dsp/include/meterbar/SemVer.hpp"
 #include "../dsp/include/meterbar/State.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
@@ -474,6 +475,29 @@ int main() {
         ReserveMachine m2;
         CHECK(m2.update(true, 0, IntRect{0, 0, 0, 0}, 1) == RA::None);
         CHECK(m2.reserved() == false);
+    }
+    // === v0.19 ===
+    // --- SemVer (the updater's version compare): NUMERIC ordering —
+    //     as raw strings "0.9.0" would sort after "0.19.0" and the
+    //     updater would miss (or reverse) real updates.
+    {
+        SemVer a, b;
+        CHECK(parseSemVer("0.19.0", a) && a.major == 0 && a.minor == 19 && a.patch == 0);
+        CHECK(parseSemVer("v0.19.0", b) && a == b);              // GitHub tag form == bare form
+        CHECK(parseSemVer("0.19", b) && a == b);                 // missing patch = 0
+        CHECK(parseSemVer("1", b) && b.major == 1 && b.minor == 0 && b.patch == 0);
+        CHECK(!parseSemVer("", b)); CHECK(!parseSemVer("abc", b)); CHECK(!parseSemVer("1.2.3.4", b));
+        CHECK(!parseSemVer("1..2", b)); CHECK(!parseSemVer("1.", b));
+        CHECK(semVerIsNewer("0.19.0", "0.18.1"));                // this version over the last
+        CHECK(semVerIsNewer("0.19.0", "0.9.0"));                 // the string-compare trap: 19 > 9 numerically
+        CHECK(!semVerIsNewer("0.9.0", "0.19.0"));                // ...and never the reverse
+        CHECK(!semVerIsNewer("0.19.0", "0.19.0"));               // equal is not newer
+        CHECK(semVerIsNewer("1.0.0", "0.99.99"));                // major dominates
+        CHECK(semVerIsNewer("v0.20.0", "0.19.9"));               // tags compare against bare versions
+        CHECK(!semVerIsNewer("garbage", "0.19.0"));              // unparseable is never an update
+        CHECK(compareSemVer(SemVer{0, 19, 0}, SemVer{0, 19, 0}) == 0);
+        CHECK(compareSemVer(SemVer{0, 18, 1}, SemVer{0, 19, 0}) == -1);
+        CHECK(compareSemVer(SemVer{2, 0, 0}, SemVer{1, 9, 9}) == 1);
     }
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

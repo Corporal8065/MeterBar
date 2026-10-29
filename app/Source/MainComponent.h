@@ -9,6 +9,8 @@
 #include "PresetIO.h"
 #include "ClickSounds.h"
 #include "ScreenSpace.h"
+#include "Updater.h"
+#include "MeterBarVersion.h" // v0.19: generated — single-source version
 #include <meterbar/ReserveState.hpp>
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
@@ -61,6 +63,17 @@ private:
     void syncScreenSpace();                                       // v0.18.1: feed one geometry/toggle observation to the reserve machine; act only on its transitions
     void doArrangeWindows();                                      // v0.18: sweep other windows below the bar
     void doRestoreWindows();                                      // v0.18: undo the sweep
+    // v0.19 updater (manual check only — no startup auto-check):
+    void checkForUpdates();                                       // menu action: honest-unconfigured, or start the background check
+    void pollUpdater();                                           // called from timerCallback: present a finished check / finish a download
+    void presentUpdateResult(const mbupdate::ReleaseInfo& r);     // up-to-date / failed / update-available dialog (with Update button)
+    void startUpdateDownload();                                   // download the release installer to %TEMP% (polled to completion)
+    std::shared_ptr<mbupdate::SharedState> updateState;           // background-check state (worker touches only this)
+    bool updateCheckPending = false;
+    mbupdate::ReleaseInfo pendingRelease;                         // the release a download/Update action refers to
+    std::unique_ptr<juce::URL::DownloadTask> updateDownload;
+    bool updateDownloadPending = false;
+    juce::File updateInstallerFile;
     // toolbar
     juce::TextButton presetBtn{"Preset"}, reposBtn{"Reposition"}, recBtn{"Rec"}, pauseBtn{"Pause"},
                      settingsBtn{"Settings"}, burgerBtn{"Menu"}, minBtn{"_"}, quitBtn{"Quit"};

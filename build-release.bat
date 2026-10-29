@@ -95,8 +95,18 @@ if not defined ISCC (
   echo then run build-release.bat again - you will get dist\MeterBar-Setup.exe.
   goto :end
 )
+REM ---- Version: single source = the project VERSION line in
+REM ---- CMakeLists.txt (v0.19). Passed to Inno as /DMyAppVersion
+REM ---- so the installer version can never drift from the app.
+set "MBVER="
+for /f "tokens=3" %%V in ('findstr /c:"project(MeterBar VERSION" "CMakeLists.txt"') do set "MBVER=%%V"
+if not defined MBVER (
+  echo [MeterBar] ERROR: could not read the version from CMakeLists.txt.
+  goto :end
+)
+echo [MeterBar] Version: %MBVER%
 echo [MeterBar] Compiling installer with Inno Setup...
-"%ISCC%" "MeterBar.iss" >> "%LOG%" 2>&1
+"%ISCC%" /DMyAppVersion=%MBVER% "MeterBar.iss" >> "%LOG%" 2>&1
 if errorlevel 1 (
   echo [MeterBar] INSTALLER COMPILE FAILED. Send Milo build-release-log.txt.
   goto :end

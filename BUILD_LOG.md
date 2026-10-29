@@ -1159,3 +1159,159 @@ that compound, the first is the engine)
   on his monitors remains runtime-unproven from this Linux VM, as
   with every version. Known Windows rules unchanged: elevated (admin)
   windows and fullscreen games sit outside both mechanisms.
+
+## 2026-10-28 — Kit v0.19: Settings pink fix + single-source version + updater + git/GitHub setup
+Built from docs/V019_PLAN.md (Jackson approved the plan's recommendations
+19:03 PT: private-first repo, tag-gated releases, manual-only update
+check, the §1.2 palette as spec'd, Settings-only colour scope). Built on
+the v0.18.1 tree; reserve/arrange behaviour untouched.
+
+### 1. Settings pink fix (Jackson: "blinding when I hit Settings")
+Root cause (verified in the v0.18.1 source): SettingsContent had NO
+paint() and set NO colours on any control it built — the window simply
+inherited theme.panel via MainComponent::applyTheme (near-white
+0xfffdf3f8 in the Anime theme, pure white 0xffffffff in Daylight), its
+controls fell back to stock JUCE LookAndFeel_V4 whites/slates in every
+theme, and its native title bar rendered white on Windows because
+nothing ever set DWMWA_USE_IMMERSIVE_DARK_MODE.
+- Settings is now DECOUPLED from the bar theme: one fixed pink-dark
+  palette in every theme (settingsPalette in Settings.h: base #2A1E2E,
+  surface #3A2438, well #241722, border #57304D, body text #F6E3EE
+  ~13:1 on base, dim #C9A3BB, accent #E04C89, soft pink #E77FB1).
+  SettingsContent::paint() fills the base; the six builder helpers
+  (combo/slider/toggle/buttonRow/note/soundSourceCombo) plus the
+  panel() Enabled toggle set explicit colours; panel headers keep
+  their per-module accents (they read well on the new base).
+- A SettingsLookAndFeel (LookAndFeel_V4 with the palette seeded into
+  every relevant colour ID, incl. PopupMenu and ScrollBar) is attached
+  to the Settings content + viewport ONLY — the main bar has no
+  setLookAndFeel call, as before. (Verified: ComboBox popups take
+  their L&F from the combo's getLookAndFeel() in JUCE 8, so the scoped
+  L&F reaches the dropdowns too.)
+- SettingsWindow's ctor background is now the palette base, and
+  MainComponent::applyTheme re-pins that fixed base for the Settings
+  window instead of theme.panel (the Debug window still follows the
+  theme — same bug class, deliberately out of this pass's scope).
+- Windows title bar: SettingsWindow::visibilityChanged() calls
+  DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE) on the native
+  peer once it exists. The guard tests the compiler's _WIN32 (never
+  JUCE_WINDOWS — the v0.14 lesson), and the HWND expression
+  (getPeer()->getNativeHandle()) is the identical one MainComponent
+  already ships in MSVC-proven code (lines 148/191/266).
+- NOT changed (scope): the Anime/Pastel/Daylight main-bar themes and
+  gradients are exactly as v0.18.1.
+
+### 2. Single-source version (was: six hard-coded "1.0.0"s)
+- Root CMakeLists project(VERSION) is now THE source, set to 0.19.0,
+  with configure_file generating generated/MeterBarVersion.h
+  (meterbar::kVersionString). Main.cpp getApplicationVersion(), the
+  splash version line, MainComponent's toolbar kVersion and the About
+  box all consume it.
+- Places the plan did NOT list, found by grep and folded in:
+  app/CMakeLists.txt carried TWO more — juce_add_gui_app VERSION
+  "1.0.0" and JUCE_APPLICATION_VERSION_STRING="1.0.0" — both now
+  ${PROJECT_VERSION}; and the About box had its own literal
+  "MeterBar v1.0.0" separate from kVersion. Full-source grep for
+  "1.0.0" after the change: only historical docs/BUILD_LOG mentions
+  remain (SPEC.md's MiniMeters screenshot note + this log).
+- MeterBar.iss: MyAppVersion is now an #ifndef fallback ("0.19.0");
+  build-release.bat reads the version out of CMakeLists.txt
+  (findstr, tokens=3) and passes ISCC /DMyAppVersion=%MBVER%. That is
+  the ONE justified build-release.bat change (md5 now
+  84b1268491c5af6287d01fd742c5f26b, still pure ASCII + CRLF);
+  build.bat BYTE-IDENTICAL (md5 5f5e724b5adf6455d88a6be2a440f611).
+
+### 3. Updater (replaces the "no update server configured" stub)
+- Config: app/Source/UpdaterConfig.h — ONE constant,
+  mbupdate::kGitHubRepo, EMPTY by default on purpose. Empty => Check
+  For Updates shows the honest "updates are not configured yet — no
+  check was performed" message and makes NO network request.
+- Configured behaviour (Updater.h): a detached worker thread (touches
+  only a shared_ptr state; MainComponent polls it from the existing UI
+  timer — no UI object is ever touched off-thread) GETs
+  api.github.com/repos/<repo>/releases/latest with a MeterBar
+  User-Agent, parses tag_name/body + the MeterBar-Setup.exe asset
+  (URL, size, digest) with JUCE JSON, and compares versions with the
+  new pure DSP header meterbar/SemVer.hpp (numeric compare —
+  "0.9.0" < "0.19.0"; unit-tested, incl. the string-compare trap).
+  Outcomes: up-to-date / check-failed (says why) / update-available
+  (notes + Update button).
+- Update: downloads to %TEMP%\MeterBar-Update\MeterBar-Setup.exe via
+  URL::downloadToFile (polled in the same timer), verifies the
+  published size and the SHA-256 digest when GitHub provides one
+  (juce_cryptography now linked for SHA256), launches the installer
+  /SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /NORESTART, then
+  quits the app. Verification failure = the installer is NOT run and
+  the user is told so. Manual check only — no startup auto-check.
+- MeterBar.iss gains the relaunch [Run] entry the plan specified:
+  no skipifsilent, Check: WizardSilent — silent (in-app) updates
+  relaunch the new version; interactive installs keep the existing
+  postinstall entry's behaviour.
+
+### 4. Git + GitHub (local only — the remote waits on Jackson)
+- git init (branch main) in meters-app; repo-local identity
+  (Milo (MeterBar build) <milo@localhost> — a local placeholder, no
+  global identity existed). .gitignore excludes build trees (incl.
+  the FetchContent JUCE cache), dist/, zips, build logs, .vs/*.user,
+  and the assets/media-generation-* dumps; source art is tracked.
+- Commit 1 (319c2c6) "baseline: v0.18.1 tree as shipped" — the clean
+  v0.18.1 tree + the plan doc + .gitignore, BEFORE any v0.19 edit.
+- .github/workflows/build-windows.yml: windows-latest; triggers on
+  tags v* (plus branch pushes / manual dispatch for artifacts);
+  reads the version from CMakeLists.txt and FAILS a tag build whose
+  tag != version; configure -> build Release -> DSP suite ->
+  choco install innosetup -> stage dist -> ISCC /DMyAppVersion ->
+  upload artifact always, and attach MeterBar-Setup.exe to the tag's
+  GitHub Release on tag builds (softprops/action-gh-release).
+  YAML validated by parsing. NOT run anywhere yet (no remote exists).
+- NO remote was created, nothing was pushed, gh auth was not run:
+  creating the repo needs Jackson's own GitHub login (plan §5.1).
+
+### Verification (this VM, observed on disk)
+- DSP suite: **197 checks, 0 failures** (178 baseline + 19 new
+  SemVer checks), in the fresh working tree and (below) from the
+  shipped kit's extracted tree.
+- Full clean rebuild from scratch trees (fresh JUCE fetch): configure
+  + build exit 0, fresh ELF 32,711,768 bytes, zero errors in the log;
+  the REAL build's flags.make carries
+  JUCE_APPLICATION_VERSION_STRING="0.19.0" and NOMINMAX, and the
+  generated MeterBarVersion.h carries 0.19.0. Xvfb smoke: alive the
+  full 14 s (ALSA warnings only).
+- Windows-branch proof for the NEW Windows-only code (the DWM call):
+  JUCE 8 has REMOVED MinGW support (juce_TargetPlatform.h #warning),
+  so JUCE's own headers cannot be parsed by MinGW at all — a full-TU
+  MinGW check of Settings.h is impossible for reasons unrelated to
+  this code (the v0.13–v0.18 MinGW checks covered std-only TUs, which
+  still stand untouched). Adapted proof, no define forced anywhere:
+  (a) the exact Win32 calls (windows.h + dwmapi.h +
+  DwmSetWindowAttribute + the immersive-dark-mode constant) pass a
+  MinGW full syntax+type check in a standalone TU — CLEAN;
+  (b) A/B preprocess of the real Settings TU: DwmSetWindowAttribute
+  appears 2x in the MinGW (Windows-target) preprocessed output and
+  0x in the Linux one — the branch is selected exactly under Windows
+  targets; (c) the JUCE-side expression it wraps
+  (getPeer()->getNativeHandle()) is byte-identical to MSVC-proven
+  code already shipped in MainComponent.cpp. The updater itself has
+  NO Windows-gated code (JUCE URL/ChildProcess/SHA256 APIs are
+  cross-platform) and compiled in the Linux build above.
+- MSVC trap sweep over all new/changed files: clean (no bare
+  min/max, no numeric_limits extremes, no near/far/ERROR identifiers,
+  no windows.h macro victims).
+- VM note (VM-only, repeated from v0.18.1): /tmp is a 512 MB tmpfs
+  and filled during the first fresh-build attempt (compiler temp
+  files); the successful build ran with TMPDIR redirected to the
+  home filesystem, exactly as in the v0.18.1 scratch build.
+
+### What only Jackson's Windows run can prove
+- Settings actually rendering pink-dark with a dark title bar, in
+  Anime/Daylight/Midnight Kids (DWM behaviour is his Windows').
+- The 0.19.0 strings in the built exe (toolbar, About, splash) and
+  the installer version from build-release.bat's new ISCC /D line
+  (ISCC is not installed on this VM; the .iss changes are written
+  and reviewed, not compile-tested).
+- The honest-unconfigured Check For Updates message. The configured
+  path (real GitHub check -> download -> silent install -> relaunch)
+  can only run once the repo exists and a release is published.
+README_TEST.md leads with the v0.19 re-tests (A settings in three
+themes incl. title bar, B version everywhere, C the honest Check
+message, D the standing v0.18.1 reserve re-test).

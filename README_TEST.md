@@ -11,6 +11,33 @@ and send back (a) a screenshot and (b) one line per slice: works / broken + what
 3. If it fails, send me a screenshot of the *first* red error — not the whole log.
 4. Success = `build-app\app\MeterBar_artefacts\Release\MeterBar.exe` exists. Double-click it.
 
+## v0.19 — Pink Settings + the updater skeleton + GitHub plumbing (do these FIRST, please)
+
+Three things in this one, all from your 18:53 ask:
+
+**A. Settings is PINK now — and it stays pink in every theme**
+What was wrong (found in the code, not guessed): the Settings window never painted its own background — it inherited the main bar's theme colour, which is **near-white pink in the Anime theme and pure white in Daylight**, and its controls used stock JUCE styling (white text defaults, slate boxes) even on the dark themes. The Windows title bar also rendered white because the app never asked Windows for a dark one. Now Settings has its **own fixed palette** (deep pink-plum background `#2A1E2E`, plum control surfaces, soft pink-white text, your brand pink `#E04C89` for ticks/thumbs/highlights) that does not change with the bar theme.
+- [ ] Open **Settings** in **Midnight Kids**: deep pink-plum everywhere, nothing white.
+- [ ] Switch the bar to **Anime**, reopen Settings: **identical pink-dark Settings** (before, this was the blinding near-white sheet). Same again in **Daylight** (before: pure white).
+- [ ] Check the **title bar** of the Settings window itself: it should be **dark** now, not white (Windows dark title bar, asked for properly).
+- [ ] The combo dropdowns, sliders, tick boxes and the scrollbar should all be plum/pink — no slate-grey or white control surfaces anywhere. Panel headers keep their per-module colours (Spectrum pink, Waveform teal, …) on purpose.
+- [ ] The **main bar itself is unchanged** in every theme — this pass touched Settings only.
+
+**B. The version is 0.19.0 EVERYWHERE now**
+Before, the version was typed by hand in six different places (and said 1.0.0). It now comes from **one** line in the project file, and everything else reads from it:
+- [ ] The toolbar's little version label reads **v0.19.0**.
+- [ ] **Menu → Help → About MeterBar** reads **MeterBar v0.19.0**.
+- [ ] The startup splash shows **v0.19.0** under "Made with JUCE".
+- [ ] If you run `build-release.bat` + Inno Setup: the installer reports **0.19.0** too (the build now passes the same version into the installer automatically).
+
+**C. Check For Updates — honest "not configured yet" (this is CORRECT for now)**
+The updater is built (it checks GitHub Releases and compares versions properly), but the GitHub repo doesn't exist yet — that step needs **your** GitHub login, which only you can do. So in this build the repo address inside the app is deliberately **empty**, and:
+- [ ] **Menu → Check For Updates** (or Help → Check For Updates) shows: *"MeterBar v0.19.0 — updates are not configured yet… no check was performed."* That message is the test passing — it must **not** claim to have checked anything, and it makes no network request.
+- [ ] Once the GitHub repo exists, the same button will find the latest release, offer **Update**, download the installer, close, install, and relaunch at the new version — no further app changes needed beyond filling in the repo name and rebuilding. The repo + auto-build plumbing (git history starting from the exact v0.18.1 tree, and a Windows CI workflow that builds the installer from version tags) is in this kit's project folder for when we do that step together.
+
+**D. The v0.18.1 reserve re-test still stands**
+- [ ] If you haven't run the **v0.18.1 section right below** yet (Reserve on → maximize a browser → it must sit still, no flicker), please run it with this build — everything from v0.18.1 is in here unchanged.
+
 ## v0.18.1 — Reserve flicker FIX (do these FIRST, please)
 
 **v0.18.1 fixes the reserve flicker you reported**: in v0.18 the reservation was re-checked from a timer ~4 times a second, and the check compared what MeterBar *asked* Windows for against what Windows *granted* — two numbers that could never match once Windows trimmed the granted strip, so the reservation was torn down and rebuilt several times a second. Every maximized window bounced between full height and below-the-bar height, and its tabs/close button kept moving out from under your mouse. The reservation is now **event-driven** (it only changes when the bar actually docks, undocks, resizes, or the toggle flips) with a **hysteresis band** so a pixel of wobble changes nothing.
