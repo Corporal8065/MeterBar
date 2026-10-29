@@ -1,5 +1,40 @@
 # MeterBar — BUILD LOG (dated, honest: only what was actually observed)
 
+# MeterBar — BUILD LOG (dated, honest: only what was actually observed)
+
+## v0.20.1 (2026-10-29) — parity-round support release
+
+Small release so the family can move together; MeterBar's own
+feature set is unchanged. Pure-core suite 949 → 963 checks, 0
+failures; app layer verified by the GitHub Actions Windows build
+(green on the branch and the tag) — no Windows live test was run by
+the builder.
+
+- **BarLink protocol BLK2** (shared with TickerBar/SessionBar
+  v0.3.0): the slot gains the one-click Stack fields (sequence,
+  edge, anchor) and the audio broadcast (band energies + level).
+  Mixed old/new binaries no longer link — update all three bars
+  together.
+- **One-click Stack (family item 12).** This bar can initiate a
+  stack (its Stack button was already in the toolbar) and now also
+  reacts to a sibling's: the plan is computed in the pure core in
+  canonical app order, each bar moving only itself.
+- **Preset load now applies position (item 2 audit).** Presets have
+  always SAVED the window rect (winX/winY/winW/winH in PresetState);
+  the audit found loading one never moved the window. It does now,
+  clamped into a visible work area — and the startup restore got
+  the same clamp (the SessionBar off-screen lesson, applied
+  family-wide pre-emptively).
+- **Audio broadcast (item 17).** The band energies + overall level
+  the visualizer already computes are published over BarLink every
+  frame, so linked siblings render the reactive glow from the same
+  music. Nothing is recorded or sent anywhere else — the slot is
+  the same local shared-memory link as always.
+- **Live linked opacity (item 13).** A forced republication on the
+  Link off→on edge repairs the case where a stale marker could
+  suppress the first background sync after re-linking.
+- README gained the download-latest-release link beside the badge.
+
 ## 2026-10-13 — Phase A: DSP core (Linux VM: g++ 13.3, cmake 3.28)
 - Structure: `dsp/include/meterbar/` header library (namespace `meterbar`), ZERO external deps:
   RingBuffer (SPSC stereo, clip-10s/60s), Fft (iterative radix-2, Hann, smoothing, tilt,
