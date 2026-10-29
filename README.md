@@ -81,6 +81,10 @@ MeterBar is the first of a small family of edge-of-screen bars. Its siblings liv
 - **TickerBar** — a slim crypto ticker bar (BTC / ETH / HYPE, price, 24h change, sparkline).
 - **SessionBar** — market-session countdowns (New York / London / Tokyo) in the same strip format.
 
+## Requests & feedback
+
+Using MeterBar and want something changed, added, or fixed? Open an **issue** (the *Issues* tab above) — there's a short form for feature requests and one for bugs, no technical knowledge needed. Requests posted there are picked up and built into future releases.
+
 ---
 
 *Built with [JUCE](https://juce.com) and a hand-rolled DSP core. Made with JUCE — free-license attribution.*
