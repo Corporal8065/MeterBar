@@ -1554,3 +1554,33 @@ relaunch. Plus the private-repo handling agreed the same evening.
 - No new platform APIs: browser launch is juce::URL; the changed
   app files compile in the real Linux JUCE build (stronger than the
   forced-macro MinGW checks this project retired in v0.14).
+
+## 2026-10-28 — docs: fancy README + screenshot gallery (companion commit to v0.19.2)
+
+- README.md at the repo root, product-page style: icon + one-line
+  description, build-status badge for the build-windows workflow
+  (an HTML comment in the file notes, honestly, that the badge
+  lights up after the first push + Actions run), features, Install
+  (with the SmartScreen "More info -> Run anyway" note for the
+  unsigned installer), Updating (incl. the private-repo behaviour),
+  Build-from-source, Gallery, and "The family" (TickerBar and
+  SessionBar as separate repos).
+- Gallery (docs/images/): the app icon, the social-preview image,
+  the clear mascot cutout, and two REAL screenshots — the bar
+  docked at the bottom of an actual Windows desktop (cropped from
+  Jackson's 2026-10-28 field screenshot) and the pink Settings
+  palette running in the Linux verification build under Xvfb
+  (captioned as exactly that). The other evening screenshots in the
+  media library were reviewed and excluded (they don't show
+  MeterBar); the tiny thumbnail of Fi's monitor was excluded on
+  quality/provenance. Per-theme Windows shots that cannot be
+  produced honestly from this VM are a clearly-marked
+  "screenshots wanted" list in the README — NO fabricated UI
+  screenshots were generated or included.
+- Final-tree verification for the pair of commits: clean rebuild
+  from scratch (fresh DSP tree in-tree: 271 checks, 0 failures;
+  full app build from a pristine scratch copy of the tree: exit 0,
+  built ELF's only 0.19.x string is "0.19.2"; DSP in the scratch
+  copy also 271/0). The shipped kit is built from this committed
+  tree and re-verified from its own extraction (see the release
+  report; kit file: meterbar-test-kit-v0.19.2.zip).
