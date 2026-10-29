@@ -51,10 +51,6 @@ The app version lives in exactly **one** place — the `project(VERSION)` line i
 
 ## Gallery
 
-**On a real desktop** — docked at the bottom of the screen, all six modules live (cropped from a full-desktop field screenshot):
-
-![MeterBar docked at the bottom of a desktop](docs/images/meterbar-on-desktop.png)
-
 **The mascot** (Anime theme):
 
 <img src="docs/images/mascot-calm.png" width="260" alt="MeterBar's anime mascot">
@@ -67,6 +63,8 @@ The app version lives in exactly **one** place — the `project(VERSION)` line i
 
 Real Windows screenshots of these are wanted for this section. If you're running MeterBar on Windows, these exact shots would complete the gallery:
 
+- The bar itself docked on a **real Windows desktop** (bottom edge), all modules live
+- Settings window on Windows in the **fixed pink palette** (replacing the Linux-build shot above)
 - Settings window in the **Midnight Kids** theme
 - Settings window in the **Anime** theme
 - Settings window in the **Daylight** theme
