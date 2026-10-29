@@ -21,7 +21,28 @@ MainComponent::MainComponent() {
         c->setInterceptsMouseClicks(false, false); // clicks fall through to the toolbar drag (v0.8)
     }
     for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                     &reserveBtn, &arrangeBtn, &restoreBtn }) addAndMakeVisible(b);
+                     &reserveBtn, &arrangeBtn, &restoreBtn, &linkBtn }) addAndMakeVisible(b);
+    // v0.20.0 (k): family LINK toggle + client wiring. The client's own
+    // 30 Hz timer polls the background packet, so no settings feed is
+    // needed here; geometry leads via notifyWindowGeometryChanged.
+    linkBtn.setClickingTogglesState(true);
+    linkBtn.setToggleState(engine.state.linkEnabled, juce::dontSendNotification);
+    linkBtn.setTooltip("Link: snap, drag, dock and share the background with TickerBar / SessionBar when their Link is on too");
+    linkBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop);
+        engine.state.linkEnabled = linkBtn.getToggleState(); };
+    linkClient_.getBounds = [this]{ return getScreenBounds(); };
+    linkClient_.setBounds = [this](juce::Rectangle<int> r){
+        if (auto* tl = getTopLevelComponent()) tl->setBounds(r);
+    };
+    linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity }; };
+    linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){
+        engine.state.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 2, bg.style);
+        engine.state.backgroundOpacity = juce::jlimit(0.15f, 1.0f, bg.opacity);
+        repaint();
+    };
+    linkClient_.getDockedEdge = [this]{ return reserveMachine.reserved() ? (int)reserveMachine.edge() : -1; };
+    linkClient_.isLinked = [this]{ return engine.state.linkEnabled; };
+    linkClient_.start();
     presetBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showPresetMenu(); };
     reposBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showRepositionMenu(); };
     // v0.18 screen-space controls: Reserve toggles the AppBar reservation
@@ -219,8 +240,10 @@ void MainComponent::syncScreenSpace() {
     // (toolbar button, Settings > Window, a loaded preset).
     if (reserveBtn.getToggleState() != engine.state.reserveScreenSpace)
         reserveBtn.setToggleState(engine.state.reserveScreenSpace, juce::dontSendNotification);
+    if (linkBtn.getToggleState() != engine.state.linkEnabled)
+        linkBtn.setToggleState(engine.state.linkEnabled, juce::dontSendNotification);
 }
-void MainComponent::notifyWindowGeometryChanged() { syncScreenSpace(); }
+void MainComponent::notifyWindowGeometryChanged() { syncScreenSpace(); linkClient_.notifyLocalGeometry(); }
 // v0.18 ARRANGE: slide every other window on this bar's monitor clear
 // of the bar. The strip the sweep clears is the bar's far edge measured
 // from the monitor edge it is docked to — so it does the right thing
@@ -301,6 +324,7 @@ void MainComponent::resized() {
         // v0.18: the screen-space trio sits just left of Preset (visual
         // order: Reserve | Arrange | Restore | Preset | Reposition ...).
         restoreBtn.setBounds(bar.removeFromRight(62)); arrangeBtn.setBounds(bar.removeFromRight(66));
+        linkBtn.setBounds(bar.removeFromRight(48));
         reserveBtn.setBounds(bar.removeFromRight(64));
         // v0.19.2: the update indicator takes a slice of the leftover
         // middle strip (where the hint label lives) — only while lit.

@@ -17,6 +17,7 @@
 #include "../dsp/include/meterbar/ReleaseParse.hpp"
 #include "../dsp/include/meterbar/State.hpp"
 #include "../dsp/include/meterbar/Visualizer.hpp"
+#include "../dsp/include/meterbar/BarLink.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -783,6 +784,44 @@ int main() {
         CHECK(!(wc.r == wc.g && wc.g == wc.b));
     }
 
+// ---- BarLink protocol geometry (v0.2.0, item k) ----
+{
+    using namespace meterbar;
+    LinkShared sh; const long long now = 100000;
+    auto& peer = sh.slots[1]; peer.appId = 1; peer.linked = 1; peer.heartbeatMs = now; peer.rect = { 100, 0, 800, 40 };
+    // snap: left edge 6 px from the peer's left edge aligns exactly
+    auto s1 = snapToPeers({ 106, 300, 500, 40 }, sh, 0, now);
+    CHECK(s1.x == 100);
+    // snap: top edge 8 px above the peer's bottom stacks flush
+    auto s2 = snapToPeers({ 400, 48, 500, 40 }, sh, 0, now);
+    CHECK(s2.y == 40);
+    // beyond the threshold: untouched
+    auto s3 = snapToPeers({ 130, 300, 500, 40 }, sh, 0, now);
+    CHECK(s3.x == 130 && s3.y == 300);
+    // unlinked or stale peers never snap
+    peer.linked = 0; CHECK(snapToPeers({ 106, 300, 500, 40 }, sh, 0, now).x == 106);
+    peer.linked = 1; peer.heartbeatMs = now - kPeerStaleMs - 1;
+    CHECK(snapToPeers({ 106, 300, 500, 40 }, sh, 0, now).x == 106);
+    // never snap to self
+    peer.heartbeatMs = now; peer.appId = 0;
+    CHECK(snapToPeers({ 106, 300, 500, 40 }, sh, 0, now).x == 106);
+    // follow: pure translation, size preserved
+    auto f = followRect({ 50, 500, 300, 40 }, { 0, 0, 800, 40 }, { 25, -10, 800, 40 });
+    CHECK(f.x == 75 && f.y == 490 && f.w == 300 && f.h == 40);
+    // group dock stacking on all four edges
+    IntRect lead{ 0, 0, 800, 40 }, fol{ 200, 300, 600, 36 };
+    CHECK(groupDockRect(lead, fol, ReserveEdge::Top).y == 40);
+    IntRect leadB{ 0, 1040, 800, 40 };
+    CHECK(groupDockRect(leadB, fol, ReserveEdge::Bottom).y == 1040 - 36);
+    CHECK(groupDockRect(lead, fol, ReserveEdge::Left).x == 800);
+    IntRect leadR{ 1120, 0, 800, 40 };
+    CHECK(groupDockRect(leadR, fol, ReserveEdge::Right).x == 1120 - 600);
+    // drag liveness is staleness-based
+    LinkSlot d; d.dragSeq = 3; d.dragStampMs = now;
+    CHECK(dragLive(d, now)); CHECK(!dragLive(d, now + kLeaderStaleMs + 1));
+}
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
+

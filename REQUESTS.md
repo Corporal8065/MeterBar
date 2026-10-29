@@ -41,8 +41,16 @@ behaviour, and errors recorded here with their actual text, never hidden.
   other bars converge to; this release instead exports its mapping
   and reserve conventions (already shared) and gains the family
   REQUESTS ledger.
-- (k) **Inter-app linking — OPEN.** Not landed in v0.20.0; to be built
-  across all three apps together (see TickerBar's REQUESTS.md).
+- (k) **Inter-app linking — DONE (build); NEEDS A LIVE TWO-BAR FIELD
+  TEST.** Pure core `meterbar/BarLink.hpp` (protocol + snap /
+  follow / group-dock geometry, unit-checked) + app-layer
+  `BarLink.h` (Windows named shared memory `Local\BarFamilyLinkV1`;
+  honest stub elsewhere) + on-bar **Link** toggle (persisted in
+  presets as `linkEnabled`, default OFF). A linked follower stacks
+  against this bar's reserve-docked edge; background style + opacity
+  propagate across linked bars. Proof: DSP suite geometry checks +
+  app TU syntax check; live multi-process behaviour needs two bars
+  on Windows — field test still owed.
 
 ## Errors recorded during this work
 

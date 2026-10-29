@@ -1647,3 +1647,12 @@ Verified (Linux VM):
 Honest limits: the visualizer's tuning constants are first-pass
 values chosen conservatively; expect one tuning round after
 Jackson sees it live. Linking (P4 item k) is NOT in this release.
+
+## Addendum (same day) — (k) family linking landed
+
+Core `meterbar/BarLink.hpp` + app `BarLink.h` + on-bar Link toggle
+(persisted in presets), as detailed in REQUESTS.md (k). DSP suite
+after: **926 checks, 0 failures** (913 + 13 protocol-geometry
+checks). The multi-process behaviour needs a live two-bar field
+test on Windows. (This addendum ships as a follow-up commit on top
+of v0.20.0; the version does not change.)

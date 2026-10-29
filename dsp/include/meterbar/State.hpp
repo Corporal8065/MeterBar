@@ -70,6 +70,7 @@ struct PresetState {
     // controls, mirrored here like every other preset field. OFF by
     // default; when ON the window background goes black and the
     // particle layer renders behind the modules.
+    bool linkEnabled = false;              // v0.20.0 (k): family linking — opt-in, default OFF
     bool visualizerEnabled = false;
     float visualizerBaseHue = 0.83f;       // 0..1 (family pink)
     float visualizerSaturation = 0.85f;    // 0..1

@@ -13,6 +13,7 @@
 #include "MeterBarVersion.h" // v0.19: generated — single-source version
 #include <meterbar/ReserveState.hpp>
 #include <meterbar/Visualizer.hpp> // v0.20.0
+#include "BarLink.h" // v0.20.0 (k): family link client
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
 // the pair's PresetState::moduleFlex weights (their sum is preserved, so
@@ -87,6 +88,8 @@ private:
     // v0.18 screen-space controls, sitting with the Reposition/pin family:
     // Reserve = the AppBar toggle; Arrange/Restore = the window sweep.
     juce::TextButton reserveBtn{"Reserve"}, arrangeBtn{"Arrange"}, restoreBtn{"Restore"};
+    juce::TextButton linkBtn{"Link"};                             // v0.20.0 (k)
+    BarLinkClient linkClient_{ meterbar::kLinkAppMeter };        // v0.20.0 (k)
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
     meterbar::ReserveMachine reserveMachine;                      // v0.18.1: event-driven dock/reserve decisions (hysteresis) — replaces the v0.18 ~4x/sec timer poll
     juce::Label logoLabel, versionLabel, hintLabel;
