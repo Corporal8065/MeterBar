@@ -1212,8 +1212,10 @@ nothing ever set DWMWA_USE_IMMERSIVE_DARK_MODE.
   "1.0.0" and JUCE_APPLICATION_VERSION_STRING="1.0.0" — both now
   ${PROJECT_VERSION}; and the About box had its own literal
   "MeterBar v1.0.0" separate from kVersion. Full-source grep for
-  "1.0.0" after the change: only historical docs/BUILD_LOG mentions
-  remain (SPEC.md's MiniMeters screenshot note + this log).
+  "1.0.0" after the change finds NO live version string — only a
+  historical comment at the old kVersion site, a SemVer doc example,
+  one SemVer test case, and historical docs (SPEC.md's MiniMeters
+  screenshot note + this log).
 - MeterBar.iss: MyAppVersion is now an #ifndef fallback ("0.19.0");
   build-release.bat reads the version out of CMakeLists.txt
   (findstr, tokens=3) and passes ISCC /DMyAppVersion=%MBVER%. That is
