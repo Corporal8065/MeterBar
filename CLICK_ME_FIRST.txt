@@ -1,4 +1,4 @@
-MeterBar test kit - FOR YOUR WINDOWS 11 PC (kit v0.18)
+MeterBar test kit - FOR YOUR WINDOWS 11 PC (kit v0.19.1)
 ================================================
 
 Yes, this is a Windows kit. If you saw the word "Linux" in
@@ -21,10 +21,13 @@ DO THIS:
    your usual speakers/headphones), so play a song and all 6
    meters should move with no audio setup.
 
-NEW IN v0.18: the bar can now RESERVE the top strip of your
-monitor (toolbar "Reserve" button) so maximised windows stop
-below it instead of sliding under it, plus Arrange/Restore
-buttons that slide floating windows out from under the bar.
+NEW IN v0.19.1: the bar's RESERVE feature (toolbar "Reserve"
+button) now works on whichever edge of the monitor the bar is
+docked to - including the BOTTOM, your usual spot - so maximised
+windows stop at the bar instead of sliding under it, plus
+Arrange/Restore buttons that slide floating windows clear of
+the bar. (v0.19 also made Settings pink in every theme and put
+the version in one place; v0.18.1 killed the reserve flicker.)
 README_TEST.md leads with the click-by-click tests for it.
 
 Then work through README_TEST.md (the click-by-click checklist)

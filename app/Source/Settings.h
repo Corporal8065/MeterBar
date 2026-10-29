@@ -173,10 +173,10 @@ public:
             note("Click sounds only ever play in the Anime theme; switching themes silences them completely.");
         });
         panel("Window", nullptr, [&]{
-            toggle("Reserve screen space when docked at the top (Windows)", st->reserveScreenSpace, [&](bool b){ st->reserveScreenSpace = b; });
-            note("Windows only: while ON and the bar is docked flush at a monitor's top edge, the bar registers as an App Bar — Windows shrinks that monitor's work area, so maximised windows stop below the bar instead of sliding under it. Same control as the toolbar's Reserve button. Moving the bar off the top edge releases the space again.");
-            buttonRow("Arrange windows below the bar", "Restore arranged windows");
-            note("Arrange slides every other (non-maximised) window on the bar's monitor down below the bar; Restore puts them back where they were. The Debug window's 'Screen space' line shows the current state. On non-Windows builds these do nothing.");
+            toggle("Reserve screen space when docked at a screen edge (Windows)", st->reserveScreenSpace, [&](bool b){ st->reserveScreenSpace = b; });
+            note("Windows only: while ON and the bar is docked flush at any edge of a monitor (top, bottom, or a side), the bar registers as an App Bar on that edge — Windows shrinks that monitor's work area, so maximised windows stop at the bar instead of sliding under it. Same control as the toolbar's Reserve button. Moving the bar off its edge releases the space again; dragging it to another edge moves the reservation with it.");
+            buttonRow("Arrange windows clear of the bar", "Restore arranged windows");
+            note("Arrange slides every other (non-maximised) window on the bar's monitor into the space clear of the bar's docked edge; Restore puts them back where they were. The Debug window's 'Screen space' line shows the current state, including which edge is reserved. On non-Windows builds these do nothing.");
         });
         panel("Audio Source", nullptr, [&]{
             soundSourceCombo();

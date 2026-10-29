@@ -66,7 +66,7 @@ MainComponent::MainComponent() {
     setSize(engine.state.windowW, engine.state.windowH);
     syncScreenSpace(); // v0.18: a preset loaded at startup may already ask for the reservation
 }
-MainComponent::~MainComponent() { stopTimer(); screenSpace.releaseTop(); screenSpace.restore(); if (engine.isRecording()) engine.stopRecording(); }
+MainComponent::~MainComponent() { stopTimer(); screenSpace.release(); screenSpace.restore(); if (engine.isRecording()) engine.stopRecording(); }
 void MainComponent::applyTheme() {
     theme = themeByName(engine.state.themeName);
     frame.cmap = meterbar::ColorMap(engine.state.colorMap);
@@ -124,11 +124,12 @@ void MainComponent::adjustMascotFlex(int dxPx) {
 }
 void MainComponent::applyFps() { int fps = engine.state.fpsLimit; startTimerHz(fps > 0 ? fps : 60); }
 // v0.18 RESERVE SCREEN SPACE (Jackson's ask): while the toggle is ON and
-// the bar sits flush at a monitor's TOP edge, register the window as a
+// the bar sits flush at a monitor edge, register the window as a
 // Windows AppBar so the OS shrinks that monitor's work area and maximised
-// windows stop below the bar. All rects here are PHYSICAL pixels straight
-// from GetWindowRect / GetMonitorInfo — AppBar rects are physical, and a
-// JUCE logical rect would be wrong by the monitor's DPI scale factor.
+// windows stop at the bar instead of sliding under it. All rects here
+// are PHYSICAL pixels straight from GetWindowRect / GetMonitorInfo —
+// AppBar rects are physical, and a JUCE logical rect would be wrong by
+// the monitor's DPI scale factor.
 //
 // v0.18.1 EVENT-DRIVEN (the flicker fix): v0.18 re-ran this sync from the
 // UI timer ~4x/sec and acted on a single 2 px dock threshold; combined
@@ -142,6 +143,15 @@ void MainComponent::applyFps() { int fps = engine.state.fpsLimit; startTimerHz(f
 // commands, and the window's own moved/resized notifications (MainWindow
 // forwards them via notifyWindowGeometryChanged, resized() below calls
 // it too). No timer touches other windows' space any more.
+//
+// v0.19.1 EDGE-AWARE (MiniMeters semantics): the observation now carries
+// the gap to ALL FOUR monitor edges and the monitor rect; the machine
+// reserves whichever edge the bar is docked to — Jackson's bar lives at
+// the BOTTOM, where the v0.18 line's top-only reservation never fired —
+// and reports a Switch when the bar is dragged straight from one docked
+// edge to another (release the old edge, register the new, once each).
+// The rect registered is the machine's full edge strip
+// (requestedRect), not the bar's own rect.
 void MainComponent::syncScreenSpace() {
 #if JUCE_WINDOWS
     auto* w = findParentComponentOfClass<juce::DocumentWindow>();
@@ -150,16 +160,30 @@ void MainComponent::syncScreenSpace() {
         RECT wr{}; GetWindowRect(hwnd, &wr);
         HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{}; mi.cbSize = sizeof mi; GetMonitorInfoW(mon, &mi);
-        const int gap = std::abs(wr.top - mi.rcMonitor.top); // distance from flush with the monitor's top edge
         const meterbar::IntRect rect{ wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top };
+        const meterbar::IntRect monRect{ mi.rcMonitor.left, mi.rcMonitor.top,
+                                         mi.rcMonitor.right - mi.rcMonitor.left,
+                                         mi.rcMonitor.bottom - mi.rcMonitor.top };
+        const meterbar::EdgeGaps gaps{ std::abs(rect.y - monRect.y),
+                                       std::abs(monRect.bottom() - rect.bottom()),
+                                       std::abs(rect.x - monRect.x),
+                                       std::abs(monRect.right() - rect.right()) };
         const long long monId = (long long)(uintptr_t)mon;
-        switch (reserveMachine.update(engine.state.reserveScreenSpace, gap, rect, monId)) {
+        auto registerNow = [this, hwnd] {
+            const meterbar::IntRect strip = reserveMachine.requestedRect();
+            screenSpace.reserveEdge(hwnd, reserveMachine.edge(), strip.x, strip.y, strip.w, strip.h);
+        };
+        switch (reserveMachine.update(engine.state.reserveScreenSpace, gaps, rect, monRect, monId)) {
             case meterbar::ReserveAction::Register:
             case meterbar::ReserveAction::Update:
-                screenSpace.reserveTop(hwnd, rect.x, rect.y, rect.w, rect.h);
+                registerNow();
+                break;
+            case meterbar::ReserveAction::Switch:
+                screenSpace.release(); // old edge off...
+                registerNow();         // ...new edge on — exactly once each
                 break;
             case meterbar::ReserveAction::Release:
-                screenSpace.releaseTop();
+                screenSpace.release();
                 // Toggle-OFF is a full stop: the reservation is removed
                 // AND any arranged windows go home in the same action.
                 // After this, no code path moves another window until
@@ -172,7 +196,7 @@ void MainComponent::syncScreenSpace() {
         }
     }
 #else
-    screenSpace.releaseTop();
+    screenSpace.release();
 #endif
     // The toolbar toggle mirrors state whichever surface changed it
     // (toolbar button, Settings > Window, a loaded preset).
@@ -180,11 +204,14 @@ void MainComponent::syncScreenSpace() {
         reserveBtn.setToggleState(engine.state.reserveScreenSpace, juce::dontSendNotification);
 }
 void MainComponent::notifyWindowGeometryChanged() { syncScreenSpace(); }
-// v0.18 ARRANGE: slide every other window on this bar's monitor below
-// the bar. The strip the sweep clears is the bar's bottom edge measured
-// from the monitor's top — so it does the right thing even if the bar
-// is floating a little below the edge. (The fitting math is
-// meterbar::arrangeFit; ScreenSpace does the enumeration.)
+// v0.18 ARRANGE: slide every other window on this bar's monitor clear
+// of the bar. The strip the sweep clears is the bar's far edge measured
+// from the monitor edge it is docked to — so it does the right thing
+// even if the bar is floating a little off the edge. (The fitting math
+// is meterbar::arrangeFit; ScreenSpace does the enumeration.)
+// v0.19.1: the docked edge is the bar's nearest edge by the same gap
+// math the reserve machine uses — a bottom-docked bar (Jackson's)
+// arranges windows into the area ABOVE it, not below it.
 void MainComponent::doArrangeWindows() {
 #if JUCE_WINDOWS
     auto* w = findParentComponentOfClass<juce::DocumentWindow>();
@@ -193,11 +220,27 @@ void MainComponent::doArrangeWindows() {
         RECT wr{}; GetWindowRect(hwnd, &wr);
         HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{}; mi.cbSize = sizeof mi; GetMonitorInfoW(mon, &mi);
-        screenSpace.arrange(hwnd, wr.bottom - mi.rcMonitor.top);
+        const meterbar::IntRect rect{ wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top };
+        const meterbar::IntRect monRect{ mi.rcMonitor.left, mi.rcMonitor.top,
+                                         mi.rcMonitor.right - mi.rcMonitor.left,
+                                         mi.rcMonitor.bottom - mi.rcMonitor.top };
+        const meterbar::EdgeGaps gaps{ std::abs(rect.y - monRect.y),
+                                       std::abs(monRect.bottom() - rect.bottom()),
+                                       std::abs(rect.x - monRect.x),
+                                       std::abs(monRect.right() - rect.right()) };
+        const meterbar::ReserveEdge edge = meterbar::ReserveMachine::nearestEdge(gaps, rect);
+        int strip = 0;
+        switch (edge) {
+            case meterbar::ReserveEdge::Top:    strip = wr.bottom - mi.rcMonitor.top; break;
+            case meterbar::ReserveEdge::Bottom: strip = mi.rcMonitor.bottom - wr.top; break;
+            case meterbar::ReserveEdge::Left:   strip = wr.right - mi.rcMonitor.left; break;
+            case meterbar::ReserveEdge::Right:  strip = mi.rcMonitor.right - wr.left; break;
+        }
+        screenSpace.arrange(hwnd, edge, strip);
         return;
     }
 #endif
-    screenSpace.arrange(nullptr, 0); // stub: records the honest "unavailable" status
+    screenSpace.arrange(nullptr, meterbar::ReserveEdge::Top, 0); // stub: records the honest "unavailable" status
 }
 void MainComponent::doRestoreWindows() { screenSpace.restore(); }
 void MainComponent::rebuildSettings() { settingsWin->content.build(); }
@@ -410,7 +453,7 @@ void MainComponent::timerCallback() {
             "\nLoopback packets: " + juce::String(engine.loopbackPackets()) +
             "\nLoopback format: " + engine.loopbackFormat() + "  peak decoded: " + juce::String(engine.loopbackPeak(), 3) +
             "\nLoopback status: " + lbStatus +
-            "\nScreen space (v0.18): " + juce::String(screenSpace.statusInfo()) +
+            "\nScreen space (v0.19.1): " + juce::String(screenSpace.statusInfo()) +
             "\nRender endpoints found (loopback sources): " + juce::String(debugEpsCount),
             juce::dontSendNotification);
     }

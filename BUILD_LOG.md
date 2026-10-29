@@ -1317,3 +1317,146 @@ nothing ever set DWMWA_USE_IMMERSIVE_DARK_MODE.
 README_TEST.md leads with the v0.19 re-tests (A settings in three
 themes incl. title bar, B version everywhere, C the honest Check
 message, D the standing v0.18.1 reserve re-test).
+
+## 2026-10-28 — Kit v0.19.1: edge-aware reserve (MiniMeters semantics)
+
+**Why.** Jackson field-tested v0.18.1's flicker fix and came back
+with the real requirement, in his words after the screenshot: "you
+did what i asked but it wasn't quite what i had in mind." His bar is
+docked at the **bottom** of his screen, and the reserve he wants is
+MiniMeters': Reserve ON + maximize an app → the app's maximum size
+shrinks so it stops **at the bar** instead of sliding under it. The
+v0.18 line reserved **ABE_TOP only**, gated on the bar being flush
+with the monitor's **top** — a correct AppBar, on the wrong edge for
+his layout, so in his setup Reserve silently did nothing at all.
+v0.19.1 generalizes the reservation to the edge the bar is actually
+docked to. Nothing else changes: the v0.18.1 event-driven/hysteresis
+discipline is untouched, Reserve stays default OFF and out of the
+Default preset, and v0.19's pink Settings, single-source version,
+and updater are exactly as shipped (this build bumps the one
+version line to 0.19.1).
+
+### The fix — four layers, all edge-parameterized
+- **ReserveMachine (DSP).** The observation now carries the gap to
+  **all four** monitor edges plus the monitor rect
+  (`update(toggleOn, EdgeGaps, barRect, monitorRect, monitorId)`).
+  Docked edge = the bar's nearest edge when its gap is ≤ 2 px;
+  release still requires the gap to the **registered** edge to
+  exceed 8 px (same hysteresis, per-edge; 3–8 px dead zone both
+  directions). One deliberate restriction, learned from the test
+  bench: **docking is orientation-limited** — a wide bar (w ≥ h,
+  MeterBar's shape) can only dock Top/Bottom, a tall bar only
+  Left/Right. Without it, a full-width bar sitting at the bottom is
+  incidentally flush with the left/right edges (gap 0) and "nearest
+  edge" would happily reserve a strip the size of the whole screen.
+  The registered rect is a **full edge strip** of the monitor
+  (top/bottom: full width × thickness to the bar's far edge;
+  left/right: full height × same), computed by a new pure
+  `stripRect()`. A bar dragged straight from one docked edge to
+  another yields a new **Switch** action (release old edge +
+  register new, exactly once each); a monitor change
+  mid-reservation re-registers on the new monitor. The `ReserveEdge`
+  enum lives in Arrange.hpp (the lower-level header) so both DSP
+  headers share it.
+- **arrangeFit (DSP).** Generalized from "fit below a top strip" to
+  "fit into the monitor minus a strip on a given edge"
+  (`arrangeFreeArea()` + edge-aware
+  `arrangeFit(window, monitor, edge, stripPx)`), same clamping math
+  (shrink oversize to the free area, pin inside it). The original
+  3-arg form is kept as a wrapper; a unit test asserts it returns
+  the Top result exactly, so v0.18 arrange outcomes are identical
+  by construction.
+- **ScreenSpace (Windows TU).** `reserveTop()` →
+  `reserveEdge(hwnd, edge, rect…)` registering
+  ABE_TOP/ABE_BOTTOM/ABE_LEFT/ABE_RIGHT as told; the AppBar state
+  records the live edge; `setAppBarPosIfChanged()` re-anchors after
+  ABM_QUERYPOS per edge (the edge-adjacent coordinate + the strip's
+  start along the monitor; the system may trim only the far side);
+  idempotence is judged on **requested rect AND edge** (the v0.18.1
+  requested-vs-applied fix, extended); ABN_POSCHANGED still routes
+  through the guarded setter; `releaseTop()` → `release()`; the
+  Debug status line now names the edge: `appbar active - BOTTOM
+  strip 120 px reserved`. `arrange()` takes the edge and clears
+  that edge's strip. The `_WIN32` guard discipline and the
+  v0.14-lesson comments are unchanged — the file still contains
+  zero JUCE.
+- **MainComponent / Settings copy.** `syncScreenSpace()` computes
+  the four edge gaps from GetWindowRect/GetMonitorInfo and feeds
+  the machine; Register/Update register the machine's
+  `requestedRect()` strip on `machine.edge()`; Switch performs
+  release-then-register; Release keeps the v0.18.1 semantics
+  (toggle-off additionally restores arranged windows
+  synchronously; quit path unchanged). `doArrangeWindows()` picks
+  the bar's nearest edge by the same gap math and clears that
+  edge's strip — a bottom-docked bar now arranges windows into the
+  space **above** it. Settings' Window panel no longer says "top":
+  the toggle is "Reserve screen space when docked at a screen
+  edge", the note covers all four edges and the drag-to-another-
+  edge behavior, and the Arrange button reads "Arrange windows
+  clear of the bar". The Debug status label reads "Screen space
+  (v0.19.1)". No new files, no CMake source-list changes, no
+  updater or .github/ file touched.
+
+### Tests — DSP suite 197 -> 250 checks, 0 failures (+53 net)
+- The v0.18.1 reserve block converted to the four-gap API on the
+  top edge (identical scenarios and expected actions).
+- New: `stripRect` on all four edges incl. dead-zone-float
+  thickness (gap + bar size); **bottom docking** end-to-end (dead
+  zone no-dock, Register, requested strip = full width × bar
+  height anchored to the monitor bottom, repeats None, dead-zone
+  wobble held, height growth → exactly one Update with the strip
+  following, drag-clear → Release); **left and right docking**
+  (+ toggle-off Release-once on the left); nearest-edge ties
+  (exact tie → Top); the orientation rule (a full-width bar at the
+  bottom registers **Bottom**, never a side; a tall bar at a
+  corner registers its side); **edge switch** bottom→top = exactly
+  one Switch, still reserved, new edge/rect, repeats None, then
+  toggle-off = one Release; arrangeFit per edge (bottom: window
+  poking under the bar pulled up / oversize capped / exact fit
+  untouched / strip overflow unchanged; left/right mirrors;
+  negative-coordinate monitor; 3-arg == Top-form equality).
+- One real bug caught by these tests before any of it shipped: the
+  first `nearestEdge` draft had no orientation limit and the
+  bottom-dock block's full-width bar (side gaps 0) registered as a
+  **left** dock — 5 failing checks, the machine was fixed, not the
+  tests. A second catch in the trap sweep: a local variable named
+  `near` in the machine (a windows.h macro-victim class) — renamed
+  before it could bite.
+
+### Verification
+- In-tree: DSP 250/0 in both build trees; full app build exits 0;
+  fresh ELF (32,711,808 B) with
+  `JUCE_APPLICATION_VERSION_STRING="0.19.1"` in its flags and
+  NOMINMAX present; Xvfb smoke alive the full 14 s (ALSA noise
+  only).
+- MinGW g++-mingw-w64-x86-64 13.2.0 full syntax+type check of
+  ScreenSpace.cpp **clean, no forced defines**. (MinGW and the X11
+  -dev packages had both vanished from the VM again and were
+  apt-restored in the same chain before building — the standing
+  VM note.)
+- A/B preprocess proof: `"appbar active"` 1× Windows target /
+  0× Linux.
+- MSVC trap sweep over all changed files clean after the `near`
+  rename (no bare min(/max(, no numeric_limits extremes, no
+  near/far/ERROR identifiers, no windows.h macro victims).
+- `build.bat` **byte-identical to v0.18** (md5
+  5f5e724b5adf6455d88a6be2a440f611); `build-release.bat` untouched
+  (it reads the version from CMakeLists, so ISCC gets 0.19.1 with
+  no edit).
+- Confirmed on the kit as shipped: extracted to a scratch dir on
+  the home filesystem, full configure + DSP suite **250 checks,
+  0 failures** + full app build exit 0; all 44 zip entries
+  byte-verified against the tree.
+
+### What only Jackson's Windows run can prove
+- AppBar registration behavior on a real Windows desktop is
+  **code- and preprocess-proven, not runtime-proven** — this VM is
+  Linux. Jackson's field test is the arbiter, and README_TEST leads
+  with it in his own layout: bar at the bottom → Reserve →
+  maximize a browser → it stops above the bar; drag the bar to
+  the top → the reservation moves; Reserve off → everything
+  restores.
+- One deliberate trade-off carried from v0.18.1: if Windows refuses
+  a registration, nothing retries until the next real
+  geometry/toggle event (retry loops are the bug class that caused
+  the flicker).

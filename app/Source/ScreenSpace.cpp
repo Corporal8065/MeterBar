@@ -38,10 +38,37 @@ struct AppBarState {
     HWND hwnd = nullptr;
     UINT callbackMsg = WM_APP + 0x4D; // private app message for ABN_* notices
     bool registered = false;
+    UINT edge = ABE_TOP; // v0.19.1: the ABE_* edge of the live registration
     RECT requested{}; // the rect the CALLER last asked for — idempotence is judged on THIS
     RECT applied{};   // the rect Windows last accepted via ABM_SETPOS (may be trimmed)
 };
 AppBarState g_appBar;
+
+// v0.19.1: the registration edge is data, not a constant — the bar may
+// be docked to any edge of its monitor (Jackson's is at the BOTTOM).
+UINT abeFromEdge(meterbar::ReserveEdge e) {
+    switch (e) {
+        case meterbar::ReserveEdge::Bottom: return ABE_BOTTOM;
+        case meterbar::ReserveEdge::Left:   return ABE_LEFT;
+        case meterbar::ReserveEdge::Right:  return ABE_RIGHT;
+        case meterbar::ReserveEdge::Top:    break;
+    }
+    return ABE_TOP;
+}
+const char* edgeName(meterbar::ReserveEdge e) {
+    switch (e) {
+        case meterbar::ReserveEdge::Bottom: return "BOTTOM";
+        case meterbar::ReserveEdge::Left:   return "LEFT";
+        case meterbar::ReserveEdge::Right:  return "RIGHT";
+        case meterbar::ReserveEdge::Top:    break;
+    }
+    return "TOP";
+}
+// The strip's thickness on its strip axis (height for top/bottom,
+// width for left/right) — for the status line.
+long stripThickness(const RECT& r, UINT abe) {
+    return (abe == ABE_LEFT || abe == ABE_RIGHT) ? (r.right - r.left) : (r.bottom - r.top);
+}
 
 // Ask for the position and set it ONLY if the system-granted rect
 // differs from what is already applied. v0.18's ABN_POSCHANGED handler
@@ -53,9 +80,18 @@ AppBarState g_appBar;
 // changes nothing costs one ABM_QUERYPOS and zero window movement.
 void setAppBarPosIfChanged() {
     APPBARDATA abd{}; abd.cbSize = sizeof abd; abd.hWnd = g_appBar.hwnd;
-    abd.uEdge = ABE_TOP; abd.rc = g_appBar.requested;
+    abd.uEdge = g_appBar.edge; abd.rc = g_appBar.requested;
     SHAppBarMessage(ABM_QUERYPOS, &abd);
-    abd.rc.left = g_appBar.requested.left; abd.rc.top = g_appBar.requested.top; // our left/top are the ask; the system may trim the height
+    // Re-anchor the coordinates that ARE the ask — the edge-adjacent
+    // side and the strip's start along the monitor — and let the
+    // system trim only the far side. (v0.18.1 restored left/top, which
+    // was the whole story for ABE_TOP; each edge has its own pair.)
+    switch (g_appBar.edge) {
+        case ABE_BOTTOM: abd.rc.left = g_appBar.requested.left; abd.rc.bottom = g_appBar.requested.bottom; break;
+        case ABE_LEFT:   abd.rc.left = g_appBar.requested.left; abd.rc.top = g_appBar.requested.top; break;
+        case ABE_RIGHT:  abd.rc.right = g_appBar.requested.right; abd.rc.top = g_appBar.requested.top; break;
+        default:         abd.rc.left = g_appBar.requested.left; abd.rc.top = g_appBar.requested.top; break; // ABE_TOP
+    }
     if (abd.rc.left == g_appBar.applied.left && abd.rc.top == g_appBar.applied.top &&
         abd.rc.right == g_appBar.applied.right && abd.rc.bottom == g_appBar.applied.bottom)
         return; // already exactly this bar — touching it again only broadcasts noise
@@ -80,23 +116,26 @@ struct ScreenSpace::Impl {
     std::vector<SavedWindow> saved;
 };
 
-bool ScreenSpace::reserveTop(void* hwndV, int physX, int physY, int physW, int physH) {
+bool ScreenSpace::reserveEdge(void* hwndV, meterbar::ReserveEdge edge,
+                              int physX, int physY, int physW, int physH) {
     HWND hwnd = static_cast<HWND>(hwndV);
     if (!hwnd || physW <= 0 || physH <= 0) return g_appBar.registered;
     const RECT want{ physX, physY, physX + physW, physY + physH };
+    const UINT abe = abeFromEdge(edge);
     // THE v0.18 FLICKER, fixed: idempotence is judged on the REQUESTED
-    // rect. v0.18 compared `want` against g_appBar.applied — the rect
-    // Windows GRANTED, which ABM_QUERYPOS is allowed to trim (bottom
-    // adjusted to fit the remaining space). Once trimmed, the two could
-    // never compare equal, so every sync fell through to the
-    // releaseTop() + full re-register below: ABM_REMOVE (work area
-    // expands, maximised windows jump to full height) then ABM_SETPOS
-    // (work area shrinks, they jump back) — at the UI timer's ~4 Hz.
-    if (g_appBar.registered && g_appBar.hwnd == hwnd &&
+    // rect (and, v0.19.1, the requested edge). v0.18 compared `want`
+    // against g_appBar.applied — the rect Windows GRANTED, which
+    // ABM_QUERYPOS is allowed to trim (far side adjusted to fit the
+    // remaining space). Once trimmed, the two could never compare
+    // equal, so every sync fell through to the release() + full
+    // re-register below: ABM_REMOVE (work area expands, maximised
+    // windows jump to full size) then ABM_SETPOS (work area shrinks,
+    // they jump back) — at the UI timer's ~4 Hz.
+    if (g_appBar.registered && g_appBar.hwnd == hwnd && g_appBar.edge == abe &&
         want.left == g_appBar.requested.left && want.top == g_appBar.requested.top &&
         want.right == g_appBar.requested.right && want.bottom == g_appBar.requested.bottom)
         return true; // already exactly this bar — nothing to do
-    if (g_appBar.registered) releaseTop(); // moved / resized / other monitor: clean re-register
+    if (g_appBar.registered) release(); // moved / resized / other monitor / edge switch: clean re-register
     APPBARDATA abd{}; abd.cbSize = sizeof abd; abd.hWnd = hwnd;
     abd.uCallbackMessage = g_appBar.callbackMsg;
     if (!SHAppBarMessage(ABM_NEW, &abd)) {
@@ -104,25 +143,27 @@ bool ScreenSpace::reserveTop(void* hwndV, int physX, int physY, int physW, int p
         return false;
     }
     g_appBar.hwnd = hwnd;
+    g_appBar.edge = abe;
     g_appBar.requested = want;
     g_appBar.applied = RECT{}; // nothing applied yet — setAppBarPosIfChanged always places the first position
     SetWindowSubclass(hwnd, appBarSubclassProc, 1, 0);
     g_appBar.registered = true; // live BEFORE the first SETPOS, so a POSCHANGED landing mid-call sees a consistent bar
     setAppBarPosIfChanged();
     char buf[96];
-    std::snprintf(buf, sizeof buf, "appbar active - top strip %ld px reserved",
-                  (long)(g_appBar.applied.bottom - g_appBar.applied.top));
+    std::snprintf(buf, sizeof buf, "appbar active - %s strip %ld px reserved",
+                  edgeName(edge), (long)stripThickness(g_appBar.applied, abe));
     impl_->status = buf;
     return true;
 }
 
-void ScreenSpace::releaseTop() {
+void ScreenSpace::release() {
     if (!g_appBar.registered || !g_appBar.hwnd) { g_appBar.registered = false; return; }
     APPBARDATA abd{}; abd.cbSize = sizeof abd; abd.hWnd = g_appBar.hwnd;
     SHAppBarMessage(ABM_REMOVE, &abd);
     RemoveWindowSubclass(g_appBar.hwnd, appBarSubclassProc, 1);
     g_appBar.hwnd = nullptr;
     g_appBar.registered = false;
+    g_appBar.edge = ABE_TOP;
     g_appBar.requested = RECT{};
     g_appBar.applied = RECT{};
     impl_->status = "not registered";
@@ -135,6 +176,7 @@ namespace {
 struct ArrangeMove { HWND hwnd; meterbar::IntRect from, to; };
 struct ArrangeCtx {
     HMONITOR mon; HWND exclude; int strip;
+    meterbar::ReserveEdge edge;
     meterbar::IntRect monRect;
     std::vector<ArrangeMove> moves;
 };
@@ -167,22 +209,22 @@ BOOL CALLBACK arrangeEnumProc(HWND hwnd, LPARAM lp) {
     if (wr.w <= 0 || wr.h <= 0) return TRUE;
     // Fit FIRST, move later: mutating windows mid-enumeration can disturb
     // the enumeration itself, so this pass only collects the plan.
-    const meterbar::IntRect fit = meterbar::arrangeFit(wr, ctx->monRect, ctx->strip);
+    const meterbar::IntRect fit = meterbar::arrangeFit(wr, ctx->monRect, ctx->edge, ctx->strip);
     if (fit != wr) ctx->moves.push_back({ hwnd, wr, fit });
     return TRUE;
 }
 } // namespace
 
-int ScreenSpace::arrange(void* hwndV, int stripPhysPx) {
+int ScreenSpace::arrange(void* hwndV, meterbar::ReserveEdge edge, int stripPhysPx) {
     HWND hwnd = static_cast<HWND>(hwndV);
     if (!hwnd || stripPhysPx <= 0) {
-        impl_->status = "arrange: no strip to clear (dock the bar at a monitor top first)";
+        impl_->status = "arrange: no strip to clear (dock the bar at a monitor edge first)";
         return 0;
     }
     const HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{}; mi.cbSize = sizeof mi;
     if (!GetMonitorInfoW(mon, &mi)) { impl_->status = "arrange: monitor lookup failed"; return 0; }
-    ArrangeCtx ctx{ mon, hwnd, stripPhysPx,
+    ArrangeCtx ctx{ mon, hwnd, stripPhysPx, edge,
                     { mi.rcMonitor.left, mi.rcMonitor.top,
                       mi.rcMonitor.right - mi.rcMonitor.left,
                       mi.rcMonitor.bottom - mi.rcMonitor.top }, {} };
@@ -204,7 +246,7 @@ int ScreenSpace::arrange(void* hwndV, int stripPhysPx) {
             ++moved;
     }
     char buf[96];
-    std::snprintf(buf, sizeof buf, "arranged %d window(s) below the bar", moved);
+    std::snprintf(buf, sizeof buf, "arranged %d window(s) clear of the bar (%s)", moved, edgeName(edge));
     impl_->status = buf;
     return moved;
 }
@@ -232,13 +274,13 @@ struct ScreenSpace::Impl {
     std::string status = "unavailable (non-Windows build)";
     std::vector<SavedWindow> saved;
 };
-bool ScreenSpace::reserveTop(void*, int, int, int, int) { return false; }
-void ScreenSpace::releaseTop() {}
+bool ScreenSpace::reserveEdge(void*, meterbar::ReserveEdge, int, int, int, int) { return false; }
+void ScreenSpace::release() {}
 bool ScreenSpace::isReserved() const { return false; }
-int ScreenSpace::arrange(void*, int) { return 0; }
+int ScreenSpace::arrange(void*, meterbar::ReserveEdge, int) { return 0; }
 int ScreenSpace::restore() { return 0; }
 std::string ScreenSpace::statusInfo() const { return impl_->status; }
 #endif
 
 ScreenSpace::ScreenSpace() : impl_(new Impl) {}
-ScreenSpace::~ScreenSpace() { releaseTop(); delete impl_; }
+ScreenSpace::~ScreenSpace() { release(); delete impl_; }

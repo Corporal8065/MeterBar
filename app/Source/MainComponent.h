@@ -61,7 +61,7 @@ private:
     void adjustMascotFlex(int dxPx);                              // v0.16: mascot cell splitter drag
     void uiClick(ClickSounds::Which w);                           // v0.16: Anime-gated cute click
     void syncScreenSpace();                                       // v0.18.1: feed one geometry/toggle observation to the reserve machine; act only on its transitions
-    void doArrangeWindows();                                      // v0.18: sweep other windows below the bar
+    void doArrangeWindows();                                      // v0.18: sweep other windows clear of the bar (v0.19.1: on its docked edge)
     void doRestoreWindows();                                      // v0.18: undo the sweep
     // v0.19 updater (manual check only — no startup auto-check):
     void checkForUpdates();                                       // menu action: honest-unconfigured, or start the background check

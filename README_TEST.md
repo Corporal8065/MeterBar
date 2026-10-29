@@ -11,6 +11,19 @@ and send back (a) a screenshot and (b) one line per slice: works / broken + what
 3. If it fails, send me a screenshot of the *first* red error — not the whole log.
 4. Success = `build-app\app\MeterBar_artefacts\Release\MeterBar.exe` exists. Double-click it.
 
+## v0.19.1 — Reserve now works on YOUR edge: the bottom (do these FIRST, please)
+
+**What was wrong:** Reserve only ever claimed the **top** edge of the screen. That's how it was first scoped — but your bar lives docked at the **bottom**, so in your actual layout Reserve quietly did nothing: maximized windows still slid underneath the bar. **v0.19.1 makes Reserve follow the bar**: whichever edge of the monitor the bar is docked to — bottom, top, or either side — is the edge that gets reserved, MiniMeters-style. Everything from v0.19 (pink Settings, version 0.19.1 everywhere, the updater skeleton) is unchanged, and the v0.18.1 flicker fix is fully in force — the reservation still only changes on real events, never on a timer.
+
+**Retest (your actual layout first):**
+- [ ] Dock the bar at the **bottom** of your main monitor (your usual spot), click **Reserve** on, then **maximize a browser**: it should stop **above** the bar — its bottom edge parked at the bar's top edge — instead of sliding under it. It should sit **still**: no flicker, no bouncing (that's the v0.18.1 fix, still owed a pass if you haven't run it).
+- [ ] Use the browser normally for a minute: scroll, switch tabs, close it from its own UI — nothing should move out from under your mouse.
+- [ ] Now drag the bar to the **top** edge of the same monitor (or use Reposition): the reservation should **move with it** — the maximized browser re-parks below the bar. Drag it back to the bottom: same thing in reverse.
+- [ ] Click **Reserve** off: everything returns — the browser can maximize over the full screen again, and any windows you had **Arrange**d go back where they were.
+- [ ] **Arrange** with the bar at the bottom: scatter floating windows, click **Arrange** once — they should fit into the space **above** the bar (in v0.18 they only ever arranged downward from a top bar). **Restore** puts them back.
+- [ ] Debug line check: **Menu → Show Debug Window** → "Screen space (v0.19.1):" should read `appbar active - BOTTOM strip NNN px reserved` while reserved at the bottom (TOP/LEFT/RIGHT likewise on those edges), and `not registered` after Reserve off.
+- [ ] The toolbar version label and **Menu → Help → About** read **v0.19.1** now.
+
 ## v0.19 — Pink Settings + the updater skeleton + GitHub plumbing (do these FIRST, please)
 
 Three things in this one, all from your 18:53 ask:

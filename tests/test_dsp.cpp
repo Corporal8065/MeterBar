@@ -425,7 +425,8 @@ int main() {
     {
         PresetState p; CHECK(p.reserveScreenSpace == false);
     }
-    // === v0.18.1 ===
+    // === v0.18.1 (API converted to the v0.19.1 edge-aware form; the
+    //     scenarios are the originals, played on the TOP edge) ===
     // --- Reserve state machine (the decision layer behind the AppBar):
     //     transitions only, with a 2 px dock / 8 px undock hysteresis
     //     band. The v0.18 design re-synced from a ~4x/sec timer poll and
@@ -433,48 +434,172 @@ int main() {
     //     these checks pin the behaviour that makes flapping impossible.
     {
         using RA = ReserveAction;
+        const IntRect mon{0, 0, 1920, 1080};
         const IntRect bar{0, 0, 1920, 120};
+        auto gapsTop = [](int top) { return EdgeGaps{ top, 900, 900, 900 }; };
         ReserveMachine m;
         CHECK(m.reserved() == false);
         // Toggle off: never any action, however docked the bar is.
-        CHECK(m.update(false, 0, bar, 1) == RA::None);
-        CHECK(m.update(false, 0, bar, 1) == RA::None);
+        CHECK(m.update(false, gapsTop(0), bar, mon, 1) == RA::None);
+        CHECK(m.update(false, gapsTop(0), bar, mon, 1) == RA::None);
         // Toggle on but floating well off the top: nothing.
-        CHECK(m.update(true, 40, bar, 1) == RA::None);
+        CHECK(m.update(true, gapsTop(40), bar, mon, 1) == RA::None);
         // The dead zone does not dock: 3..8 px away is not docked.
-        CHECK(m.update(true, 5, bar, 1) == RA::None);
-        CHECK(m.update(true, 8, bar, 1) == RA::None);
+        CHECK(m.update(true, gapsTop(5), bar, mon, 1) == RA::None);
+        CHECK(m.update(true, gapsTop(8), bar, mon, 1) == RA::None);
         CHECK(m.reserved() == false);
         // Dock -> Register, exactly once; identical repeats are None.
-        CHECK(m.update(true, 2, bar, 1) == RA::Register);
+        CHECK(m.update(true, gapsTop(2), bar, mon, 1) == RA::Register);
         CHECK(m.reserved() == true);
-        CHECK(m.update(true, 2, bar, 1) == RA::None);
-        CHECK(m.update(true, 0, bar, 1) == RA::None);
+        CHECK(m.update(true, gapsTop(2), bar, mon, 1) == RA::None);
+        CHECK(m.update(true, gapsTop(0), bar, mon, 1) == RA::None);
         // Jitter inside the hysteresis band: no state change, no action,
         // however long it wobbles (the v0.18 flicker scenario).
         for (int gap : { 3, 8, 5, 2, 7, 4, 8, 3 })
-            CHECK(m.update(true, gap, bar, 1) == RA::None);
+            CHECK(m.update(true, gapsTop(gap), bar, mon, 1) == RA::None);
         CHECK(m.reserved() == true);
         // A real geometry change while reserved: exactly one Update.
         const IntRect taller{0, 0, 1920, 160};
-        CHECK(m.update(true, 0, taller, 1) == RA::Update);
-        CHECK(m.update(true, 0, taller, 1) == RA::None);
+        CHECK(m.update(true, gapsTop(0), taller, mon, 1) == RA::Update);
+        CHECK(m.update(true, gapsTop(0), taller, mon, 1) == RA::None);
         // Moving to another monitor: exactly one Update.
-        CHECK(m.update(true, 0, taller, 2) == RA::Update);
-        CHECK(m.update(true, 0, taller, 2) == RA::None);
+        CHECK(m.update(true, gapsTop(0), taller, mon, 2) == RA::Update);
+        CHECK(m.update(true, gapsTop(0), taller, mon, 2) == RA::None);
         // Dragged clear of the top (past the undock threshold): Release.
-        CHECK(m.update(true, 9, taller, 2) == RA::Release);
+        CHECK(m.update(true, gapsTop(9), taller, mon, 2) == RA::Release);
         CHECK(m.reserved() == false);
         // Sitting in the dead zone after release does NOT re-register.
-        CHECK(m.update(true, 5, taller, 2) == RA::None);
+        CHECK(m.update(true, gapsTop(5), taller, mon, 2) == RA::None);
         // Docking again works, and toggle-off then releases exactly once.
-        CHECK(m.update(true, 1, taller, 2) == RA::Register);
-        CHECK(m.update(false, 1, taller, 2) == RA::Release);
-        CHECK(m.update(false, 1, taller, 2) == RA::None);
+        CHECK(m.update(true, gapsTop(1), taller, mon, 2) == RA::Register);
+        CHECK(m.update(false, gapsTop(1), taller, mon, 2) == RA::Release);
+        CHECK(m.update(false, gapsTop(1), taller, mon, 2) == RA::None);
         // A degenerate bar rect never registers.
         ReserveMachine m2;
-        CHECK(m2.update(true, 0, IntRect{0, 0, 0, 0}, 1) == RA::None);
+        CHECK(m2.update(true, gapsTop(0), IntRect{0, 0, 0, 0}, mon, 1) == RA::None);
         CHECK(m2.reserved() == false);
+    }
+    // === v0.19.1 ===
+    // --- Edge-aware reserve: the bar may dock to ANY edge (Jackson's
+    //     bar lives at the BOTTOM; v0.18/18.1 reserved the top only).
+    //     Same machine, same hysteresis, judged per registered edge.
+    {
+        using RA = ReserveAction;
+        using RE = ReserveEdge;
+        const IntRect mon{0, 0, 1920, 1080};
+        const IntRect barTop{0, 0, 1920, 120};
+        const IntRect barBottom{0, 960, 1920, 120};
+        const IntRect barLeft{0, 100, 120, 800};
+        const IntRect barRight{1800, 100, 120, 800};
+        auto gapsFor = [](int top, int bottom, int left, int right) {
+            return EdgeGaps{ top, bottom, left, right };
+        };
+        // Gaps as the caller computes them for each docked bar (a
+        // full-width bar is also flush with left/right — value 960 etc.
+        // is the far-edge distance on the strip axis).
+        const EdgeGaps gTop = gapsFor(0, 960, 0, 0);
+        const EdgeGaps gBottom = gapsFor(960, 0, 0, 0);
+        const EdgeGaps gLeft = gapsFor(100, 180, 0, 1800);
+        const EdgeGaps gRight = gapsFor(100, 180, 1800, 0);
+
+        // stripRect: the full edge strip, flush on each edge.
+        CHECK(ReserveMachine::stripRect(RE::Top, barTop, mon) == (IntRect{0, 0, 1920, 120}));
+        CHECK(ReserveMachine::stripRect(RE::Bottom, barBottom, mon) == (IntRect{0, 960, 1920, 120}));
+        CHECK(ReserveMachine::stripRect(RE::Left, barLeft, mon) == (IntRect{0, 0, 120, 1080}));
+        CHECK(ReserveMachine::stripRect(RE::Right, barRight, mon) == (IntRect{1800, 0, 120, 1080}));
+        // Floating inside the dead zone, the strip still reaches the
+        // bar's far edge (thickness = gap + bar size).
+        CHECK(ReserveMachine::stripRect(RE::Top, IntRect{0, 5, 1920, 120}, mon) == (IntRect{0, 0, 1920, 125}));
+        CHECK(ReserveMachine::stripRect(RE::Bottom, IntRect{0, 955, 1920, 120}, mon) == (IntRect{0, 955, 1920, 125}));
+
+        // BOTTOM docking (Jackson's actual layout).
+        ReserveMachine mb;
+        CHECK(mb.update(true, gapsFor(960, 5, 0, 0), barBottom, mon, 1) == RA::None);   // dead zone does not dock
+        CHECK(mb.update(true, gBottom, barBottom, mon, 1) == RA::Register);
+        CHECK(mb.reserved() == true);
+        CHECK(mb.edge() == RE::Bottom);
+        CHECK(mb.requestedRect() == (IntRect{0, 960, 1920, 120}));
+        CHECK(mb.update(true, gBottom, barBottom, mon, 1) == RA::None);                  // repeats are silent
+        CHECK(mb.update(true, gapsFor(955, 5, 0, 0), barBottom, mon, 1) == RA::None);    // dead-zone wobble held
+        // Bar grows taller while bottom-docked: exactly one Update,
+        // and the requested strip follows the bar's new top edge.
+        const IntRect barBottomTall{0, 920, 1920, 160};
+        CHECK(mb.update(true, gapsFor(920, 0, 0, 0), barBottomTall, mon, 1) == RA::Update);
+        CHECK(mb.requestedRect() == (IntRect{0, 920, 1920, 160}));
+        CHECK(mb.update(true, gapsFor(920, 0, 0, 0), barBottomTall, mon, 1) == RA::None);
+        // Dragged clear of the bottom (past 8 px, no other edge near):
+        // Release, exactly once.
+        CHECK(mb.update(true, gapsFor(900, 60, 60, 60), barBottomTall, mon, 1) == RA::Release);
+        CHECK(mb.reserved() == false);
+
+        // LEFT and RIGHT docking.
+        ReserveMachine ml;
+        CHECK(ml.update(true, gLeft, barLeft, mon, 1) == RA::Register);
+        CHECK(ml.edge() == RE::Left);
+        CHECK(ml.requestedRect() == (IntRect{0, 0, 120, 1080}));
+        CHECK(ml.update(false, gLeft, barLeft, mon, 1) == RA::Release);  // toggle-off from a side edge
+        CHECK(ml.update(false, gLeft, barLeft, mon, 1) == RA::None);
+        ReserveMachine mr;
+        CHECK(mr.update(true, gRight, barRight, mon, 1) == RA::Register);
+        CHECK(mr.edge() == RE::Right);
+        CHECK(mr.requestedRect() == (IntRect{1800, 0, 120, 1080}));
+
+        // Nearest edge wins when several are plausible; orientation
+        // breaks the flush-corner ties (wide bar -> its top/bottom).
+        ReserveMachine mn;
+        CHECK(mn.update(true, gapsFor(30, 0, 400, 400), barBottom, mon, 1) == RA::Register);
+        CHECK(mn.edge() == RE::Bottom);
+        ReserveMachine mt;
+        CHECK(mt.update(true, gTop, barTop, mon, 1) == RA::Register);
+        CHECK(mt.edge() == RE::Top);   // NOT Left/Right, though a full-width bar is flush there too
+        // A tall bar flush with the top-left corner is a LEFT bar.
+        ReserveMachine mc;
+        const IntRect barTallLeft{0, 0, 120, 1080};
+        CHECK(mc.update(true, gapsFor(0, 0, 0, 1800), barTallLeft, mon, 1) == RA::Register);
+        CHECK(mc.edge() == RE::Left);
+
+        // EDGE SWITCH: bottom-docked bar dragged straight to the top
+        // edge — one Switch (the caller performs exactly one Release
+        // of the old edge + one Register of the new), then silence.
+        ReserveMachine ms;
+        CHECK(ms.update(true, gBottom, barBottom, mon, 1) == RA::Register);
+        CHECK(ms.update(true, gTop, barTop, mon, 1) == RA::Switch);
+        CHECK(ms.reserved() == true);
+        CHECK(ms.edge() == RE::Top);
+        CHECK(ms.requestedRect() == (IntRect{0, 0, 1920, 120}));
+        CHECK(ms.update(true, gTop, barTop, mon, 1) == RA::None);
+        CHECK(ms.update(true, gTop, barTop, mon, 1) == RA::None);
+        CHECK(ms.update(false, gTop, barTop, mon, 1) == RA::Release);
+        CHECK(ms.update(false, gTop, barTop, mon, 1) == RA::None);
+    }
+    // --- arrangeFit on the other three edges (the Top outcomes are
+    //     graded by the v0.18 block above; the 3-arg form IS Top).
+    {
+        using RE = ReserveEdge;
+        const IntRect M{0, 0, 1920, 1080};
+        CHECK(arrangeFit({100, 300, 800, 600}, M, 170) == arrangeFit({100, 300, 800, 600}, M, RE::Top, 170));
+        // BOTTOM strip 120 -> free {0,0,1920,960}.
+        CHECK(arrangeFit({100, 300, 800, 600}, M, RE::Bottom, 120) == (IntRect{100, 300, 800, 600})); // already clear
+        auto bb = arrangeFit({100, 1000, 800, 100}, M, RE::Bottom, 120);
+        CHECK(bb.y == 860 && bb.bottom() == 960);                                                     // poking under: pulled up
+        auto bt = arrangeFit({0, 0, 800, 1200}, M, RE::Bottom, 120);
+        CHECK(bt.h == 960 && bt.y == 0);                                                              // taller than free: capped
+        CHECK(arrangeFit({0, 0, 1920, 960}, M, RE::Bottom, 120) == (IntRect{0, 0, 1920, 960}));        // exact free area
+        CHECK(arrangeFit({100, 50, 800, 600}, M, RE::Bottom, 5000) == (IntRect{100, 50, 800, 600}));   // strip overflow: untouched
+        // LEFT strip 120 -> free {120,0,1800,1080}.
+        auto lf = arrangeFit({50, 100, 800, 600}, M, RE::Left, 120);
+        CHECK(lf.x == 120 && lf.w == 800);                                                            // poking under: pushed right
+        CHECK(arrangeFit({300, 100, 800, 600}, M, RE::Left, 120) == (IntRect{300, 100, 800, 600}));   // already clear
+        auto lw = arrangeFit({0, 0, 2500, 600}, M, RE::Left, 120);
+        CHECK(lw.w == 1800 && lw.x == 120);                                                           // wider than free: capped
+        // RIGHT strip 120 -> free {0,0,1800,1080}.
+        auto rt = arrangeFit({1500, 100, 800, 600}, M, RE::Right, 120);
+        CHECK(rt.x == 1000 && rt.right() == 1800);                                                    // poking under: pulled left
+        CHECK(arrangeFit({100, 100, 800, 600}, M, RE::Right, 120) == (IntRect{100, 100, 800, 600}));  // already clear
+        // Second monitor at negative coordinates, bottom edge.
+        const IntRect M3{-1920, 0, 1920, 1080};
+        auto m3 = arrangeFit({-1900, 1000, 1000, 100}, M3, RE::Bottom, 120);
+        CHECK(m3.x == -1900 && m3.bottom() == 960);
     }
     // === v0.19 ===
     // --- SemVer (the updater's version compare): NUMERIC ordering —
