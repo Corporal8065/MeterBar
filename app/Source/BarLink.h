@@ -11,7 +11,11 @@
 // Behaviour, driven by a 30 Hz timer owned here:
 //  - publishes own slot every tick (heartbeat, rect, linked, docked
 //    edge, background packet — the background only re-stamps bgSeq
-//    when it actually changed, so adoption cannot ping-pong);
+//    on an actual value change, per the core's bg sync decisions
+//    (meterbar/BarLink.hpp, v0.2.1): adopted values count as the
+//    adopter's published values, so adoption cannot echo/ping-pong,
+//    and adoption is evaluated BEFORE the drag-follow section so a
+//    peer's drag can no longer starve it);
 //  - notifyLocalGeometry() (the host's window moved/resized feed):
 //    when LINKED and no foreign drag is live, this app leads — a
 //    fresh drag session (seq + stamp + start rect) others follow;
@@ -85,9 +89,12 @@ public:
         lastRect_ = mine.rect;
     }
 
-    // The host's settings-changed feed: re-stamp the background if it
-    // changed (the timer also polls this, so hosts may skip calling).
-    void notifyLocalSettings() { publishBg(true); }
+    // The host's settings-changed feed: flush a real background change
+    // now (the timer also polls this, so hosts may skip calling).
+    // v0.2.1: no force flag — publishing is gated on an actual value
+    // change by the core rule; the v0.2.0 force path bumped bgSeq on
+    // EVERY settings interaction, changed background or not.
+    void notifyLocalSettings() { publishBg(); }
 
 private:
     static long long nowMs() { return (long long)juce::Time::getMillisecondCounterHiRes(); }
@@ -98,7 +105,7 @@ private:
     void timerCallback() override {
         if (!shared_ || !getBounds) return;
         const long long now = nowMs();
-        publishBg(false);
+        publishBg();
         meterbar::LinkShared snap;
         if (!readShared(snap)) return;
         auto r = getBounds();
@@ -114,6 +121,14 @@ private:
         lastRect_ = mine.rect;
         if (!mine.linked) return;
 
+        // --- adopt a changed background from any linked peer ---
+        // (core decision; runs BEFORE the follow section — the v0.2.0
+        // order let a live peer drag postpone adoption indefinitely)
+        {
+            meterbar::BgPacket pkt;
+            if (meterbar::bgAdoption(snap, appId_, bgSync_, now, pkt) && applyBg)
+                applyBg(Bg{ pkt.style, pkt.opacityPct / 100.0f });
+        }
         // --- follow a live foreign drag ---
         const meterbar::LinkSlot* leader = nullptr;
         for (auto& s : snap.slots)
@@ -148,14 +163,6 @@ private:
                 if (!sameRect(target, mine.rect)) applyRemote(target);
             }
         }
-        // --- adopt a changed background from any linked peer ---
-        for (auto& s : snap.slots) {
-            if (s.appId < 0 || s.appId == appId_ || !s.linked || !meterbar::slotLive(s, now)) continue;
-            if (s.bgSeq != 0 && s.bgSeq != seenBgSeq_[(size_t)s.appId]) {
-                seenBgSeq_[(size_t)s.appId] = s.bgSeq;
-                if (applyBg) applyBg(Bg{ s.bgStyle, s.bgOpacityPct / 100.0f });
-            }
-        }
     }
 
     void applyRemote(meterbar::IntRect target) {
@@ -163,11 +170,15 @@ private:
         if (setBounds) setBounds(toJuce(target));
     }
 
-    void publishBg(bool force) {
+    void publishBg() {
         if (!shared_ || !getBg) return;
         auto bg = getBg();
         const int pct = (int)std::lround(bg.opacity * 100.0f);
-        if (!force && bg.style == lastBgStyle_ && pct == lastBgPct_) return;
+        // Core gate: publish ONLY a value this app has not already
+        // published or adopted (adopted values are recorded in
+        // bgSync_ by bgAdoption, so an adoption is never re-published
+        // as a local change — the v0.2.0 echo).
+        if (!meterbar::bgIsLocalChange(bgSync_, bg.style, pct)) return;
         meterbar::LinkShared snap;
         if (!readShared(snap)) return;
         meterbar::LinkSlot mine = snap.slots[(size_t)appId_];
@@ -177,7 +188,7 @@ private:
         mine.bgOpacityPct = pct;
         mine.bgSeq += 1;
         writeSlot(mine);
-        lastBgStyle_ = bg.style; lastBgPct_ = pct;
+        bgSync_.publishedStyle = bg.style; bgSync_.publishedPct = pct;
     }
 
     // --- shared-memory plumbing ---
@@ -236,6 +247,5 @@ private:
     unsigned followSeq_ = 0, settledSeq_ = 0;
     meterbar::IntRect followOwnStart_{}, followLeaderStart_{};
     std::tuple<int, int, int, int, int, int> dockKey_{ -1, -1, 0, 0, 0, 0 };
-    unsigned seenBgSeq_[3] = { 0, 0, 0 };
-    int lastBgStyle_ = -999, lastBgPct_ = -999;
+    meterbar::BgSyncState bgSync_; // v0.2.1: publish/adopt bookkeeping (core decisions)
 };

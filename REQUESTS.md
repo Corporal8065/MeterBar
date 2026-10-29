@@ -4,6 +4,31 @@ Verification rule (Jackson, 2026-10-29): every item is DONE only with
 proof — the full DSP suite green after the change, new checks for new
 behaviour, and errors recorded here with their actual text, never hidden.
 
+## Landed on main 2026-10-29 (SessionBar v0.2.1 fix round — no MeterBar bump/tag tonight; releases tomorrow)
+
+Shared-core corrections from Jackson's SessionBar field test, applied
+identically in all three repos:
+
+- **Group-dock cross-axis alignment:** `groupDockRect` moved a
+  stacked follower along the dock axis only, so a bar stacked under
+  a sideways-moved peer kept its own x and no longer sat under it.
+  Stacking now aligns left edges (top/bottom stacks) / top edges
+  (left/right stacks). New core checks pin it.
+- **Background sync hardening:** the publish/adopt decisions moved
+  into the pure core (`BgSyncState`, `bgIsLocalChange`,
+  `bgAdoption`) with tests, and the app client was rewired onto
+  them. Defects fixed from the v0.2.0 client: a follower echoing an
+  adopted background back as its own change (bgSeq bump), the
+  settings feed force-publishing (bgSeq bump) on every interaction
+  whether or not the background changed, and adoption being
+  postponed indefinitely behind a live peer drag. **Plus a
+  MeterBar-only host defect: MeterBar never called
+  `notifyLocalSettings()` — its background publishes rode on the
+  link client's 30 Hz poll alone. The settings onChanged now calls
+  it, like the other two bars.** Core suite: 926 → 949 checks,
+  0 failures. The live two-bar field test is still the end-to-end
+  proof (Link must be ON in both bars).
+
 ## v0.20.0 (2026-10-29)
 
 - (i) **Exact spectrum frequency mapping everywhere — DONE.** The

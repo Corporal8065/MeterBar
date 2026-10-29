@@ -15,7 +15,12 @@ namespace meterbar {
 //    the leader's delta from the drag-session start (offsets and
 //    sizes preserved — groupDockRect handles the docked case).
 //  - GROUP DOCK: a follower whose linked peer is reserve-docked at
-//    an edge stacks against the peer's free side, so top/bottom
+//    an edge stacks against the peer's free side AND aligns to the
+//    peer on the cross axis (left edges aligned when stacked
+//    vertically, top edges when stacked horizontally — v0.2.1: the
+//    v0.2.0 geometry moved the follower along the dock axis only, so
+//    a group stacked under a peer that had been moved sideways kept
+//    its own x and no longer sat under the peer), so top/bottom
 //    docking treats the linked group as one bar.
 //  - SHARED BACKGROUND: each slot carries a bgSeq-stamped background
 //    (family style ordinal + opacity); a change in any linked bar is
@@ -87,16 +92,76 @@ inline IntRect followRect(IntRect ownStart, IntRect leaderStart, IntRect leaderN
 // A follower's rect when stacking against a docked leader: directly
 // against the leader's free side along the dock axis (Top dock ->
 // follower below the leader; Bottom -> above; Left -> right of;
-// Right -> left of). The other axis is untouched.
+// Right -> left of), and ALIGNED to the leader on the cross axis:
+// left edges aligned for a vertical stack, top edges for a
+// horizontal one (v0.2.1 field fix — see the header note).
 using DockArg = ReserveEdge; // this app's groupDockRect argument type (SessionBar uses int)
 inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge) {
     IntRect out = follower;
     switch (edge) {
-        case ReserveEdge::Top:    out.y = leader.bottom(); break;
-        case ReserveEdge::Bottom: out.y = leader.y - follower.h; break;
-        case ReserveEdge::Left:   out.x = leader.right(); break;
-        case ReserveEdge::Right:  out.x = leader.x - follower.w; break;
+        case ReserveEdge::Top:    out.y = leader.bottom(); out.x = leader.x; break;
+        case ReserveEdge::Bottom: out.y = leader.y - follower.h; out.x = leader.x; break;
+        case ReserveEdge::Left:   out.x = leader.right(); out.y = leader.y; break;
+        case ReserveEdge::Right:  out.x = leader.x - follower.w; out.y = leader.y; break;
     }
     return out;
+}
+
+// ------------------------------------------------------------------
+// BACKGROUND SYNC DECISIONS (v0.2.1) — the publish/adopt rules for the
+// shared background, as pure functions over a per-client state block.
+// They live here (not in the JUCE client) so the whole propagation
+// policy is unit-tested; the client only moves bytes and applies the
+// answers. Field background for this extraction: the v0.2.0 client
+// kept these rules inline and untested, and the field test showed
+// background changes not propagating. The rules below fix the three
+// defects that review of the v0.2.0 client proved from the code:
+//
+//  1. ECHO: a follower that adopted a peer's background then
+//     re-published those same values as its OWN change (its publish
+//     gate compared against its pre-adoption values), bumping its
+//     bgSeq and making the originator adopt its own values back.
+//     Rule: adopted values ARE the adopter's published values
+//     (bgAdoption records them in `published*`), so the publish gate
+//     stays shut for them.
+//  2. SEQ INFLATION: the settings feed force-published on EVERY
+//     settings interaction, bumping bgSeq even when the background
+//     had not changed. Rule: publishing is gated on an actual value
+//     change (bgIsLocalChange) — nothing else may bump bgSeq.
+//  3. LAST-WRITER bookkeeping across several peers changing at once:
+//     every unseen live+linked peer seq is marked seen in one scan,
+//     and the LAST such peer in slot order supplies the values (the
+//     v0.2.0 loop's effective outcome, now pinned by tests).
+struct BgPacket {
+    int style = 0;      // family background-style ordinal (LinkSlot::bgStyle)
+    int opacityPct = 100;
+};
+struct BgSyncState {
+    int publishedStyle = -999, publishedPct = -999; // values this app last published OR adopted (-999 = none yet)
+    unsigned seenSeq[3] = { 0, 0, 0 };              // newest bgSeq consumed per app slot
+};
+// True when (style, pct) differ from what this app last published or
+// adopted — the ONLY condition under which bgSeq may be bumped.
+inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct) {
+    return style != s.publishedStyle || pct != s.publishedPct;
+}
+// Scan the shared block for a background this app has not consumed.
+// Every live, linked peer with an unseen non-zero bgSeq is marked
+// seen; when at least one qualifies, the LAST one in slot order wins:
+// returns true and fills `out`, and records the adopted values as
+// this app's published values (the echo rule). Peers that are
+// unlinked, stale, empty, or self never qualify.
+inline bool bgAdoption(const LinkShared& sh, int selfApp, BgSyncState& s, long long nowMs, BgPacket& out) {
+    bool found = false;
+    for (int i = 0; i < 3; ++i) {
+        const LinkSlot& p = sh.slots[i];
+        if (p.appId < 0 || p.appId == selfApp || !p.linked || !slotLive(p, nowMs)) continue;
+        if (p.bgSeq == 0 || p.bgSeq == s.seenSeq[i]) continue;
+        s.seenSeq[i] = p.bgSeq;
+        out = BgPacket{ p.bgStyle, p.bgOpacityPct };
+        found = true;
+    }
+    if (found) { s.publishedStyle = out.style; s.publishedPct = out.opacityPct; }
+    return found;
 }
 } // namespace meterbar

@@ -22,9 +22,11 @@ MainComponent::MainComponent() {
     }
     for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
                      &reserveBtn, &arrangeBtn, &restoreBtn, &linkBtn }) addAndMakeVisible(b);
-    // v0.20.0 (k): family LINK toggle + client wiring. The client's own
-    // 30 Hz timer polls the background packet, so no settings feed is
-    // needed here; geometry leads via notifyWindowGeometryChanged.
+    // v0.20.0 (k): family LINK toggle + client wiring. Geometry leads
+    // via notifyWindowGeometryChanged. v0.2.1: the settings feed is
+    // wired too (see onChanged below) — MeterBar was the only bar not
+    // calling notifyLocalSettings, leaving its background publishes to
+    // the client's 30 Hz poll alone; the poll remains as backstop.
     linkBtn.setClickingTogglesState(true);
     linkBtn.setToggleState(engine.state.linkEnabled, juce::dontSendNotification);
     linkBtn.setTooltip("Link: snap, drag, dock and share the background with TickerBar / SessionBar when their Link is on too");
@@ -80,7 +82,7 @@ MainComponent::MainComponent() {
     settingsWin = std::make_unique<SettingsWindow>();
     settingsWin->content.st = &engine.state;
     settingsWin->content.deviceManager = &engine.deviceManager;
-    settingsWin->content.onChanged = [this]{ applyTheme(); layoutModules(); repaint(); syncScreenSpace(); };
+    settingsWin->content.onChanged = [this]{ applyTheme(); layoutModules(); repaint(); syncScreenSpace(); linkClient_.notifyLocalSettings(); }; // v0.2.1: bg publish feed (was missing)
     settingsWin->content.onSourceChanged = [this]{ engine.applySource(); };
     settingsWin->content.onFpsChanged = [this]{ applyFps(); };
     settingsWin->content.onArrange = [this]{ doArrangeWindows(); };   // v0.18: Settings > Window buttons

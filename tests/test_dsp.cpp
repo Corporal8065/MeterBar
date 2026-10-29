@@ -816,9 +816,70 @@ int main() {
     CHECK(groupDockRect(lead, fol, ReserveEdge::Left).x == 800);
     IntRect leadR{ 1120, 0, 800, 40 };
     CHECK(groupDockRect(leadR, fol, ReserveEdge::Right).x == 1120 - 600);
+    // v0.2.1: the cross axis ALIGNS to the leader (field fix — a
+    // follower stacked under a sideways-moved peer used to keep its
+    // own x and no longer sat under the peer). Vertical stacks align
+    // left edges; horizontal stacks align top edges.
+    IntRect leadM{ 350, 0, 800, 40 };
+    CHECK(groupDockRect(leadM, fol, ReserveEdge::Top).x == 350);
+    IntRect leadMB{ 350, 1040, 800, 40 };
+    auto gdB = groupDockRect(leadMB, fol, ReserveEdge::Bottom);
+    CHECK(gdB.y == 1040 - 36 && gdB.x == 350);
+    IntRect leadL{ 0, 120, 40, 800 };
+    auto gdL = groupDockRect(leadL, fol, ReserveEdge::Left);
+    CHECK(gdL.x == 40 && gdL.y == 120);
+    IntRect leadRM{ 1880, 120, 40, 800 };
+    auto gdR = groupDockRect(leadRM, fol, ReserveEdge::Right);
+    CHECK(gdR.x == 1880 - 600 && gdR.y == 120);
+    // size is never touched by stacking
+    CHECK(gdB.w == 600 && gdB.h == 36);
     // drag liveness is staleness-based
     LinkSlot d; d.dragSeq = 3; d.dragStampMs = now;
     CHECK(dragLive(d, now)); CHECK(!dragLive(d, now + kLeaderStaleMs + 1));
+}
+// ---- Background sync decisions (v0.2.1, item k hardening) ----
+{
+    using namespace meterbar;
+    const long long now = 200000;
+    BgSyncState sync;
+    // first sight of our own background is a change (nothing published yet)
+    CHECK(bgIsLocalChange(sync, 1, 100));
+    sync.publishedStyle = 1; sync.publishedPct = 100;
+    CHECK(!bgIsLocalChange(sync, 1, 100));
+    CHECK(bgIsLocalChange(sync, 1, 55));  // opacity moved
+    CHECK(bgIsLocalChange(sync, 2, 100)); // style moved
+    // a peer publishes a new background: adopted once
+    LinkShared sh;
+    auto& peer = sh.slots[1]; peer.appId = 1; peer.linked = 1; peer.heartbeatMs = now;
+    peer.bgSeq = 7; peer.bgStyle = 2; peer.bgOpacityPct = 40;
+    BgPacket out;
+    CHECK(bgAdoption(sh, 0, sync, now, out));
+    CHECK(out.style == 2 && out.opacityPct == 40);
+    // the adopted values are now OUR published values: no echo publish
+    CHECK(!bgIsLocalChange(sync, 2, 40));
+    // the same seq is never adopted twice
+    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    // a genuinely new seq adopts again
+    peer.bgSeq = 8; peer.bgStyle = 0; peer.bgOpacityPct = 90;
+    CHECK(bgAdoption(sh, 0, sync, now, out));
+    CHECK(out.style == 0 && out.opacityPct == 90);
+    // unlinked peers, stale peers, seq 0 and self never supply a background
+    peer.linked = 0; peer.bgSeq = 9;
+    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    peer.linked = 1; peer.heartbeatMs = now - kPeerStaleMs - 1;
+    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    peer.heartbeatMs = now; peer.bgSeq = 0;
+    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    peer.bgSeq = 11; peer.appId = 0; // the peer slot carries OUR id: self, ignored
+    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    // two peers changed at once: the LAST in slot order wins, both are marked seen
+    LinkShared sh2; BgSyncState sync2;
+    auto& p1 = sh2.slots[1]; p1.appId = 1; p1.linked = 1; p1.heartbeatMs = now; p1.bgSeq = 3; p1.bgStyle = 1; p1.bgOpacityPct = 70;
+    auto& p2 = sh2.slots[2]; p2.appId = 2; p2.linked = 1; p2.heartbeatMs = now; p2.bgSeq = 4; p2.bgStyle = 2; p2.bgOpacityPct = 30;
+    CHECK(bgAdoption(sh2, 0, sync2, now, out));
+    CHECK(out.style == 2 && out.opacityPct == 30);
+    CHECK(sync2.seenSeq[1] == 3 && sync2.seenSeq[2] == 4);
+    CHECK(!bgAdoption(sh2, 0, sync2, now, out));
 }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
