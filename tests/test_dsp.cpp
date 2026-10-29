@@ -14,6 +14,7 @@
 #include "../dsp/include/meterbar/Arrange.hpp"
 #include "../dsp/include/meterbar/ReserveState.hpp"
 #include "../dsp/include/meterbar/SemVer.hpp"
+#include "../dsp/include/meterbar/ReleaseParse.hpp"
 #include "../dsp/include/meterbar/State.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
@@ -623,6 +624,47 @@ int main() {
         CHECK(compareSemVer(SemVer{0, 19, 0}, SemVer{0, 19, 0}) == 0);
         CHECK(compareSemVer(SemVer{0, 18, 1}, SemVer{0, 19, 0}) == -1);
         CHECK(compareSemVer(SemVer{2, 0, 0}, SemVer{1, 9, 9}) == 1);
+    }
+    // === v0.19.2 ===
+    // --- ReleaseParse (the updater's GitHub-release field extraction):
+    //     tag, notes (fully unescaped), and ONLY the MeterBar-Setup.exe
+    //     asset's URL/size/digest — a neighbouring asset's fields must
+    //     never bleed into it.
+    {
+        const std::string doc = R"JSON({"url":"https://api.github.com/repos/x/y/releases/1","tag_name":"v0.20.0","name":"MeterBar v0.20.0","draft":false,"body":"Line one\nLine two with \"quotes\" and a \\ backslash.\n\n- bullet","assets":[{"url":"https://api.github.com/a/1","name":"notes.txt","size":12,"browser_download_url":"https://example.com/notes.txt"},{"url":"https://api.github.com/a/2","name":"MeterBar-Setup.exe","size":3456789,"digest":"sha256:0123abcdef","browser_download_url":"https://example.com/MeterBar-Setup.exe"}]})JSON";
+        ReleaseFields f;
+        CHECK(parseReleaseJson(doc, f));
+        CHECK(f.tag == "v0.20.0");
+        CHECK(f.notes == std::string("Line one\nLine two with \"quotes\" and a \\ backslash.\n\n- bullet"));
+        CHECK(f.hasAsset);
+        CHECK(f.assetSize == 3456789);
+        CHECK(f.assetDigest == "sha256:0123abcdef");
+        CHECK(f.assetUrl == "https://example.com/MeterBar-Setup.exe"); // not notes.txt's URL
+        // body null (a release with no notes) parses, with empty notes:
+        ReleaseFields g;
+        CHECK(parseReleaseJson(R"JSON({"tag_name":"v1.0.0","body":null,"assets":[]})JSON", g));
+        CHECK(g.notes.empty() && !g.hasAsset);
+        // \u escapes become UTF-8 (é = U+00E9):
+        ReleaseFields h;
+        CHECK(parseReleaseJson(R"JSON({"tag_name":"v1.0.1","body":"caf\u00e9","assets":[]})JSON", h));
+        CHECK(h.notes == std::string("caf\xc3\xa9"));
+        // no usable tag -> no parse; garbage -> no parse:
+        ReleaseFields bad;
+        CHECK(!parseReleaseJson(R"JSON({"body":"x","assets":[]})JSON", bad));
+        CHECK(!parseReleaseJson("this is not json", bad));
+        CHECK(!parseReleaseJson("", bad));
+    }
+    // --- httpStatusBlocksAuth (the private-repo signal): GitHub shows
+    //     a private repo to unauthenticated callers as 401/403/404 —
+    //     anything else is a different kind of failure.
+    {
+        CHECK(httpStatusBlocksAuth(401));
+        CHECK(httpStatusBlocksAuth(403));
+        CHECK(httpStatusBlocksAuth(404));
+        CHECK(!httpStatusBlocksAuth(200));
+        CHECK(!httpStatusBlocksAuth(301));
+        CHECK(!httpStatusBlocksAuth(500));
+        CHECK(!httpStatusBlocksAuth(0));
     }
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -39,6 +39,12 @@ MainComponent::MainComponent() {
     quitBtn.onClick = [this]{ juce::JUCEApplication::getInstance()->systemRequestedQuit(); };
     pauseBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); engine.paused = !engine.paused.load(); pauseBtn.setButtonText(engine.paused ? "Resume" : "Pause"); };
     recBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleRecord(); };
+    // v0.19.2: the update indicator lives in the toolbar but starts
+    // hidden and stays hidden until a check actually finds a newer
+    // release — it is the (only) visible trace of the launch check.
+    addAndMakeVisible(updateBtn); updateBtn.setVisible(false);
+    updateBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop);
+        if (pendingRelease.ok && pendingRelease.newer) showUpdatePanel(pendingRelease); };
     // modules in display order
     auto add = [&](ModuleView::Kind k){ auto m = std::make_unique<ModuleView>(k); m->data = &frame; m->flexIndex = (int)modules.size(); addAndMakeVisible(m.get()); modules.push_back(std::move(m)); };
     add(ModuleView::Kind::Spectrogram); add(ModuleView::Kind::Waveform); add(ModuleView::Kind::Loudness);
@@ -65,6 +71,11 @@ MainComponent::MainComponent() {
     engine.applySource(); applyTheme(); applyFps();
     setSize(engine.state.windowW, engine.state.windowH);
     syncScreenSpace(); // v0.18: a preset loaded at startup may already ask for the reservation
+    // v0.19.2: silent background check on launch — non-blocking, no
+    // dialog. Up-to-date, offline, private-repo and error outcomes
+    // are all silent at launch; only a NEWER release surfaces, as
+    // the toolbar "Update!" indicator (see pollUpdater).
+    if (mbupdate::configured()) startUpdateCheck(true);
 }
 MainComponent::~MainComponent() { stopTimer(); screenSpace.release(); screenSpace.restore(); if (engine.isRecording()) engine.stopRecording(); }
 void MainComponent::applyTheme() {
@@ -80,6 +91,12 @@ void MainComponent::applyTheme() {
         b->setColour(juce::TextButton::textColourOffId, theme.accent);
         b->setColour(juce::TextButton::textColourOnId, theme.text);
     }
+    // v0.19.2: the update indicator is brand pink in every theme —
+    // it must read as "something new", not as another toolbar button.
+    updateBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffe04c89));
+    updateBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffe04c89));
+    updateBtn.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffffffff));
+    updateBtn.setColour(juce::TextButton::textColourOnId, juce::Colour(0xffffffff));
     if (debugWin) debugWin->setBackgroundColour(theme.panel);
     // v0.19: Settings does NOT follow the bar theme any more — it has a
     // fixed pink-dark palette of its own (Settings.h, settingsPalette).
@@ -281,11 +298,16 @@ void MainComponent::resized() {
         // order: Reserve | Arrange | Restore | Preset | Reposition ...).
         restoreBtn.setBounds(bar.removeFromRight(62)); arrangeBtn.setBounds(bar.removeFromRight(66));
         reserveBtn.setBounds(bar.removeFromRight(64));
+        // v0.19.2: the update indicator takes a slice of the leftover
+        // middle strip (where the hint label lives) — only while lit.
+        if (updateAvailable) { updateBtn.setBounds(bar.removeFromLeft(78)); updateBtn.setVisible(true); }
+        else updateBtn.setVisible(false);
         if (st.showRepositionHint) { hintLabel.setBounds(bar); hintLabel.setVisible(true); } else hintLabel.setVisible(false);
     } else {
         for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
                          &reserveBtn, &arrangeBtn, &restoreBtn }) b->setVisible(false);
         logoLabel.setVisible(false); versionLabel.setVisible(false); hintLabel.setVisible(false);
+        updateBtn.setVisible(false);
     }
     if (st.showToolbar) for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
                                          &reserveBtn, &arrangeBtn, &restoreBtn }) b->setVisible(true);
@@ -715,25 +737,38 @@ void MainComponent::showHamburgerMenu() {
 }
 
 // =====================================================================
-// v0.19 UPDATER — manual Check For Updates + the Update hand-off.
-// Feed: GitHub Releases of the repo named in UpdaterConfig.h. That
-// constant is EMPTY in the shipped v0.19 build (the repo does not
-// exist yet — it waits on Jackson's own GitHub login), so Check shows
-// the honest unconfigured message and makes no network request.
+// UPDATER — v0.19 built the feed + hand-off; v0.19.2 wires it to the
+// real repo (UpdaterConfig.h: Corporal8065/meterbar) and adds the
+// launch check, the release-notes panel and the private-repo state.
+//
+// One code path, two honest modes, decided by GitHub's answers:
+//  - Repo PUBLIC: check -> notes -> download -> verify -> install.
+//  - Repo PRIVATE (current state): the unauthenticated check gets
+//    401/403/404, and the UI presents the private-repo state with an
+//    "Open releases page" button instead of pretending to check.
+//    The app carries no token — see UpdaterConfig.h.
 // =====================================================================
+void MainComponent::startUpdateCheck(bool fromLaunch) {
+    if (updateCheckPending) return; // one check at a time, whoever asked
+    updateState = std::make_shared<mbupdate::SharedState>();
+    updateCheckPending = true;
+    updateCheckFromLaunch = fromLaunch;
+    mbupdate::checkLatestAsync(updateState, meterbar::kVersionString);
+}
 void MainComponent::checkForUpdates() {
     if (!mbupdate::configured()) {
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Updates",
             "MeterBar " + kVersion + " — updates are not configured yet.\n"
-            "This build has no update feed set (the GitHub repo for MeterBar\n"
-            "has not been created), so no check was performed.\n"
+            "This build has no update feed set, so no check was performed.\n"
             "You are on the version you built.");
         return;
     }
-    if (updateCheckPending) return; // a check is already in flight
-    updateState = std::make_shared<mbupdate::SharedState>();
-    updateCheckPending = true;
-    mbupdate::checkLatestAsync(updateState, meterbar::kVersionString);
+    if (updateCheckPending) {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Updates",
+            "An update check is already running — its result will appear when it finishes.");
+        return;
+    }
+    startUpdateCheck(false);
     juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Updates",
         "Checking GitHub for the latest MeterBar release...\n"
         "The result will pop up here when the check finishes.");
@@ -742,14 +777,39 @@ void MainComponent::pollUpdater() {
     // A finished background check: present its result exactly once.
     if (updateCheckPending && updateState && updateState->done.load(std::memory_order_acquire)) {
         updateCheckPending = false;
-        presentUpdateResult(updateState->result);
+        const bool wasLaunch = updateCheckFromLaunch;
+        updateCheckFromLaunch = false;
+        const auto r = updateState->result;
+        if (wasLaunch) {
+            // Launch checks are SILENT unless there is something to
+            // act on: up-to-date, offline, error and private-repo
+            // outcomes show nothing at all. A newer release lights
+            // the toolbar indicator — never a dialog at startup.
+            if (r.ok && r.newer) {
+                pendingRelease = r;
+                updateAvailable = true;
+                resized(); // lay out (and reveal) the indicator
+                repaint();
+            }
+        } else {
+            presentUpdateResult(r);
+        }
     }
     // A finished installer download: verify, hand off to Inno, quit.
     if (updateDownloadPending && updateDownload && updateDownload->isFinished()) {
         updateDownloadPending = false;
-        const bool dlOk = !updateDownload->hadError() && updateDownload->statusCode() == 200;
+        const int dlStatus = updateDownload->statusCode();
+        const bool dlOk = !updateDownload->hadError() && dlStatus == 200;
         updateDownload.reset();
         if (!dlOk) {
+            // v0.19.2: an auth-refused download (401/403/404 — e.g.
+            // the asset sits behind the private repo) gets the same
+            // private-repo state + browser fallback as the check.
+            if (meterbar::httpStatusBlocksAuth(dlStatus)) {
+                showPrivateRepoFallback("The installer download itself was refused (HTTP "
+                    + juce::String(dlStatus) + ") — the same private-repository limit as the check.");
+                return;
+            }
             juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Update",
                 "The update download did not complete.\n MeterBar has NOT been changed — you are still on " + kVersion + ".");
             return;
@@ -788,6 +848,12 @@ void MainComponent::pollUpdater() {
 }
 void MainComponent::presentUpdateResult(const mbupdate::ReleaseInfo& r) {
     pendingRelease = r; // the Update action (if offered) refers to this release
+    if (r.authBlocked) { // the private-repo state, before generic failure
+        showPrivateRepoFallback("MeterBar asked GitHub for the latest release, but GitHub "
+            "shows a private repository's releases only to signed-in users — and MeterBar "
+            "deliberately carries no sign-in token.");
+        return;
+    }
     if (!r.ok) {
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Updates",
             "Update check failed.\n" + r.error + "\nYou are still on MeterBar " + kVersion + ".");
@@ -798,19 +864,51 @@ void MainComponent::presentUpdateResult(const mbupdate::ReleaseInfo& r) {
             "You are up to date.\nMeterBar " + kVersion + " is the latest release (" + r.tag + ").");
         return;
     }
-    juce::String notes = r.notes.trim();
-    if (notes.length() > 600) notes = notes.substring(0, 600) + "...";
-    auto* w = new juce::AlertWindow("Update available", 
-        "MeterBar " + r.tag + " is available (you are on " + kVersion + ")."
-        + (notes.isNotEmpty() ? "\n\n" + notes : "")
-        + "\n\nUpdate now? MeterBar will download the installer, close,\n"
-          "install, and relaunch at the new version. Your presets and\n"
-          "settings are stored outside the app folder and are kept.",
+    updateAvailable = true; // the indicator stays lit behind the panel too
+    resized();
+    showUpdatePanel(r);
+}
+// The update panel (v0.19.2): version line on top, the release's
+// FULL notes in a scrollable read-only box, and the one action that
+// matters. Used by the manual flow and by the toolbar indicator the
+// launch check lights — same panel either way.
+void MainComponent::showUpdatePanel(const mbupdate::ReleaseInfo& r) {
+    auto* w = new juce::AlertWindow("Update available",
+        "MeterBar " + r.tag + " is available (you are on " + kVersion + ").\n"
+        "Release notes:",
         juce::AlertWindow::NoIcon);
-    w->addButton("Update", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    auto* notesBox = new juce::TextEditor();
+    notesBox->setMultiLine(true, true);
+    notesBox->setReadOnly(true);
+    notesBox->setScrollbarsShown(true);
+    notesBox->setCaretVisible(false);
+    notesBox->setText(r.notes.trim().isNotEmpty() ? r.notes
+                                                  : "(This release was published without notes.)", false);
+    notesBox->setSize(520, 190);
+    w->addCustomComponent(notesBox);
+    w->addTextBlock("\nDownload & install will close MeterBar, run the installer,\n"
+                    "and relaunch at the new version. Your presets and settings\n"
+                    "are stored outside the app folder and are kept.");
+    w->addButton("Download & install", 1, juce::KeyPress(juce::KeyPress::returnKey));
     w->addButton("Later", 0, juce::KeyPress(juce::KeyPress::escapeKey));
     w->enterModalState(true, juce::ModalCallbackFunction::create([this](int result) {
         if (result == 1) startUpdateDownload();
+    }), true);
+}
+// The private-repo state (v0.19.2): said plainly, never dressed up
+// as a check that "found nothing". One button out: the releases
+// page, in the browser where the user is signed in to GitHub.
+void MainComponent::showPrivateRepoFallback(const juce::String& detail) {
+    auto* w = new juce::AlertWindow("Updates",
+        "Automatic update check isn't available while the repository is private.\n\n"
+        + detail + "\n\n"
+        "You are still on MeterBar " + kVersion + ". Releases can be downloaded "
+        "from the releases page in your browser instead:",
+        juce::AlertWindow::InfoIcon);
+    w->addButton("Open releases page", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    w->addButton("Close", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    w->enterModalState(true, juce::ModalCallbackFunction::create([](int result) {
+        if (result == 1) juce::URL(mbupdate::releasesPageUrl()).launchInDefaultBrowser();
     }), true);
 }
 void MainComponent::startUpdateDownload() {

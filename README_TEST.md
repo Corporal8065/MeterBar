@@ -11,6 +11,18 @@ and send back (a) a screenshot and (b) one line per slice: works / broken + what
 3. If it fails, send me a screenshot of the *first* red error — not the whole log.
 4. Success = `build-app\app\MeterBar_artefacts\Release\MeterBar.exe` exists. Double-click it.
 
+## v0.19.2 — The updater is wired to the real repo (do these FIRST, please)
+
+The updater now points at the real GitHub repo (**Corporal8065/meterbar**), checks **on launch** as well as from the menu, and has a proper update panel: version + the release's full notes + a **Download & install** button. **Read this before testing, because the repo is PRIVATE:** GitHub does not show a private repo's releases to an app that isn't signed in, and MeterBar deliberately carries **no** sign-in token — so right now the honest outcome of a check is the **private-repo message**, not a version comparison. That message is the feature working as designed, not a failure. If the repo is ever made public, this same build does the whole flow (check → notes → download → install → relaunch) with no update needed.
+
+- [ ] **Launch check is silent:** start MeterBar with the internet on. Expect **no popup, no dialog, nothing** — launch checks never interrupt. (While the repo is private the launch check lands in the private-repo state and stays quiet, exactly as designed; a found update — public-repo future — would instead light a pink **Update!** button in the toolbar.)
+- [ ] **Manual check, private-repo outcome:** **Menu → Check For Updates** → after a few seconds you should get: *"Automatic update check isn't available while the repository is private…"* with **Open releases page** and **Close** buttons.
+- [ ] **The fallback button works:** click **Open releases page** → your browser opens **github.com/Corporal8065/meterbar/releases** (you're signed in there, so the page loads; the app itself never sees your login).
+- [ ] **Version reads 0.19.2 everywhere:** the toolbar version label, **Menu → Help → About**, and the splash screen all say **v0.19.2**.
+- [ ] **Deferred test (notes + install):** the release-notes panel and Download & install can't be exercised until the repo is public (or a release is visible to the app) — when that day comes: Check For Updates on an older build → panel shows the new version **and its release notes** → **Download & install** → MeterBar closes, the installer runs silently, and MeterBar relaunches at the new version with your presets/settings intact. Nothing to do on this until then.
+
+Everything else is unchanged: v0.19.1's edge-aware Reserve, the pink Settings, the flicker fix. If you haven't run the v0.19.1 Reserve retest below yet, it is still owed.
+
 ## v0.19.1 — Reserve now works on YOUR edge: the bottom (do these FIRST, please)
 
 **What was wrong:** Reserve only ever claimed the **top** edge of the screen. That's how it was first scoped — but your bar lives docked at the **bottom**, so in your actual layout Reserve quietly did nothing: maximized windows still slid underneath the bar. **v0.19.1 makes Reserve follow the bar**: whichever edge of the monitor the bar is docked to — bottom, top, or either side — is the edge that gets reserved, MiniMeters-style. Everything from v0.19 (pink Settings, version 0.19.1 everywhere, the updater skeleton) is unchanged, and the v0.18.1 flicker fix is fully in force — the reservation still only changes on real events, never on a timer.

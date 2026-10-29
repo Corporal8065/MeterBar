@@ -1460,3 +1460,97 @@ version line to 0.19.1).
   a registration, nothing retries until the next real
   geometry/toggle event (retry loops are the bug class that caused
   the flicker).
+
+## 2026-10-28 — v0.19.2: updater wired to Corporal8065/meterbar (launch check, release notes, private-repo fallback)
+
+Jackson's expansion of the v0.19 updater scope, in his words via the
+main chat: check on launch AND a manual button -> version + release
+notes shown in-app -> "Download & install" -> fetch, install,
+relaunch. Plus the private-repo handling agreed the same evening.
+
+### What changed
+- **Version 0.19.1 -> 0.19.2**, single source as always: the root
+  CMakeLists `project(VERSION)` line only. The generated
+  MeterBarVersion.h regenerates to 0.19.2; the exe's embedded version
+  string is "0.19.2" (verified with `strings` on the built ELF — an
+  early build attempt in this session produced a stale 0.19.1 binary
+  whose splash still read v0.19.1; that binary was discarded and the
+  rebuild verified before anything else proceeded). The Inno
+  fallback literal in MeterBar.iss was bumped to 0.19.2 per that
+  file's own instruction (build-release.bat / CI pass the real
+  version via /DMyAppVersion, so the fallback only serves a bare
+  manual ISCC run). No other hard-coded version literals exist in
+  app code (grep-verified; remaining "0.19.x" strings in the tree
+  are historical comments and SemVer test data).
+- **UpdaterConfig.h**: kGitHubRepo = "Corporal8065/meterbar" (was
+  empty). The header comment was rewritten to state the private-repo
+  reality plainly (see "Mode verification" below).
+- **Check on launch**: MainComponent's constructor starts the same
+  background worker check, flagged as a launch check. pollUpdater
+  presents launch results NON-modally and selectively: up-to-date,
+  offline, error and private-repo outcomes are completely silent at
+  launch; a newer release lights a pink "Update!" indicator button
+  in the toolbar (brand pink #E04C89 in every theme), and clicking
+  it opens the same update panel as the manual flow. No dialog ever
+  appears at startup.
+- **Release-notes panel**: presentUpdateResult's newer-release path
+  now opens showUpdatePanel — version line, the release's FULL notes
+  in a scrollable read-only text box (no more 600-char truncation),
+  "Download & install" / "Later". The download -> size check ->
+  SHA-256 check -> silent Inno launch -> quit sequence is the
+  unchanged v0.19 machinery.
+- **Private-repo fallback (first-class state)**: ReleaseInfo gained
+  `authBlocked` + `httpStatus`. The check worker captures the HTTP
+  status via JUCE's InputStreamOptions::withStatusCode. 401/403/404
+  (GitHub's answer to unauthenticated calls on a private repo) sets
+  authBlocked; the manual flow then shows "Automatic update check
+  isn't available while the repository is private." with an "Open
+  releases page" button that opens
+  https://github.com/Corporal8065/meterbar/releases in the default
+  browser. The same state fires if a release IS visible but the
+  installer download is refused with 401/403/404. No token or
+  credential exists anywhere in the app. One code path: if the repo
+  is made public, the identical build performs the full flow.
+- **Release-JSON parsing moved into the DSP core**:
+  dsp/include/meterbar/ReleaseParse.hpp (pure std, SemVer-pattern)
+  extracts tag_name, body and ONLY the MeterBar-Setup.exe asset's
+  URL/size/digest from the API response, with full JSON string
+  unescaping. Updater.h now consumes it instead of juce::JSON, which
+  is what makes the notes extraction unit-testable.
+- Untouched, deliberately: ScreenSpace.cpp/.h, ReserveState.hpp,
+  Settings.h (reserve code and the pink Settings palette are
+  byte-identical to v0.19.1 — verified by empty `git diff` on those
+  paths). build.bat byte-identical (md5 5f5e724b5adf6455d88a6be2a440f611);
+  build-release.bat untouched (it reads the version from CMakeLists).
+
+### Mode verification — what was and was NOT proven (honest statement)
+- **Neither live mode was verified against GitHub from this VM.**
+  The repo is private and this VM holds no GitHub credential for
+  it, so a live check here cannot see the real repo's releases, and
+  no claim is made that the private-mode check "works" against the
+  live API — Jackson's Windows run (README_TEST v0.19.2 section) is
+  the live proof of the private-repo branch.
+- What WAS proven here: (1) the fallback branch logic — the status
+  classification (401/403/404 -> auth) is a pure function with 7 DSP
+  checks; (2) the field extraction the public-mode flow depends on
+  (tag, notes unescaping, asset selection/bounding) has 14 DSP
+  checks on representative GitHub-shaped JSON; (3) the full app
+  compiles and runs with the repo constant set (Xvfb smoke below),
+  i.e. the launch check fires on startup and the app stays healthy
+  when the network answer is an error/unreachable — silent, as
+  designed. The public-mode end-to-end (notes panel -> download ->
+  install -> relaunch) remains provable only once a release is
+  visible to an unauthenticated caller.
+
+### Verification (in-tree, this commit)
+- DSP suite: **271 checks, 0 failures** (250 at v0.19.1 + 14
+  ReleaseParse + 7 httpStatusBlocksAuth).
+- Full app build exit 0; fresh ELF 32,741,784 B; `strings` shows
+  "0.19.2" as the only 0.19.x version string.
+- Xvfb smoke: alive the full 14 s, no output beyond ALSA noise —
+  with the launch check active against an unreachable/private feed.
+- MSVC trap sweep over all changed/added lines: clean (no bare
+  min(/max(, no near/far/ERROR identifiers, no numeric_limits traps).
+- No new platform APIs: browser launch is juce::URL; the changed
+  app files compile in the real Linux JUCE build (stronger than the
+  forced-macro MinGW checks this project retired in v0.14).

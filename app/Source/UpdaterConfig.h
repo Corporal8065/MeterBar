@@ -1,24 +1,23 @@
 #pragma once
 // =====================================================================
 //  UPDATER CONFIG — the ONE place that says where MeterBar updates
-//  come from. v0.19.
+//  come from. v0.19 skeleton; wired to the real repo in v0.19.2.
 //
-//  kGitHubRepo is "owner/repository" on GitHub, e.g. "someuser/meterbar".
+//  kGitHubRepo is "owner/repository" on GitHub.
 //
-//  IT IS EMPTY BY DEFAULT, ON PURPOSE: until Jackson creates the
-//  GitHub repo (his account, his `gh auth login` — Milo never handles
-//  his credentials), there is nowhere honest for Check For Updates to
-//  point at. With the constant empty, Check For Updates shows
-//  "updates not configured yet" and performs NO network request —
-//  it never pretends to have checked.
-//
-//  To enable updates later: set this one constant to the repo slug,
-//  rebuild, ship. Nothing else changes. The repo must be PUBLIC for
-//  the unauthenticated releases API + asset downloads to work (a
-//  private repo would require embedding a token in the exe, which
-//  would be public the moment anyone inspected the binary — see
-//  docs/V019_PLAN.md section 3.3).
+//  THE REPO IS CURRENTLY PRIVATE, and that shapes what the updater
+//  can honestly do: GitHub does not serve a private repo's releases
+//  to unauthenticated callers at all — the API answers 404 — and
+//  this app carries NO token or credential (embedding one in a
+//  shipped binary would publish it). So while the repo is private,
+//  the check lands in the updater's private-repo state: it says so
+//  plainly and offers an "Open releases page" button (the user is
+//  signed in to GitHub in their browser, so the page works there).
+//  If the repo is ever made public, this SAME code performs the
+//  full flow — check -> release notes -> download -> verify ->
+//  install -> relaunch — with no changes: the fallback is driven
+//  purely by the HTTP status GitHub answers, never by a flag here.
 // =====================================================================
 namespace mbupdate {
-inline constexpr const char* kGitHubRepo = "";
+inline constexpr const char* kGitHubRepo = "Corporal8065/meterbar";
 } // namespace mbupdate

@@ -4,9 +4,11 @@
 // Update button. Design: docs/V019_PLAN.md section 3.
 //
 // Shape of the code, and why:
-// - The repo slug lives in UpdaterConfig.h (ONE constant, EMPTY by
-//   default). Unconfigured => configured() is false, no request is
-//   ever made, and the UI says so honestly.
+// - The repo slug lives in UpdaterConfig.h (ONE constant). An empty
+//   slug would mean unconfigured => configured() is false, no request
+//   is ever made, and the UI says so honestly. (Since v0.19.2 the
+//   constant names the real, currently-private repo — see the config
+//   header for what "private" does to the flow.)
 // - The release check runs on a DETACHED std::thread that touches
 //   nothing but a shared_ptr<SharedState>: it cannot dangle into UI
 //   objects, and the app never blocks on the network. MainComponent
@@ -25,6 +27,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_cryptography/juce_cryptography.h>
 #include <meterbar/SemVer.hpp>
+#include <meterbar/ReleaseParse.hpp>
 #include "UpdaterConfig.h"
 #include <atomic>
 #include <memory>
@@ -33,6 +36,11 @@
 namespace mbupdate {
 
 inline bool configured() { return juce::String(kGitHubRepo).trim().isNotEmpty(); }
+
+// Where the "Open releases page" fallback sends the user's browser.
+inline juce::String releasesPageUrl() {
+    return "https://github.com/" + juce::String(kGitHubRepo).trim() + "/releases";
+}
 
 struct ReleaseInfo {
     bool ok = false;              // the check itself succeeded
@@ -43,6 +51,12 @@ struct ReleaseInfo {
     juce::int64 assetSize = 0;    // published size (0 = not published)
     juce::String assetDigest;     // "sha256:<hex>" when GitHub provides it, else empty
     bool newer = false;           // tag is a strictly newer semver than the running version
+    // v0.19.2: the private-repo state is FIRST-CLASS, not an error
+    // string: the repo being private makes GitHub answer the
+    // unauthenticated check with 401/403/404, and the UI presents
+    // that state (plus the browser fallback) instead of a failure.
+    bool authBlocked = false;     // GitHub refused for auth reasons (repo private)
+    int httpStatus = 0;           // status of the check response (0 = none received)
 };
 
 struct SharedState {
@@ -52,6 +66,16 @@ struct SharedState {
 
 // Starts the background check. currentVersion is the compiled-in
 // version (METERBAR_VERSION_STRING). The worker writes only into `st`.
+//
+// v0.19.2 outcome branches (all decided from what GitHub actually
+// answered — see ReleaseParse.hpp for the auth-status rule):
+//   - HTTP 401/403/404  -> authBlocked (the repo is private: GitHub
+//     shows nothing to an unauthenticated app, and this app carries
+//     no token by design). NOT reported as a generic failure.
+//   - no stream, no auth status -> offline/unreachable error.
+//   - any other non-2xx -> error naming the HTTP status.
+//   - 2xx -> fields extracted by meterbar::parseReleaseJson (the
+//     unit-tested pure-std parser), then ok + newer via semVer.
 inline void checkLatestAsync(std::shared_ptr<SharedState> st, const juce::String& currentVersion) {
     std::thread([st, currentVersion] {
         ReleaseInfo r;
@@ -60,33 +84,39 @@ inline void checkLatestAsync(std::shared_ptr<SharedState> st, const juce::String
             r.error = "Updates are not configured in this build.";
         } else {
             juce::URL url("https://api.github.com/repos/" + repo + "/releases/latest");
+            // The status-code sink must outlive the stream (JUCE may
+            // write through the pointer while the stream lives), so
+            // it is heap-held for the whole check, like `st`.
+            auto statusSink = std::make_shared<int>(0);
             auto options = juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
                                .withExtraHeaders("User-Agent: MeterBar/" + currentVersion
                                                  + "\r\nAccept: application/vnd.github+json")
-                               .withConnectionTimeoutMs(15000);
+                               .withConnectionTimeoutMs(15000)
+                               .withStatusCode(statusSink.get());
             std::unique_ptr<juce::InputStream> stream(url.createInputStream(options));
-            if (stream == nullptr) {
+            const int statusCode = *statusSink;
+            r.httpStatus = statusCode;
+            if (meterbar::httpStatusBlocksAuth(statusCode)) {
+                r.authBlocked = true;
+                r.error = "GitHub would not show the release list (HTTP " + juce::String(statusCode)
+                        + ") — the repository is private and this app is not signed in.";
+            } else if (stream == nullptr) {
                 r.error = "Could not reach GitHub (offline, or the update feed is unavailable).";
+            } else if (statusCode != 0 && (statusCode < 200 || statusCode >= 300)) {
+                r.error = "GitHub answered HTTP " + juce::String(statusCode) + " to the update check.";
             } else {
-                const juce::var json = juce::JSON::parse(stream->readEntireStreamAsString());
-                if (json.getDynamicObject() == nullptr) {
+                meterbar::ReleaseFields f;
+                if (!meterbar::parseReleaseJson(stream->readEntireStreamAsString().toStdString(), f)) {
                     r.error = "GitHub returned an unreadable response.";
                 } else {
-                    r.tag = json.getProperty("tag_name", {}).toString();
-                    r.notes = json.getProperty("body", {}).toString();
-                    if (auto* assets = json.getProperty("assets", {}).getArray()) {
-                        for (auto& a : *assets) {
-                            if (a.getProperty("name", {}).toString() == "MeterBar-Setup.exe") {
-                                r.assetUrl = a.getProperty("browser_download_url", {}).toString();
-                                r.assetSize = (juce::int64) a.getProperty("size", {});
-                                r.assetDigest = a.getProperty("digest", {}).toString();
-                                break;
-                            }
-                        }
-                    }
-                    if (r.tag.isEmpty()) r.error = "The latest release has no version tag.";
-                    else if (r.assetUrl.isEmpty()) r.error = "The latest release has no MeterBar-Setup.exe to download.";
-                    else {
+                    r.tag = f.tag;
+                    r.notes = f.notes;
+                    r.assetUrl = f.assetUrl;
+                    r.assetSize = (juce::int64) f.assetSize;
+                    r.assetDigest = f.assetDigest;
+                    if (!f.hasAsset || r.assetUrl.isEmpty()) {
+                        r.error = "The latest release has no MeterBar-Setup.exe to download.";
+                    } else {
                         r.ok = true;
                         r.newer = meterbar::semVerIsNewer(r.tag.toStdString(), currentVersion.toStdString());
                     }

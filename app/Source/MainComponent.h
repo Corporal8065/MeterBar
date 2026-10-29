@@ -63,13 +63,19 @@ private:
     void syncScreenSpace();                                       // v0.18.1: feed one geometry/toggle observation to the reserve machine; act only on its transitions
     void doArrangeWindows();                                      // v0.18: sweep other windows clear of the bar (v0.19.1: on its docked edge)
     void doRestoreWindows();                                      // v0.18: undo the sweep
-    // v0.19 updater (manual check only — no startup auto-check):
+    // v0.19 updater; v0.19.2: wired to the real repo + launch check:
     void checkForUpdates();                                       // menu action: honest-unconfigured, or start the background check
+    void startUpdateCheck(bool fromLaunch);                       // the one check starter (menu or launch); worker touches only updateState
     void pollUpdater();                                           // called from timerCallback: present a finished check / finish a download
-    void presentUpdateResult(const mbupdate::ReleaseInfo& r);     // up-to-date / failed / update-available dialog (with Update button)
+    void presentUpdateResult(const mbupdate::ReleaseInfo& r);     // manual-check outcomes: up-to-date / failed / private-repo / update panel
+    void showUpdatePanel(const mbupdate::ReleaseInfo& r);         // version + full release notes + "Download & install" / "Later"
+    void showPrivateRepoFallback(const juce::String& detail);     // the private-repo state + "Open releases page" browser button
     void startUpdateDownload();                                   // download the release installer to %TEMP% (polled to completion)
     std::shared_ptr<mbupdate::SharedState> updateState;           // background-check state (worker touches only this)
     bool updateCheckPending = false;
+    bool updateCheckFromLaunch = false;                           // launch checks stay silent unless a newer release is found
+    bool updateAvailable = false;                                 // a newer release is known: the toolbar indicator is lit
+    juce::TextButton updateBtn { "Update!" };                     // v0.19.2: non-modal launch-check surface (opens showUpdatePanel)
     mbupdate::ReleaseInfo pendingRelease;                         // the release a download/Update action refers to
     std::unique_ptr<juce::URL::DownloadTask> updateDownload;
     bool updateDownloadPending = false;

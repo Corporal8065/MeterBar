@@ -1,4 +1,4 @@
-MeterBar test kit - FOR YOUR WINDOWS 11 PC (kit v0.19.1)
+MeterBar test kit - FOR YOUR WINDOWS 11 PC (kit v0.19.2)
 ================================================
 
 Yes, this is a Windows kit. If you saw the word "Linux" in
@@ -21,7 +21,16 @@ DO THIS:
    your usual speakers/headphones), so play a song and all 6
    meters should move with no audio setup.
 
-NEW IN v0.19.1: the bar's RESERVE feature (toolbar "Reserve"
+NEW IN v0.19.2: the updater is wired to the real GitHub repo -
+MeterBar checks for updates on launch (silently) and from the
+menu, shows the release notes in-app, and can download + install
+an update itself. One honest catch: the repo is currently
+PRIVATE, so the in-app check will tell you updates aren't
+available automatically yet and offer a button to the releases
+page instead - that's expected, not a bug (README_TEST leads
+with it). Also carried in: v0.19.1's edge-aware Reserve (below).
+
+STILL NEW IN v0.19.1: the bar's RESERVE feature (toolbar "Reserve"
 button) now works on whichever edge of the monitor the bar is
 docked to - including the BOTTOM, your usual spot - so maximised
 windows stop at the bar instead of sliding under it, plus
