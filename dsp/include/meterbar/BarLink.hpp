@@ -30,7 +30,10 @@ namespace meterbar {
 // A drag session is "live" while its stamp is fresher than
 // kLeaderStaleMs; staleness — never a stuck flag — ends it.
 
-inline constexpr unsigned kLinkMagic = 0x424C4B31; // "BLK1"
+inline constexpr unsigned kLinkMagic = 0x424C4B32; // "BLK2" — v0.3.0/v0.20.1 appended the one-click-stack
+    // request fields and MeterBar's audio broadcast to LinkSlot. Mixed old/new
+    // binaries never link (magic mismatch = the whole block reads empty), the
+    // same failure shape as BLK1 vs the pre-link world.
 inline constexpr int kLinkAppMeter = 0, kLinkAppTicker = 1, kLinkAppSession = 2;
 inline constexpr int kSnapPx = 10;
 inline constexpr long long kLeaderStaleMs = 600;
@@ -48,6 +51,19 @@ struct LinkSlot {
     unsigned dragSeq = 0;      // increments at each new drag session of that app
     IntRect dragStart{};       // leader rect when the session began
     long long dragStampMs = 0; // last leader movement stamp
+    // One-click stack (v0.3.0, item 12): the initiator stamps stackSeq
+    // (bumped per request), the dock edge it snapped to, and its own
+    // rect AFTER snapping (the anchor). Followers whose seen stackSeq
+    // differs run planStackAll and move to their computed target.
+    unsigned stackSeq = 0;
+    int stackEdge = -1;            // ReserveEdge ordinal of the anchor edge
+    IntRect stackAnchor{};
+    // Audio broadcast (v0.3.0, item 17): MeterBar publishes its band
+    // energies + overall level here on its link tick; audioSeq bumps
+    // when the packet changes materially. Linked siblings drive
+    // their reactive backgrounds from it (bands + onset pump).
+    float audioLow = 0.f, audioMid = 0.f, audioHigh = 0.f, audioLevel = 0.f;
+    unsigned audioSeq = 0;
 };
 struct LinkShared {
     unsigned magic = kLinkMagic;
@@ -145,6 +161,13 @@ struct BgSyncState {
 inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct) {
     return style != s.publishedStyle || pct != s.publishedPct;
 }
+// Live-linked opacity repair (v0.3.0, item 13): drop this client's
+// published markers to the "none yet" sentinel, so the next publish
+// re-stamps the CURRENT values under a fresh bgSeq and peers adopt
+// them. The client calls this when its link turns on — the join path
+// where the v0.2.1 "an opacity change only lands after re-linking"
+// report lived.
+inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publishedPct = -999; }
 // Scan the shared block for a background this app has not consumed.
 // Every live, linked peer with an unseen non-zero bgSeq is marked
 // seen; when at least one qualifies, the LAST one in slot order wins:
@@ -164,4 +187,53 @@ inline bool bgAdoption(const LinkShared& sh, int selfApp, BgSyncState& s, long l
     if (found) { s.publishedStyle = out.style; s.publishedPct = out.opacityPct; }
     return found;
 }
+// ONE-CLICK STACK PLANNER (v0.3.0, item 12). Given the shared state
+// and the initiator (whose slot carries stackAnchor + stackEdge),
+// compute where every live, LINKED bar goes: the initiator at the
+// anchor; the remaining bars in appId order after the initiator
+// (wrapping), each stacked flush against the previous bar along the
+// anchor edge — Top: downward (x aligned to the anchor), Bottom:
+// upward, Left: rightward (y aligned), Right: leftward — in
+// canonical family order (Meter, Ticker, Session) after the anchor. targets[] is
+// indexed by appId; non-participants keep w == 0. Returns the
+// participant count. Pure: the clients do the window moves.
+inline int planStackAll(const LinkShared& sh, long long nowMs, int initiatorApp, IntRect targets[3]) {
+    for (int i = 0; i < 3; ++i) targets[i] = IntRect{};
+    if (initiatorApp < 0 || initiatorApp > 2) return 0;
+    const LinkSlot& init = sh.slots[initiatorApp];
+    if (!slotLive(init, nowMs) || !init.linked || init.stackEdge < 0) return 0;
+    IntRect cursor = init.stackAnchor.w > 0 ? init.stackAnchor : init.rect;
+    if (cursor.w <= 0 || cursor.h <= 0) return 0;
+    targets[initiatorApp] = cursor;
+    int count = 1;
+    for (int step = 0; step < 3; ++step) {
+        const int app = step; // canonical family order (Meter, Ticker, Session), initiator skipped below
+        if (app == initiatorApp) continue;
+        const LinkSlot& sl = sh.slots[app];
+        if (!slotLive(sl, nowMs) || !sl.linked || sl.rect.w <= 0 || sl.rect.h <= 0) continue;
+        IntRect t{ 0, 0, sl.rect.w, sl.rect.h };
+        switch (init.stackEdge) {
+            case 0: t.x = cursor.x; t.y = cursor.bottom(); break;   // Top: stack down
+            case 1: t.x = cursor.x; t.y = cursor.y - t.h; break;    // Bottom: stack up
+            case 2: t.x = cursor.right(); t.y = cursor.y; break;    // Left: stack right
+            case 3: t.x = cursor.x - t.w; t.y = cursor.y; break;    // Right: stack left
+            default: return count;
+        }
+        targets[app] = t;
+        cursor = t;
+        ++count;
+    }
+    return count;
+}
+
+// Read a peer's audio broadcast. True when the slot is live and has
+// published at least once (audioSeq != 0); freshness is slotLive's
+// heartbeat rule — exactly the "MeterBar is running and linked"
+// test the reactive background wants.
+inline bool audioPacket(const LinkSlot& s, long long nowMs, float out[4]) {
+    if (!slotLive(s, nowMs) || s.audioSeq == 0) return false;
+    out[0] = s.audioLow; out[1] = s.audioMid; out[2] = s.audioHigh; out[3] = s.audioLevel;
+    return true;
+}
+
 } // namespace meterbar

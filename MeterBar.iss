@@ -12,7 +12,7 @@
 ; for a bare manual `ISCC MeterBar.iss` with no /D — keep it in step
 ; with CMakeLists.txt when the version is bumped.
 #ifndef MyAppVersion
-#define MyAppVersion "0.20.0"
+#define MyAppVersion "0.20.1"
 #endif
 #define MyAppExeName "MeterBar.exe"
 

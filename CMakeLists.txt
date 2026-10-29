@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.22)
 # installer. Before v0.19 the version was hard-coded in six places and
 # they were guaranteed to drift; do not add a seventh. Bump it here,
 # only here.
-project(MeterBar VERSION 0.20.0 LANGUAGES C CXX)
+project(MeterBar VERSION 0.20.1 LANGUAGES C CXX)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/app/MeterBarVersion.h.in
                ${CMAKE_BINARY_DIR}/generated/MeterBarVersion.h)
 # v0.15 distribution: link the MSVC runtime STATICALLY (/MT release,

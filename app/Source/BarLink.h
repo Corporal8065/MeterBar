@@ -45,6 +45,7 @@ public:
     std::function<void(const Bg&)> applyBg;
     std::function<int()> getDockedEdge;                    // protocol ordinal or -1
     std::function<bool()> isLinked;
+    std::function<void(float out[4])> getAudio; // v0.3.0 item 17: band energies [low,mid,high] + level (MeterBar wires this; the others leave it empty)
 
     explicit BarLinkClient(int appId) : appId_(appId) {}
     ~BarLinkClient() override { stop(); }
@@ -96,6 +97,62 @@ public:
     // EVERY settings interaction, changed background or not.
     void notifyLocalSettings() { publishBg(); }
 
+    // v0.3.0 item 12: ask every linked bar to stack against this one.
+    // The host snaps ITSELF to its dock edge first, then calls this
+    // with that edge (protocol ordinal) and its post-snap rect; the
+    // stamp lands in one slot write, followers react on their timers.
+    void requestStackAll(int edgeOrdinal, juce::Rectangle<int> anchor) {
+        if (!shared_) return;
+        meterbar::LinkShared snap;
+        if (!readShared(snap)) return;
+        meterbar::LinkSlot mine = snap.slots[(size_t)appId_];
+        mine.appId = appId_;
+        mine.heartbeatMs = nowMs();
+        mine.linked = 1;
+        mine.stackSeq += 1;
+        mine.stackEdge = edgeOrdinal;
+        mine.stackAnchor = toCore(anchor);
+        writeSlot(mine);
+        seenStackSeq_[(size_t)appId_] = mine.stackSeq;
+    }
+
+    // v0.3.0 item 17: a peer's audio broadcast (false = not live / never published).
+    bool peerAudio(int appId, float out[4]) {
+        if (!shared_ || appId < 0 || appId > 2) return false;
+        meterbar::LinkShared snap;
+        if (!readShared(snap)) return false;
+        return meterbar::audioPacket(snap.slots[(size_t)appId], nowMs(), out);
+    }
+
+    // Live + linked peer count (the host's Stack button enablement).
+    int liveLinkedPeers() {
+        if (!shared_) return 0;
+        meterbar::LinkShared snap;
+        if (!readShared(snap)) return 0;
+        const long long now = nowMs();
+        int n = 0;
+        for (auto& sl : snap.slots)
+            if (sl.appId >= 0 && sl.appId != appId_ && sl.linked && meterbar::slotLive(sl, now)) ++n;
+        return n;
+    }
+
+    // The union rect of this bar + its live linked peers — the
+    // reactive-glow field's group space (item 17). Unlinked or alone:
+    // the bar's own rect.
+    juce::Rectangle<int> groupRect() {
+        auto own = getBounds ? getBounds() : juce::Rectangle<int>{};
+        if (!shared_ || !(isLinked && isLinked())) return own;
+        meterbar::LinkShared snap;
+        if (!readShared(snap)) return own;
+        const long long now = nowMs();
+        auto u = own;
+        for (auto& sl : snap.slots) {
+            if (sl.appId < 0 || sl.appId == appId_ || !sl.linked || !meterbar::slotLive(sl, now)) continue;
+            if (sl.rect.w > 0 && sl.rect.h > 0) u = u.getUnion(toJuce(sl.rect));
+        }
+        return u;
+    }
+
 private:
     static long long nowMs() { return (long long)juce::Time::getMillisecondCounterHiRes(); }
     static bool sameRect(meterbar::IntRect a, meterbar::IntRect b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
@@ -105,6 +162,13 @@ private:
     void timerCallback() override {
         if (!shared_ || !getBounds) return;
         const long long now = nowMs();
+        // Item 13: the tick this app's link turns ON, force a fresh
+        // publish of its current background (sentinel reset — see
+        // bgForceRepublish) so peers adopt it immediately instead of
+        // waiting for the next change.
+        const bool linkedNow = isLinked && isLinked();
+        if (linkedNow && !wasLinked_) meterbar::bgForceRepublish(bgSync_);
+        wasLinked_ = linkedNow;
         publishBg();
         meterbar::LinkShared snap;
         if (!readShared(snap)) return;
@@ -116,6 +180,17 @@ private:
         mine.rect = toCore(r);
         mine.linked = isLinked && isLinked() ? 1 : 0;
         mine.dockedEdge = getDockedEdge ? getDockedEdge() : -1;
+        // Item 17: audio broadcast — re-stamp only on material change.
+        if (getAudio) {
+            float a[4] = { 0.f, 0.f, 0.f, 0.f };
+            getAudio(a);
+            auto diff = [](float x, float y) { return x > y ? x - y : y - x; };
+            if (diff(a[0], mine.audioLow) > 0.01f || diff(a[1], mine.audioMid) > 0.01f ||
+                diff(a[2], mine.audioHigh) > 0.01f || diff(a[3], mine.audioLevel) > 0.01f) {
+                mine.audioLow = a[0]; mine.audioMid = a[1]; mine.audioHigh = a[2]; mine.audioLevel = a[3];
+                mine.audioSeq += 1;
+            }
+        }
         writeSlot(mine);
         snap.slots[(size_t)appId_] = mine;
         lastRect_ = mine.rect;
@@ -128,6 +203,17 @@ private:
             meterbar::BgPacket pkt;
             if (meterbar::bgAdoption(snap, appId_, bgSync_, now, pkt) && applyBg)
                 applyBg(Bg{ pkt.style, pkt.opacityPct / 100.0f });
+        }
+        // --- one-click stack requests (item 12): a peer's fresh
+        // stackSeq moves this bar to its planned target ---
+        for (auto& sl : snap.slots) {
+            if (sl.appId < 0 || sl.appId == appId_ || !sl.linked || !meterbar::slotLive(sl, now)) continue;
+            if (sl.stackSeq == 0 || sl.stackSeq == seenStackSeq_[(size_t)sl.appId]) continue;
+            seenStackSeq_[(size_t)sl.appId] = sl.stackSeq;
+            meterbar::IntRect targets[3];
+            if (meterbar::planStackAll(snap, now, sl.appId, targets) > 0 && targets[(size_t)appId_].w > 0
+                && !sameRect(targets[(size_t)appId_], mine.rect))
+                applyRemote(targets[(size_t)appId_]);
         }
         // --- follow a live foreign drag ---
         const meterbar::LinkSlot* leader = nullptr;
@@ -247,5 +333,7 @@ private:
     unsigned followSeq_ = 0, settledSeq_ = 0;
     meterbar::IntRect followOwnStart_{}, followLeaderStart_{};
     std::tuple<int, int, int, int, int, int> dockKey_{ -1, -1, 0, 0, 0, 0 };
-    meterbar::BgSyncState bgSync_; // v0.2.1: publish/adopt bookkeeping (core decisions)
+    meterbar::BgSyncState bgSync_;
+    bool wasLinked_ = false;              // item 13: link-edge detection for the forced republish
+    unsigned seenStackSeq_[3] = { 0, 0, 0 }; // item 12: last stack request consumed per app // v0.2.1: publish/adopt bookkeeping (core decisions)
 };

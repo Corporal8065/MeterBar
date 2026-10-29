@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include <meterbar/WindowGeom.hpp> // v0.20.1: preset/startup position clamp
 #if JUCE_WINDOWS
  #include <windows.h> // native window move (v0.11)
 #endif
@@ -38,12 +39,18 @@ MainComponent::MainComponent() {
     };
     linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity }; };
     linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){
-        engine.state.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 2, bg.style);
+        engine.state.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 3, bg.style); // v0.20.1: Pastel (3) is a family style too
         engine.state.backgroundOpacity = juce::jlimit(0.15f, 1.0f, bg.opacity);
         repaint();
     };
     linkClient_.getDockedEdge = [this]{ return reserveMachine.reserved() ? (int)reserveMachine.edge() : -1; };
     linkClient_.isLinked = [this]{ return engine.state.linkEnabled; };
+    // v0.20.1 (item 17): broadcast the band energies + level the
+    // visualizer already computes, so linked siblings can render the
+    // reactive glow from the same music.
+    linkClient_.getAudio = [this](float out[4]) {
+        out[0] = latestBands_[0]; out[1] = latestBands_[1]; out[2] = latestBands_[2]; out[3] = latestLevel_;
+    };
     linkClient_.start();
     presetBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showPresetMenu(); };
     reposBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showRepositionMenu(); };
@@ -624,8 +631,12 @@ void MainComponent::prepareFrame() {
     // v0.20.0 (item l): advance the visualizer model from the frame's
     // own spectrum (per-band energies, core helper). dt follows the
     // UI timer's real cadence (fpsLimit), clamped to sane bounds.
+    // v0.20.1: the broadcast stash — computed every frame from the
+    // same spectrum, whether or not the local visualizer is on.
+    latestBands_ = meterbar::spectrumBandEnergies(frame.spectrumDb, st.fftSize, frame.sampleRate);
+    latestLevel_ = juce::jlimit(0.f, 1.f, (float)((frame.loudShortTerm + 50.0) / 45.0));
     if (st.visualizerEnabled) {
-        auto e = meterbar::spectrumBandEnergies(frame.spectrumDb, st.fftSize, frame.sampleRate);
+        auto e = latestBands_;
         meterbar::VisualizerSettings vs;
         vs.enabled = true;
         vs.baseHue = st.visualizerBaseHue;
@@ -652,7 +663,24 @@ void MainComponent::savePresetInteractive(bool saveAs) {
     }));
 }
 void MainComponent::loadPresetFile(const juce::File& f) {
-    if (presetio::load(f, engine.state)) { engine.applySource(); applyTheme(); applyFps(); layoutModules(); repaint(); syncScreenSpace(); uiClick(ClickSounds::Which::Sparkle); }
+    if (presetio::load(f, engine.state)) {
+        engine.applySource(); applyTheme(); applyFps(); layoutModules(); repaint(); syncScreenSpace(); uiClick(ClickSounds::Which::Sparkle);
+        // v0.20.1 (item 2 audit): presets always SAVED the window
+        // position (winX/winY/winW/winH ride in PresetState) but
+        // loading one never MOVED the window — Jackson's requirement
+        // is that a preset includes position. Apply it now, clamped
+        // into a visible work area (core WindowGeom).
+        if (auto* tl = getTopLevelComponent()) {
+            std::vector<meterbar::IntRect> areas;
+            for (auto& d : juce::Desktop::getInstance().getDisplays().displays) {
+                auto ua = d.userArea;
+                areas.push_back({ ua.getX(), ua.getY(), ua.getWidth(), ua.getHeight() });
+            }
+            auto clamped = meterbar::clampRectToWorkAreas(
+                { engine.state.windowX, engine.state.windowY, engine.state.windowW, engine.state.windowH }, areas);
+            tl->setBounds(clamped.x, clamped.y, clamped.w, clamped.h);
+        }
+    }
 }
 void MainComponent::showPresetMenu() {
     juce::PopupMenu m;

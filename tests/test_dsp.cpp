@@ -18,6 +18,7 @@
 #include "../dsp/include/meterbar/State.hpp"
 #include "../dsp/include/meterbar/Visualizer.hpp"
 #include "../dsp/include/meterbar/BarLink.hpp"
+#include "../dsp/include/meterbar/WindowGeom.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -881,6 +882,47 @@ int main() {
     CHECK(sync2.seenSeq[1] == 3 && sync2.seenSeq[2] == 4);
     CHECK(!bgAdoption(sh2, 0, sync2, now, out));
 }
+
+
+    // ---------- v0.20.1: WindowGeom clamp (shared off-screen fix) ----------
+    {
+        std::vector<IntRect> areas{ IntRect{0, 0, 1920, 1040} };
+        IntRect inside{ 100, 100, 1060, 56 };
+        CHECK(clampRectToWorkAreas(inside, areas) == inside);
+        auto c = clampRectToWorkAreas(IntRect{ -300, 2000, 1060, 56 }, areas);
+        CHECK(c.x == 0 && c.y == 1040 - 56);
+        auto c2 = clampRectToWorkAreas(IntRect{ 3000, 10, 500, 56 }, areas);
+        CHECK(c2.x == 1920 - 500 && c2.y == 10);
+        CHECK(clampRectToWorkAreas(inside, {}) == inside);
+    }
+    // ---------- v0.20.1: BarLink BLK2 — stack planner + audio broadcast ----------
+    {
+        const long long now = 777000;
+        LinkShared sh;
+        auto& m = sh.slots[0]; m.appId = 0; m.linked = 1; m.heartbeatMs = now; m.rect = IntRect{40, 0, 900, 56};
+        m.stackEdge = 0; m.stackAnchor = m.rect;
+        auto& t = sh.slots[1]; t.appId = 1; t.linked = 1; t.heartbeatMs = now; t.rect = IntRect{500, 500, 900, 96};
+        auto& s2 = sh.slots[2]; s2.appId = 2; s2.linked = 1; s2.heartbeatMs = now; s2.rect = IntRect{5, 5, 1060, 108};
+        IntRect targets[3];
+        CHECK(planStackAll(sh, now, 0, targets) == 3);
+        CHECK(targets[0] == m.rect);
+        CHECK(targets[1].y == 56 && targets[1].x == 40);
+        CHECK(targets[2].y == 56 + 96 && targets[2].x == 40);
+        t.linked = 0;
+        CHECK(planStackAll(sh, now, 0, targets) == 2);
+        CHECK(targets[1].w == 0);
+        // audio: unpublished slot reads false; published values round-trip
+        float pkt[4] = { -1, -1, -1, -1 };
+        CHECK(!audioPacket(m, now, pkt));
+        m.audioSeq = 3; m.audioLow = 0.75f; m.audioMid = 0.5f; m.audioHigh = 0.25f; m.audioLevel = 0.6f;
+        CHECK(audioPacket(m, now, pkt));
+        CHECK(pkt[0] == 0.75f && pkt[1] == 0.5f && pkt[2] == 0.25f && pkt[3] == 0.6f);
+        CHECK(!audioPacket(m, now + kPeerStaleMs + 1, pkt));
+        BgSyncState bs; bs.publishedStyle = 3; bs.publishedPct = 40;
+        CHECK(!bgIsLocalChange(bs, 3, 40));
+        bgForceRepublish(bs);
+        CHECK(bgIsLocalChange(bs, 3, 40));
+    }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

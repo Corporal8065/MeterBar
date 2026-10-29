@@ -10,6 +10,7 @@
 
 <p align="center">
   <img src="https://github.com/Corporal8065/meterbar/actions/workflows/build-windows.yml/badge.svg" alt="Windows build status">
+  <a href="https://github.com/Corporal8065/meterbar/releases/latest"><strong>Download latest release</strong></a>
 </p>
 
 <!-- The badge above lights up once this repo's first push and GitHub

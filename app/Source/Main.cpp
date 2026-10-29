@@ -2,6 +2,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "MainComponent.h"
 #include "MeterBarVersion.h" // v0.19: generated — single-source version (root CMakeLists project VERSION)
+#include <meterbar/WindowGeom.hpp> // v0.20.1: startup position clamp (family-wide off-screen guard)
 class MainWindow : public juce::DocumentWindow {
 public:
     explicit MainWindow(const juce::String& name) : juce::DocumentWindow(name, juce::Colour(0x00000000), 0) {
@@ -18,7 +19,18 @@ public:
         content = mc;
         setContentOwned(mc, true);
         setResizable(true, false); // border-only resize: the corner grabber overlay sat on top of the Spectrum module and was a suspect in the stuck-cursor field report
-        setBounds(mc->engine.state.windowX, mc->engine.state.windowY, mc->engine.state.windowW, mc->engine.state.windowH);
+        {
+            // v0.20.1: never restore off-screen — clamp the saved
+            // rect into a visible work area (core WindowGeom).
+            std::vector<meterbar::IntRect> areas;
+            for (auto& d : juce::Desktop::getInstance().getDisplays().displays) {
+                auto ua = d.userArea;
+                areas.push_back({ ua.getX(), ua.getY(), ua.getWidth(), ua.getHeight() });
+            }
+            auto clamped = meterbar::clampRectToWorkAreas(
+                { mc->engine.state.windowX, mc->engine.state.windowY, mc->engine.state.windowW, mc->engine.state.windowH }, areas);
+            setBounds(clamped.x, clamped.y, clamped.w, clamped.h);
+        }
         setAlwaysOnTop(mc->engine.state.pinned);
         setVisible(true);
     }
