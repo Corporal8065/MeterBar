@@ -120,9 +120,10 @@ private:
     int debugEpsCount = -1; juce::int64 lastEpsCheckMs = 0; // v0.15 item 8: render-endpoint count shown in Debug (refreshed ~2 s)
     std::unique_ptr<juce::FileChooser> chooser;
     double uiFpsMeasured = 0; juce::int64 lastFrameMs = 0; int clipCounter = 1;
-    // Manual whole-toolbar drag state (v0.8, Jackson's ask: the entire top bar
-    // moves the window, grip dots removed). ComponentDragger was replaced after
-    // the field report of the cursor staying grabbed (2026-10-13).
-    bool winDragging = false; juce::Point<int> dragOffset;
+    // Whole-toolbar drag state (v0.8, Jackson's ask: the entire top bar
+    // moves the window, grip dots removed). v0.20.2: ComponentDragger is
+    // back (SessionBar's path) — the v0.11 OS caption move loop that
+    // replaced it is freeze-audit suspect 2; see mouseDown in the .cpp.
+    bool winDragging = false; juce::ComponentDragger windowDragger;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

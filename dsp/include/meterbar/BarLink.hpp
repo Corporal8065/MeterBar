@@ -112,6 +112,22 @@ inline IntRect followRect(IntRect ownStart, IntRect leaderStart, IntRect leaderN
 // left edges aligned for a vertical stack, top edges for a
 // horizontal one (v0.2.1 field fix — see the header note).
 using DockArg = ReserveEdge; // this app's groupDockRect argument type (SessionBar uses int)
+// v0.20.2 GROUP-DOCK PARTICIPATION RULE (freeze fix): a bar group-dock-
+// follows a docked peer ONLY while it is not itself reserve-docked.
+// groupDockRect is a pure translation to "flush against the peer", so
+// when BOTH linked bars are docked, each one's target is computed from
+// the other's LATEST rect: A stacks against B, B stacks against A's new
+// rect, A stacks against B's new rect... The pair of equations has no
+// fixed point (same-edge: A.y = B.y - A.h with B.y = A.y - B.h demands
+// A.h + B.h == 0), so two docked+linked bars chase each other across
+// the screen at the link tick rate, flooding both message threads with
+// setBounds/moved/resized traffic until their buttons starve — the
+// field shape of "UI stopped responding after linking" (2026-10-29,
+// MeterBar<->TickerBar). A docked bar's position is owned by its own
+// reserve machine; the link must not move it. Floating bar + docked
+// peer still stacks and settles in one step (the target depends only
+// on the peer's rect, which does not move in response).
+inline bool groupDockFollows(int selfDockedEdge) { return selfDockedEdge < 0; }
 inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge) {
     IntRect out = follower;
     switch (edge) {

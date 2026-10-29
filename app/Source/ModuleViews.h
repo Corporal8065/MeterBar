@@ -29,6 +29,13 @@ public:
     int flexIndex = 0; // v0.15: index into PresetState::moduleFlex (display order)
     explicit ModuleView(Kind k) : kind(k) { setInterceptsMouseClicks(false, false); setOpaque(false); }
     juce::Image sgCache; // spectrogram render cache (v0.11)
+    // v0.20.2: what the cache was last rendered FROM — drawSpectrogram
+    // skips its re-render while every input in this signature is
+    // unchanged (see there). -1 / NaN sentinels force the first render.
+    int sgRenderedHead = -1; int sgRenderedBins = -1; float sgRenderedFade = -1.f;
+    meterbar::FreqScale sgRenderedScale = (meterbar::FreqScale)-1;
+    bool sgRenderedVert = false; double sgRenderedSr = 0;
+    int sgRenderedColorMap = -1;
     void paint(juce::Graphics& g) override {
         if (!data || !data->st) return;
         auto& st = *data->st; auto& th = data->theme; auto r = getLocalBounds().toFloat();
@@ -189,8 +196,11 @@ private:
         // per-cell fillRect storm (thousands per frame) could starve mouse
         // events during window moves on the UI thread.
         int iw = std::max(1, (int)p.getWidth() / 2), ih = std::max(1, (int)p.getHeight() / 2);
-        if (!sgCache.isValid() || sgCache.getWidth() != iw || sgCache.getHeight() != ih)
+        bool freshCache = false;
+        if (!sgCache.isValid() || sgCache.getWidth() != iw || sgCache.getHeight() != ih) {
             sgCache = juce::Image(juce::Image::RGB, iw, ih, true);
+            freshCache = true;
+        }
         // v0.20.0 (item i): the frequency axis uses the DSP core's exact
         // binAtX mapping (the same walk the spectrum view's LUT uses) —
         // the old code indexed bins LINEARLY here, so the spectrogram's
@@ -205,8 +215,28 @@ private:
                                     : 1.f - (float)a / (float)axisPx; // y axis: top = highest freq
             binLut[(size_t)a] = meterbar::SpectrumAnalyser::binAtX(frac, sg->bins(), fftSg, srSg, 20.0, maxFSg, st.fftScale);
         }
-        {
-            juce::Graphics ig(sgCache);
+        // v0.20.2 (freeze-audit suspect 3): two changes, same output.
+        // (1) SKIP the re-render while every input the cache depends on
+        // is unchanged — history head, fade, FFT scale, sample rate,
+        // orientation, colour map, cache size. History rows advance at
+        // the Linked Speed rate (at 60 fps and speed 1 a row lands only
+        // every few frames), so most frames previously re-rendered an
+        // IDENTICAL image cell by cell; now they just blit. (The age
+        // mapping is a pure function of the head — when the head has
+        // not moved, no cell's source row has changed.)
+        // (2) When a re-render does happen, write pixels DIRECTLY via
+        // BitmapData instead of setColour + fillRect(1x1) per cell,
+        // which walked the whole Graphics state machine iw*ih times.
+        // heatColour is fully opaque and the cache is RGB, so a direct
+        // write stores exactly the bytes the fill produced.
+        const int headNow = sg->head();
+        const bool inputsChanged = freshCache || headNow != sgRenderedHead
+            || sg->bins() != sgRenderedBins
+            || st.fade != sgRenderedFade || st.fftScale != sgRenderedScale
+            || vert != sgRenderedVert || srSg != sgRenderedSr
+            || (int)st.colorMap != sgRenderedColorMap;
+        if (inputsChanged) {
+            juce::Image::BitmapData bd(sgCache, juce::Image::BitmapData::writeOnly);
             for (int x = 0; x < iw; ++x) for (int y = 0; y < ih; ++y) {
                 int age = vert ? (int)((float)y / ih * sg->rows()) : (int)((float)x / iw * sg->rows());
                 int bin = vert ? binLut[(size_t)x] : binLut[(size_t)y];
@@ -221,9 +251,11 @@ private:
                 // level below full scale; see ColorMap::at). Fade applies.
                 float t = juce::jlimit(0.f, 1.f, meterbar::spectrogramLevelT(db)
                             * meterbar::SpectrogramHistory::fadeGain(age, sg->rows(), st.fade));
-                ig.setColour(heatColour(data->cmap, t));
-                ig.fillRect(x, y, 1, 1);
+                bd.setPixelColour(x, y, heatColour(data->cmap, t));
             }
+            sgRenderedHead = headNow; sgRenderedBins = sg->bins();
+            sgRenderedFade = st.fade; sgRenderedScale = st.fftScale;
+            sgRenderedVert = vert; sgRenderedSr = srSg; sgRenderedColorMap = (int)st.colorMap;
         }
         g.drawImage(sgCache, p);
     }

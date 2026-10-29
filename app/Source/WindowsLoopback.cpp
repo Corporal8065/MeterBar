@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <meterbar/BoundedThread.hpp> // v0.20.2: bounded capture-thread stop (freeze fix)
 // v0.14 ROOT-CAUSE FIX — read this before ever touching the guard again.
 // This translation unit deliberately includes NO JUCE header (std-only),
 // and JUCE_WINDOWS is a macro that exists ONLY inside JUCE's own headers
@@ -36,7 +37,7 @@
  #include <ksmedia.h>
  #include <cstdio>
  struct WindowsLoopback::Impl {
-     std::thread th; std::atomic<bool> run{false}; std::atomic<double> sr{48000}; Callback cb;
+     meterbar::BoundedThread th; std::atomic<bool> run{false}; std::atomic<double> sr{48000}; Callback cb;
      std::string wantName; // v0.9: capture THIS output device (empty = default)
      std::string wantId;   // v0.13: capture THIS endpoint ID (wins over the name when set)
      std::atomic<long long> packets{0};
@@ -249,10 +250,34 @@
      }
  };
  bool WindowsLoopback::start(Callback cb, const std::string& deviceNameUtf8, const std::string& deviceIdUtf8) { stop(); impl_ = new Impl(); impl_->cb = std::move(cb); impl_->wantName = deviceNameUtf8; impl_->wantId = deviceIdUtf8; impl_->run = true;
-     impl_->th = std::thread([this]{ impl_->loop(); }); return true; }
- void WindowsLoopback::stop() { if (impl_) { impl_->run = false; if (impl_->th.joinable()) impl_->th.join(); delete impl_; impl_ = nullptr; } }
+     // v0.20.2: the thread lambda captures the Impl POINTER, not `this`.
+     // With the bounded stop below, a timed-out (leaked) capture thread
+     // can outlive a stop()->start() cycle; dereferencing impl_ through
+     // `this` could then run the NEW Impl's loop on the old thread.
+     Impl* im = impl_;
+     im->th.start([im]{ im->loop(); }); return true; }
+ void WindowsLoopback::stop() { if (impl_) { impl_->run = false;
+     // v0.20.2 BOUNDED STOP (freeze fix, audit suspect 1): the capture
+     // thread only observes run=false between WASAPI calls; a call
+     // blocked inside a driver (device-invalidation race, virtual or
+     // USB endpoint) used to hang this join — and with it the message
+     // thread that reaches stop() via AudioEngine::applySource — for
+     // good, leaving every button dead. Wait 500 ms; on timeout the
+     // thread is detached and the Impl deliberately LEAKED (it keeps
+     // sole ownership of everything the thread touches; the same
+     // leak-don't-free-under-a-live-thread pattern as
+     // AudioEngine::stopRecording, v0.12). The leaked thread exits on
+     // its own when the blocked call returns and loop() sees run=false.
+     if (impl_->th.stopBounded(500)) delete impl_;
+     impl_ = nullptr; } }
  bool WindowsLoopback::isRunning() const { return impl_ != nullptr; }
  double WindowsLoopback::sampleRate() const { return impl_ ? impl_->sr.load() : 48000; }
+ // v0.20.2: last-enumeration cache (see enumerateRenderEndpointsCached).
+ namespace {
+     std::mutex g_epsCacheLock;
+     std::vector<WindowsLoopback::EndpointInfo> g_epsCache;
+     bool g_epsCacheValid = false;
+ }
  std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpoints() {
      // Called from the UI thread (picker/menu construction). COM is
      // initialised for this call only if this thread hasn't got an apartment
@@ -284,7 +309,15 @@
          en->Release();
      }
      if (didInit) CoUninitialize();
+     { std::lock_guard<std::mutex> g(g_epsCacheLock); g_epsCache = out; g_epsCacheValid = true; }
      return out;
+ }
+ std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpointsCached(bool forceRefresh) {
+     if (!forceRefresh) {
+         std::lock_guard<std::mutex> g(g_epsCacheLock);
+         if (g_epsCacheValid) return g_epsCache;
+     }
+     return enumerateRenderEndpoints(); // refreshes the cache as a side effect
  }
  std::string WindowsLoopback::activeDeviceName() const { if (!impl_) return {}; std::lock_guard<std::mutex> g(impl_->diagLock); return impl_->activeName; }
  std::string WindowsLoopback::activeDeviceId() const { if (!impl_) return {}; std::lock_guard<std::mutex> g(impl_->diagLock); return impl_->activeId; }
@@ -298,6 +331,7 @@
 #else
  struct WindowsLoopback::Impl {};
  std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpoints() { return {}; }
+ std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpointsCached(bool) { return {}; }
  bool WindowsLoopback::start(Callback, const std::string&, const std::string&) { return false; }
  void WindowsLoopback::stop() {}
  bool WindowsLoopback::isRunning() const { return false; }

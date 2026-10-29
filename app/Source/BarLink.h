@@ -66,8 +66,18 @@ public:
     // the move was our own remote apply (guard window).
     void notifyLocalGeometry() {
         if (!shared_ || !getBounds) return;
-        auto r = getBounds();
+        // v0.20.2 COALESCING: this feed fires on EVERY OS moved/resized
+        // notification — hundreds per second during a window drag — and
+        // each call costs two mutex round-trips on the shared block plus
+        // the host's reserve-machine sync. Peers sample our slot on
+        // their own 30 Hz timers, so publishing faster than ~50 Hz is
+        // pure waste; cap it. A skipped call loses nothing: the 30 Hz
+        // timer republishes the true rect every tick, and a drag
+        // session's liveness window is 600 ms.
         const long long now = nowMs();
+        if (now - lastNotifyMs_ < 20) return;
+        lastNotifyMs_ = now;
+        auto r = getBounds();
         meterbar::LinkShared snap;
         if (!readShared(snap)) return;
         bool foreignLive = false;
@@ -212,8 +222,10 @@ private:
             seenStackSeq_[(size_t)sl.appId] = sl.stackSeq;
             meterbar::IntRect targets[3];
             if (meterbar::planStackAll(snap, now, sl.appId, targets) > 0 && targets[(size_t)appId_].w > 0
-                && !sameRect(targets[(size_t)appId_], mine.rect))
+                && !sameRect(targets[(size_t)appId_], mine.rect)) {
                 applyRemote(targets[(size_t)appId_]);
+                mine.rect = targets[(size_t)appId_]; // v0.20.2: later sections this tick compare against the post-apply rect, not the stale snapshot
+            }
         }
         // --- follow a live foreign drag ---
         const meterbar::LinkSlot* leader = nullptr;
@@ -240,13 +252,19 @@ private:
             if (!sameRect(snapped, mine.rect)) { applyRemote(snapped); mine.rect = snapped; }
         }
         // --- group dock: stack against a reserve-docked linked peer ---
-        for (auto& s : snap.slots) {
-            if (s.appId < 0 || s.appId == appId_ || !s.linked || s.dockedEdge < 0 || !meterbar::slotLive(s, now)) continue;
-            auto target = meterbar::groupDockRect(s.rect, mine.rect, (meterbar::DockArg)s.dockedEdge);
-            const auto key = std::make_tuple(s.appId, s.dockedEdge, s.rect.x, s.rect.y, s.rect.w, s.rect.h);
-            if (key != dockKey_) {
-                dockKey_ = key;
-                if (!sameRect(target, mine.rect)) applyRemote(target);
+        // v0.20.2: ONLY while this bar is not itself reserve-docked
+        // (core rule groupDockFollows, BarLink.hpp). With both bars
+        // docked, each stacks against the other's latest rect and the
+        // pair chases forever at tick rate — the 2026-10-29 freeze.
+        if (meterbar::groupDockFollows(mine.dockedEdge)) {
+            for (auto& s : snap.slots) {
+                if (s.appId < 0 || s.appId == appId_ || !s.linked || s.dockedEdge < 0 || !meterbar::slotLive(s, now)) continue;
+                auto target = meterbar::groupDockRect(s.rect, mine.rect, (meterbar::DockArg)s.dockedEdge);
+                const auto key = std::make_tuple(s.appId, s.dockedEdge, s.rect.x, s.rect.y, s.rect.w, s.rect.h);
+                if (key != dockKey_) {
+                    dockKey_ = key;
+                    if (!sameRect(target, mine.rect)) applyRemote(target);
+                }
             }
         }
     }
@@ -330,6 +348,7 @@ private:
 #endif
     meterbar::IntRect lastRect_{};
     long long applyingUntilMs_ = 0;
+    long long lastNotifyMs_ = 0;          // v0.20.2: notifyLocalGeometry coalescing stamp
     unsigned followSeq_ = 0, settledSeq_ = 0;
     meterbar::IntRect followOwnStart_{}, followLeaderStart_{};
     std::tuple<int, int, int, int, int, int> dockKey_{ -1, -1, 0, 0, 0, 0 };

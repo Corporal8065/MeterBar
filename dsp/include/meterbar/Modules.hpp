@@ -55,6 +55,10 @@ public:
     float at(int age, int bin) const { int row = (head_ - 1 - age) % rows_; if (row < 0) row += rows_; return data_[(size_t)row*bins_+bin]; }
     static float fadeGain(int age, int rows, float fade01) { float a = rows ? (float)age/(float)rows : 0.f; return 1.0f - fade01 * a; }
     int bins() const { return bins_; } int rows() const { return rows_; }
+    // v0.20.2: the write cursor, exposed so the renderer can tell how
+    // many rows were pushed since its last render (head delta) and skip
+    // re-rendering an unchanged spectrogram cache image.
+    int head() const { return head_; }
 private: int bins_=0, rows_=256, head_=0; float acc_=0; std::vector<float> data_;
 };
 // ---------- Stereometer ----------

@@ -15,6 +15,16 @@ public:
     // picker is built from THIS list so the name a user picks is the name of
     // a real endpoint, and the ID lets capture key on identity, not text.
     static std::vector<EndpointInfo> enumerateRenderEndpoints();
+    // v0.20.2: cached variant — the raw enumeration is a synchronous
+    // COM/MMDevice sweep on the message thread, and it used to re-run
+    // on every picker build, hamburger-menu open, device pick and
+    // (every ~2 s) Debug-window refresh. enumerateRenderEndpoints()
+    // refreshes this cache as a side effect; the cached call returns
+    // the last list unless forceRefresh (or no list exists yet), in
+    // which case it enumerates. Explicit user surfaces (Settings and
+    // the hamburger menu opening) enumerate raw so a just-plugged
+    // device shows up; repeat consumers use the cache.
+    static std::vector<EndpointInfo> enumerateRenderEndpointsCached(bool forceRefresh = false);
     bool start(Callback cb, const std::string& deviceNameUtf8 = "", const std::string& deviceIdUtf8 = "");
     void stop();
     bool isRunning() const;

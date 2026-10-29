@@ -6,6 +6,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include <vector>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <thread>
 #include "../dsp/include/meterbar/Fft.hpp"
 #include "../dsp/include/meterbar/Loudness.hpp"
 #include "../dsp/include/meterbar/Modules.hpp"
@@ -19,6 +23,7 @@
 #include "../dsp/include/meterbar/Visualizer.hpp"
 #include "../dsp/include/meterbar/BarLink.hpp"
 #include "../dsp/include/meterbar/WindowGeom.hpp"
+#include "../dsp/include/meterbar/BoundedThread.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -922,6 +927,93 @@ int main() {
         CHECK(!bgIsLocalChange(bs, 3, 40));
         bgForceRepublish(bs);
         CHECK(bgIsLocalChange(bs, 3, 40));
+    }
+    // --- v0.20.2: BoundedThread — the bounded stop behind the loopback fix
+    {
+        BoundedThread idle;                       // never started
+        CHECK(idle.stopBounded(50));
+        BoundedThread quick;                      // finishes at once: joined
+        quick.start([]{});
+        CHECK(quick.stopBounded(2000));
+        CHECK(quick.finished());
+        // Worker stuck in a "driver call" (never looks at any stop flag):
+        // stopBounded must give up in bounded time, detach and report
+        // false — the caller then leaks its state instead of freezing
+        // the UI on an unbounded join. The gate is shared so the
+        // detached worker can still exit cleanly afterwards.
+        auto gate = std::make_shared<std::atomic<bool>>(false);
+        BoundedThread stuck;
+        stuck.start([gate]{ while (!gate->load()) std::this_thread::sleep_for(std::chrono::milliseconds(2)); });
+        auto t0 = std::chrono::steady_clock::now();
+        bool joined = stuck.stopBounded(100);
+        auto waitedMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        CHECK(!joined);
+        CHECK(waitedMs >= 50 && waitedMs < 1000); // waited ~the timeout, NOT the worker's lifetime
+        gate->store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    // --- v0.20.2: SpectrogramHistory::head — the renderer's skip bookkeeping
+    {
+        SpectrogramHistory sg; sg.prepare(4, 8);
+        std::vector<float> row(4, -30.f);
+        CHECK(sg.head() == 0);
+        sg.pushRow(row, 5.f);                     // speed 5 -> exactly one row per call
+        CHECK(sg.head() == 1);
+        for (int i = 0; i < 7; ++i) sg.pushRow(row, 5.f);
+        CHECK(sg.head() == 0);                    // wrapped at rows
+        SpectrogramHistory sg2; sg2.prepare(2, 4);
+        sg2.pushRow(std::vector<float>{ -10.f, -11.f }, 5.f);
+        sg2.pushRow(std::vector<float>{ -20.f, -21.f }, 5.f);
+        CHECK(sg2.head() == 2);
+        CHECK(sg2.at(0, 0) == -20.f);             // age 0 = newest row
+        CHECK(sg2.at(1, 0) == -10.f);
+    }
+    // --- v0.20.2: group-dock participation rule + the mutual-dock chase
+    {
+        CHECK(groupDockFollows(-1));
+        CHECK(!groupDockFollows(0));
+        CHECK(!groupDockFollows((int)ReserveEdge::Bottom));
+        // Simulate the client dock rule for two bars that are BOTH
+        // reserve-docked at the bottom edge and linked (each tick, each
+        // bar stacks against the other's latest rect). Unguarded — the
+        // v0.20.1 behaviour — the positions never settle: the chase
+        // that flooded the message thread in the 2026-10-29 field
+        // report. Guarded by groupDockFollows, neither bar ever moves.
+        auto simTick = [](IntRect& self, const IntRect& peer, bool guarded) {
+            if (guarded && !groupDockFollows((int)ReserveEdge::Bottom)) return false;
+            IntRect t = groupDockRect(peer, self, ReserveEdge::Bottom);
+            if (t == self) return false;
+            self = t; return true;
+        };
+        {
+            IntRect a{ 100, 1000, 800, 50 }, b{ 100, 940, 800, 60 };
+            bool moved = true;
+            for (int i = 0; i < 50 && moved; ++i) {
+                bool ma = simTick(a, b, false), mb = simTick(b, a, false);
+                moved = ma || mb;
+            }
+            CHECK(moved); // v0.20.1: still moving after 50 ticks — no fixed point
+        }
+        {
+            IntRect a{ 100, 1000, 800, 50 }, b{ 100, 940, 800, 60 };
+            bool moved = true;
+            for (int i = 0; i < 50 && moved; ++i) {
+                bool ma = simTick(a, b, true), mb = simTick(b, a, true);
+                moved = ma || mb;
+            }
+            CHECK(!moved);
+            CHECK(a == (IntRect{ 100, 1000, 800, 50 }));
+            CHECK(b == (IntRect{ 100, 940, 800, 60 }));
+        }
+        // Floating follower + docked peer: one step to the target, then
+        // a fixed point (the target depends only on the peer's rect).
+        {
+            IntRect peer{ 100, 940, 800, 60 }, me{ 300, 300, 700, 50 };
+            IntRect t1 = groupDockRect(peer, me, ReserveEdge::Bottom);
+            CHECK(t1 == (IntRect{ 100, 890, 700, 50 }));
+            CHECK(groupDockRect(peer, t1, ReserveEdge::Bottom) == t1);
+        }
     }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);

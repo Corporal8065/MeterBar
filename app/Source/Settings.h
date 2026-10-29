@@ -376,7 +376,12 @@ public:
         // attached to the content + viewport ONLY — never to the bar.
         content.setLookAndFeel(&settingsLnf);
         viewport.setLookAndFeel(&settingsLnf);
-        content.build();
+        // v0.20.2: no content.build() here — at this point content.st is
+        // always null (MainComponent wires it AFTER constructing the
+        // window), so the call was a guaranteed no-op that made every
+        // startup read as a double build. MainComponent's post-wiring
+        // build() is the single first build; rebuildSettings() covers
+        // later opens.
         viewport.setViewedComponent(&content, false);
         viewport.setScrollBarsShown(true, false); // v0.8: full settings scroll into view
         setContentNonOwned(&viewport, true);

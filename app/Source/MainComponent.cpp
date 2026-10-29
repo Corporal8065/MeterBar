@@ -354,33 +354,30 @@ void MainComponent::resized() {
 }
 // v0.8: the WHOLE top bar drags the window (buttons still click normally —
 // their events never reach here; labels let clicks fall through).
-// v0.11: on Windows the drag is handed to the OS itself (native caption move
-// loop) — the hand-rolled drag could leave the mouse captured and the window
-// input-dead in the field; the OS move loop owns capture end-to-end.
+// v0.20.2: the drag now uses juce::ComponentDragger — SessionBar's proven
+// path (freeze-audit suspect 2). v0.11 handed the drag to the OS itself
+// (SendMessageW WM_NCLBUTTONDOWN / HTCAPTION — a synchronous modal move
+// loop inside click dispatch); if the press/release pairing got confused
+// (press begins on a fall-through label, release lands over a button or
+// another window) capture state could be left wrong and the buttons dead
+// until another full drag cycle — this app's own "stuck mouse capture,
+// dead buttons" field history. ComponentDragger never enters an OS modal
+// loop, and SessionBar ships it with no stuck-capture report.
 void MainComponent::mouseDown(const juce::MouseEvent& e) {
     // v0.12: only the LEFT button may start a window move — a right/middle
-    // press on the bar previously also entered the move loop / fallback drag.
+    // press on the bar previously also entered the drag path.
     if (!e.mods.isLeftButtonDown()) return;
     if (engine.state.showToolbar && e.eventComponent == this && e.getPosition().y < 30) {
         if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) {
-#if JUCE_WINDOWS
-            if (auto* peer = w->getPeer()) {
-                if (auto* hwnd = static_cast<HWND>(peer->getNativeHandle())) {
-                    ReleaseCapture();
-                    SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
-                    return;
-                }
-            }
-#endif
+            windowDragger.startDraggingComponent(w, e);
             winDragging = true;
-            dragOffset = e.getScreenPosition() - w->getScreenBounds().getTopLeft();
         }
     }
 }
 void MainComponent::mouseDrag(const juce::MouseEvent& e) {
     if (winDragging) {
         if (auto* w = findParentComponentOfClass<juce::DocumentWindow>())
-            w->setTopLeftPosition(e.getScreenPosition() - dragOffset);
+            windowDragger.dragComponent(w, e, nullptr);
     }
 }
 void MainComponent::mouseUp(const juce::MouseEvent&) { winDragging = false; }
@@ -537,7 +534,7 @@ void MainComponent::timerCallback() {
         // is not reporting them active; a screenshot of this line settles
         // any "outputs don't show up" report in one look.
         if (debugEpsCount < 0 || now - lastEpsCheckMs > 2000) {
-            debugEpsCount = (int)WindowsLoopback::enumerateRenderEndpoints().size();
+            debugEpsCount = (int)WindowsLoopback::enumerateRenderEndpointsCached().size(); // v0.20.2: cached — this poll must not re-run the COM sweep every ~2 s
             lastEpsCheckMs = now;
         }
         debugLabel.setText("Device: " + engine.currentDeviceName() +
@@ -763,7 +760,7 @@ void MainComponent::setDeviceByName(bool input, const juce::String& name) {
         // capture keys on identity, not on a later name re-match.
         engine.state.outputDeviceId.clear();
 #if JUCE_WINDOWS
-        for (auto& ep : WindowsLoopback::enumerateRenderEndpoints())
+        for (auto& ep : WindowsLoopback::enumerateRenderEndpointsCached()) // v0.20.2: the picker that led here just enumerated — resolve from the cache
             if (juce::String(ep.name) == name) { engine.state.outputDeviceId = ep.id; break; }
 #endif
     }

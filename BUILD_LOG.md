@@ -2,6 +2,68 @@
 
 # MeterBar — BUILD LOG (dated, honest: only what was actually observed)
 
+## v0.20.2 (2026-10-29) — freeze-fix round (field: buttons dead after linking; also after clean reinstall)
+
+Jackson's field reports: buttons froze on v0.20.1 after a Revo-clean
+reinstall (SessionBar unaffected), and — the sharper report — the UI
+stopped responding AFTER LINKING MeterBar<->TickerBar on his laptop,
+and again after a full MeterBar restart (second machine, same freeze:
+shipped code, not one machine's audio stack). A code audit ranked the
+suspects; every fix below is defensive — the patterns were wrong on
+their face — and the freeze itself can only be confirmed fixed by
+Jackson's field test on his machines. Pure-core suite 965 → 985
+checks, 0 failures; app layer verified by the GitHub Actions Windows
+build — no Windows live test was run by the builder.
+
+- **BarLink group-dock chase (the link trigger).** When BOTH linked
+  bars were reserve-docked, each stacked against the other's latest
+  rect every 30 Hz tick; the geometry has no fixed point, so the pair
+  chased forever, flooding the message thread with setBounds/moved/
+  resized traffic until buttons starved. The client now group-dock-
+  follows only while it is not itself docked (core rule
+  `groupDockFollows`, pinned by a simulation test: unguarded chases
+  for 50+ ticks, guarded never moves; the floating-bar case still
+  settles in one step). Also: the one-click-stack apply now updates
+  the tick's working rect (later sections compared against a stale
+  snapshot), and notifyLocalGeometry is coalesced to ~50 Hz (it fired
+  two shared-memory mutex round-trips on EVERY OS move notification,
+  hundreds/sec during drags, while peers only sample at 30 Hz).
+  Link state itself does not auto-resume in MeterBar (default off;
+  it rides in presets) — the post-restart freeze is consistent with
+  re-engaging Link (button or preset) into the same mutual-dock
+  condition. The shared-block mutex (10 ms capped waits, no calls out
+  while held) and the byte-identical protocol core were inspected
+  and are NOT implicated.
+- **Bounded loopback stop (audit suspect 1).** WindowsLoopback::stop()
+  joined the WASAPI capture thread with no timeout, on the message
+  thread via applySource; a driver-blocked WASAPI call froze the UI
+  permanently. Now: stop waits 500 ms (new core `BoundedThread`,
+  unit-tested with a stuck worker) and on timeout detaches and
+  deliberately leaks the Impl — the stopRecording leak-don't-free
+  pattern. The capture lambda now captures the Impl pointer (a leaked
+  thread can outlive a stop->start cycle).
+- **Drag path (audit suspect 2).** The toolbar drag no longer enters
+  the OS modal move loop (SendMessageW WM_NCLBUTTONDOWN inside click
+  dispatch — the "stuck mouse capture, dead buttons" pattern from
+  this app's own history). It uses juce::ComponentDragger, SessionBar's
+  shipped path; the top-strip / label fall-through affordance is
+  unchanged.
+- **Spectrogram cost (audit suspect 3).** The half-res cache is now
+  re-rendered only when an input it depends on changed (history head,
+  bins, fade, scale, sample rate, orientation, colour map, size) —
+  at 60 fps most frames previously re-rendered an identical image;
+  and the re-render writes pixels directly via BitmapData instead of
+  setColour+fillRect per cell (heat colours are opaque, the cache is
+  RGB: byte-identical output). Default frame rate stays 60.
+- **Startup enumeration (audit suspect 4, minimal).** The dead
+  no-op build() in the SettingsWindow constructor is gone (content.st
+  is always null there; the post-wiring build is the single first
+  build). Endpoint enumeration results are cached (raw enumeration
+  refreshes the cache): the Debug window's ~2 s poll and the device-
+  pick ID resolution now read the cache instead of re-running the
+  COM/MMDevice sweep; Settings and the hamburger menu still enumerate
+  fresh on open, so a just-plugged device appears.
+
 ## v0.20.1 (2026-10-29) — parity-round support release
 
 Small release so the family can move together; MeterBar's own
