@@ -1,0 +1,35 @@
+MeterBar test kit - FOR YOUR WINDOWS 11 PC (kit v0.18)
+================================================
+
+Yes, this is a Windows kit. If you saw the word "Linux" in
+BUILD_LOG.md, that's just the machine Milo used to test the
+meter math before packaging it for you. Ignore it.
+
+DO THIS:
+1. Unzip this whole folder somewhere (Desktop is fine).
+2. Make sure Visual Studio 2022 is installed with the
+   workload "Desktop development with C++".
+3. Double-click build.bat
+   - The black window MUST stay open when it finishes.
+   - First run downloads JUCE from the internet (a few min).
+   - Everything is also written to build-log.txt.
+4. If it says FAILED: open build-log.txt and send Milo the
+   error lines. Don't fight it, that's his job.
+5. If it says DONE: double-click
+   build-app\app\MeterBar_artefacts\Release\MeterBar.exe
+   It starts on your DEFAULT output (whatever plays through
+   your usual speakers/headphones), so play a song and all 6
+   meters should move with no audio setup.
+
+NEW IN v0.18: the bar can now RESERVE the top strip of your
+monitor (toolbar "Reserve" button) so maximised windows stop
+below it instead of sliding under it, plus Arrange/Restore
+buttons that slide floating windows out from under the bar.
+README_TEST.md leads with the click-by-click tests for it.
+
+Then work through README_TEST.md (the click-by-click checklist)
+and send Milo a screenshot of the bar.
+
+SHARING IT (new in v0.15): to give MeterBar to a friend as a
+one-click installer, double-click build-release.bat instead -
+see the "Sharing it" section of README_TEST.md.

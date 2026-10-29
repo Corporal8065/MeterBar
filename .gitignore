@@ -1,0 +1,28 @@
+# MeterBar — build outputs and local artefacts (never committed).
+# A fresh clone rebuilds everything: CMake re-fetches JUCE 8.0.4 from
+# its release zip (see CMakeLists.txt FetchContent), so no build tree
+# or fetch cache is ever needed in the repo.
+
+# CMake build trees (incl. the fetched JUCE _deps tree)
+/build/
+/build-app/
+
+# Release staging + built installers / test kits
+/dist/
+*.zip
+
+# Build logs from build.bat / build-release.bat runs
+build-log*.txt
+build-release-log.txt
+
+# Visual Studio / editor state
+.vs/
+*.user
+*.suo
+
+# Generated media dumps next to the curated assets (source art only)
+assets/media-generation-*
+
+# OS droppings
+.DS_Store
+Thumbs.db
