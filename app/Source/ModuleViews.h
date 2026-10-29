@@ -19,6 +19,7 @@ struct AnalysisData {
     double loudIntegrated = -120, loudShortTerm = -120, loudTruePeakDb = -120; // v0.16 loudness pack
     float beatGlow = 0;                      // v0.16: onset envelope 0..1 (Beat Pulse + mascot)
     std::vector<float> scopeBuf; float scopeFreq = 0;
+    std::vector<float> scopeLow, scopeMid, scopeHigh; // v0.20.0: true 3-band split of scopeBuf (core splitScopeBands) for Multi
     double sampleRate = 48000;
 };
 class ModuleView : public juce::Component {
@@ -190,12 +191,25 @@ private:
         int iw = std::max(1, (int)p.getWidth() / 2), ih = std::max(1, (int)p.getHeight() / 2);
         if (!sgCache.isValid() || sgCache.getWidth() != iw || sgCache.getHeight() != ih)
             sgCache = juce::Image(juce::Image::RGB, iw, ih, true);
+        // v0.20.0 (item i): the frequency axis uses the DSP core's exact
+        // binAtX mapping (the same walk the spectrum view's LUT uses) —
+        // the old code indexed bins LINEARLY here, so the spectrogram's
+        // frequency axis disagreed with the spectrum's under Log/Mel.
+        const double srSg = data->sampleRate > 0 ? data->sampleRate : 48000.0;
+        const double maxFSg = std::min(20000.0, srSg * 0.5);
+        const int fftSg = (sg->bins() - 1) * 2;
+        const int axisPx = vert ? iw : ih;
+        std::vector<int> binLut((size_t)std::max(1, axisPx), 1);
+        for (int a = 0; a < axisPx; ++a) {
+            const float frac = vert ? (float)a / (float)axisPx
+                                    : 1.f - (float)a / (float)axisPx; // y axis: top = highest freq
+            binLut[(size_t)a] = meterbar::SpectrumAnalyser::binAtX(frac, sg->bins(), fftSg, srSg, 20.0, maxFSg, st.fftScale);
+        }
         {
             juce::Graphics ig(sgCache);
             for (int x = 0; x < iw; ++x) for (int y = 0; y < ih; ++y) {
                 int age = vert ? (int)((float)y / ih * sg->rows()) : (int)((float)x / iw * sg->rows());
-                int bin = vert ? (int)((float)x / iw * (sg->bins() - 1))
-                               : (int)((1.f - (float)y / ih) * (sg->bins() - 1));
+                int bin = vert ? binLut[(size_t)x] : binLut[(size_t)y];
                 float db = sg->at(age, juce::jlimit(0, sg->bins() - 1, bin));
                 // v0.15: the spectrogram has its OWN sensitivity mapping
                 // (DSP spectrogramLevelT) — at the trim where the other
@@ -347,14 +361,35 @@ private:
     }
     void drawScope(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
         auto& th = data->theme; int n = (int)data->scopeBuf.size(); if (n == 0) return;
+        // v0.20.0 (item i): Multi = a TRUE 3-band split — three stacked
+        // lanes (LOW <250 Hz / MID 250 Hz–4 kHz / HIGH >4 kHz) from the
+        // core's splitScopeBands. The old "multi" redrew the same left
+        // channel faintly over the main trace: one signal twice.
+        if (st.scopeDisplay == meterbar::ScopeDisplay::Multi && !data->scopeLow.empty()) {
+            const std::vector<float>* bands[3] = { &data->scopeLow, &data->scopeMid, &data->scopeHigh };
+            const char* names[3] = { "LOW", "MID", "HIGH" };
+            const juce::Colour cols[3] = { th.moduleAccent((int)Kind::Oscilloscope), th.accent2, th.accent };
+            const float laneH = p.getHeight() / 3.f;
+            for (int li = 0; li < 3; ++li) {
+                auto lane = p.withTop(p.getY() + laneH * li).withHeight(laneH);
+                float midY = lane.getCentreY();
+                g.setColour(th.dim.withAlpha(0.4f)); g.drawLine(lane.getX(), midY, lane.getRight(), midY, 0.5f);
+                auto& buf = *bands[li]; int m = (int)buf.size(); if (m < 2) continue;
+                juce::Path path;
+                for (int x = 0; x < (int)lane.getWidth(); ++x) {
+                    int i = (int)((float)x / lane.getWidth() * (m - 1));
+                    float y = midY - buf[i] * lane.getHeight() * 0.46f;
+                    if (x == 0) path.startNewSubPath(lane.getX(), y); else path.lineTo(lane.getX() + x, y);
+                }
+                g.setColour(cols[li]); g.strokePath(path, juce::PathStrokeType(1.1f));
+                g.setColour(th.dim); g.setFont(8.5f);
+                g.drawText(names[li], lane.reduced(3.f, 1.f), juce::Justification::topLeft);
+            }
+            if (data->scopeFreq > 0) { g.setColour(th.dim); g.setFont(9.f);
+                g.drawText(juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight); }
+            return;
+        }
         float midY = p.getCentreY(); g.setColour(th.dim.withAlpha(0.5f)); g.drawLine(p.getX(), midY, p.getRight(), midY, 0.5f);
-        auto drawChan = [&](const std::vector<float>& buf, juce::Colour c) {
-            juce::Path path; int m = (int)buf.size(); if (m == 0) return;
-            for (int x = 0; x < (int)p.getWidth(); ++x) { int i = (int)((float)x / p.getWidth() * (m - 1));
-                float y = midY - buf[i] * p.getHeight() * 0.48f;
-                if (x == 0) path.startNewSubPath(p.getX(), y); else path.lineTo(p.getX() + x, y); }
-            g.setColour(c); g.strokePath(path, juce::PathStrokeType(1.1f));
-        };
         // Main trace: multicolour segments, colour = amplitude at that point
         // (palette gradient teal -> yellow -> orange), per Jackson 2026-10-13.
         // v0.14: segments now take the shared level HEAT (spectrumHeat) with
@@ -373,9 +408,6 @@ private:
                     prevI = i; prevY = yAt(i);
                 }
             }
-        }
-        if (st.scopeDisplay == meterbar::ScopeDisplay::Multi) { // pseudo multi-band: also draw latestL faintly
-            drawChan(data->latestL, th.accent2.withAlpha(0.5f));
         }
         if (data->scopeFreq > 0) { g.setColour(th.dim); g.setFont(9.f);
             g.drawText(juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight); }

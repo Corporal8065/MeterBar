@@ -136,6 +136,39 @@ public:
 private: int cap_ = 2048; std::vector<float> buf_;
 };
 
+// ---------- Scope band split (v0.20.0, item i) ----------
+// A TRUE 3-band split for the oscilloscope's Multi display — which
+// previously drew the scope buffer and then the same left channel
+// again faintly (the "multi" was one signal twice). Two cascaded
+// one-pole lowpasses at the stated sample rate:
+//   low  = LP(lowHz)(x)
+//   mid  = LP(highHz)(x - low)
+//   high = x - low - mid
+// The three bands sum back to the input EXACTLY (by construction —
+// the tests pin it), so nothing is invented or lost. Stateless per
+// call: filter state restarts per display buffer (a few samples of
+// settle at the start; the scope tiles a periodic segment anyway).
+struct ScopeBands { std::vector<float> low, mid, high; };
+inline ScopeBands splitScopeBands(const std::vector<float>& x, double sampleRate,
+                                  double lowHz = 250.0, double highHz = 4000.0) {
+    ScopeBands out;
+    const int n = (int)x.size();
+    out.low.assign((size_t)n, 0.f); out.mid.assign((size_t)n, 0.f); out.high.assign((size_t)n, 0.f);
+    if (n == 0 || sampleRate <= 0) return out;
+    auto coef = [&](double hz) { return (float)(1.0 - std::exp(-2.0 * 3.141592653589793 * hz / sampleRate)); };
+    const float aL = coef(lowHz), aH = coef(highHz);
+    float lpL = 0.f, lpM = 0.f;
+    for (int i = 0; i < n; ++i) {
+        lpL += aL * (x[(size_t)i] - lpL);
+        const float rest = x[(size_t)i] - lpL;
+        lpM += aH * (rest - lpM);
+        out.low[(size_t)i] = lpL;
+        out.mid[(size_t)i] = lpM;
+        out.high[(size_t)i] = rest - lpM;
+    }
+    return out;
+}
+
 // ---------- Beat / onset detection (v0.16) ----------
 // A deliberately simple energy-flux onset detector for the Beat Pulse
 // glow and the Anime mascot's bob: each pushed block's mean-square is

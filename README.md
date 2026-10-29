@@ -26,6 +26,8 @@ MeterBar sits at the edge of your monitor — bottom, top, or either side — an
 - **Edge docking + Reserve** — dock the bar to any screen edge and turn on **Reserve**: maximised windows stop at the bar instead of sliding underneath it (the way MiniMeters behaves). **Arrange** slides floating windows clear of the bar; **Restore** puts everything back.
 - **Five themes** — Midnight Kids, Midnight Pink, Deep Teal, Daylight, and Anime — with a family of spectrum colour maps (Plasma, Rainbow, Inferno, …). **Settings is always a deep pink-plum** (`#2A1E2E`, accent `#E04C89`) in every theme, because the settings sheet is no place for a flashbang.
 - **A mascot** — in the Anime theme she gets her own cell at the end of the strip, bobs on beat onsets, and cheers when it gets loud. Cute click sounds included, Anime theme only.
+- **Visualizer background** (v0.20.0, off by default) — black background, white particles converging to the centre, and rainbow brush-stroke bursts fired by the low/mid/high bands, over a blurred glow layer; palette controls (base hue, saturation, spread, cycle) in Settings → Appearance. Particle count is hard-capped for gaming PCs.
+- **One exact frequency axis** — the spectrum and spectrogram share the DSP core's single frequency mapping, and the oscilloscope's **Multi** mode is a true 3-band split (LOW / MID / HIGH lanes) instead of a redrawn channel.
 - **In-app updates** — MeterBar checks for updates on launch and from the menu, shows the new version **and its full release notes** in-app, and can download, verify (size + SHA-256), install, and relaunch itself. See *Updating* below for the one honest catch.
 
 ## Install
@@ -69,6 +71,7 @@ Real Windows screenshots of these are wanted for this section. If you're running
 - Settings window in the **Anime** theme
 - Settings window in the **Daylight** theme
 - The bar itself in each theme: **Midnight Kids**, **Midnight Pink**, **Deep Teal**, **Daylight**, **Anime** (mascot visible)
+- The **Visualizer background** running live (bands bursting) — a still can only suggest it; a short clip would be better
 
 ## The family
 

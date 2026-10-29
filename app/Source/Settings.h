@@ -169,6 +169,16 @@ public:
                    [&](double v){ st->backgroundOpacity = (float)(v / 100.0); });
             note("Below 100 the desktop shows through the module backgrounds (traces and text stay solid). Translucency only — no background blur in this build.");
             toggle("Beat Pulse (subtle glow on beats)", st->beatPulseEnabled, [&](bool b){ st->beatPulseEnabled = b; });
+            toggle("Visualizer background (particles + rainbow bursts, v0.20.0)", st->visualizerEnabled, [&](bool b){ st->visualizerEnabled = b; });
+            slider("Visualizer base hue (deg)", 0.0, 360.0, st->visualizerBaseHue * 360.0,
+                   [&](double v){ st->visualizerBaseHue = (float)(v / 360.0); });
+            slider("Visualizer saturation %", 0.0, 100.0, st->visualizerSaturation * 100.0,
+                   [&](double v){ st->visualizerSaturation = (float)(v / 100.0); });
+            slider("Visualizer palette spread %", 0.0, 100.0, st->visualizerSpread * 100.0,
+                   [&](double v){ st->visualizerSpread = (float)(v / 100.0); });
+            slider("Visualizer palette cycle (s, 0 = static)", 0.0, 60.0, st->visualizerCycleSec,
+                   [&](double v){ st->visualizerCycleSec = (float)v; });
+            note("Visualizer: black background, white particles converging to the centre, frequency bands bursting rainbow strokes that dissolve into dots, over a blurred glow layer. Particle count is hard-capped (600) for gaming PCs. Needs a visual field test for tuning — see BUILD_LOG.");
             toggle("Cute click sounds (Anime theme only)", st->animeClickSounds, [&](bool b){ st->animeClickSounds = b; });
             note("Click sounds only ever play in the Anime theme; switching themes silences them completely.");
         });

@@ -268,7 +268,11 @@ void MainComponent::paint(juce::Graphics& g) {
     const float bgOp = juce::jlimit(0.15f, 1.0f, engine.state.backgroundOpacity);
     // v0.16: the window background paints the selected Background Style
     // (Flat = the old flat theme.bg fill, exactly).
-    fillStyledBackground(g, getLocalBounds().toFloat(), engine.state.backgroundStyle, theme, bgOp);
+    // v0.20.0: with the visualizer ON, the background is the visualizer
+    // layer instead (black base + blurred glow + particles) — module
+    // panels still paint over it at the Background Opacity setting.
+    if (engine.state.visualizerEnabled) drawVisualizerBackground(g);
+    else fillStyledBackground(g, getLocalBounds().toFloat(), engine.state.backgroundStyle, theme, bgOp);
     if (engine.state.showToolbar) {
         g.setColour(theme.panel.withAlpha(bgOp)); g.fillRect(0, 0, getWidth(), 30);
         // v0.12: a thin palette-gradient strip under the toolbar — the icon
@@ -411,6 +415,48 @@ void MainComponent::layoutModules() {
         mascot.setBounds(x, area.getY(), std::max(10, wpx - 2), area.getHeight());
     }
 }
+// v0.20.0: render the visualizer model into a half-res image (capped
+// 480x270 — the particle layer never needs full res under a blur),
+// blur a copy of it with a Gaussian convolution, and composite:
+// black -> blurred glow -> crisp dots on top. The model itself is
+// the capped pure core (<= 600 particles), so per-frame cost is the
+// image work only.
+void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
+    auto bounds = getLocalBounds();
+    g.fillAll(juce::Colours::black);
+    if (bounds.isEmpty()) return;
+    const int iw = juce::jlimit(1, 480, bounds.getWidth() / 2);
+    const int ih = juce::jlimit(1, 270, bounds.getHeight() / 2);
+    if (!vizCache.isValid() || vizCache.getWidth() != iw || vizCache.getHeight() != ih) {
+        vizCache = juce::Image(juce::Image::RGB, iw, ih, true);
+        vizBlur = juce::Image(juce::Image::RGB, iw, ih, true);
+    }
+    meterbar::VisualizerSettings vs;
+    vs.baseHue = engine.state.visualizerBaseHue;
+    vs.saturation = engine.state.visualizerSaturation;
+    vs.paletteSpread = engine.state.visualizerSpread;
+    vs.cycleSeconds = engine.state.visualizerCycleSec;
+    {
+        juce::Graphics ig(vizCache);
+        ig.fillAll(juce::Colours::black);
+        for (auto& p : visualizer.particles()) {
+            auto c = visualizer.colorFor(p, vs);
+            ig.setColour(juce::Colour(c.r, c.g, c.b));
+            const float px = p.x * (float)iw, py = p.y * (float)ih;
+            const float r = p.size;
+            ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
+        }
+    }
+    vizBlur = vizCache;
+    vizBlur.duplicateIfShared(); // the convolution reads source while writing dest — they must not share pixels
+    juce::ImageConvolutionKernel kernel(5);
+    kernel.createGaussianBlur(1.8f);
+    kernel.applyToImage(vizBlur, vizCache, vizBlur.getBounds());
+    g.drawImage(vizBlur, bounds.toFloat());
+    g.setOpacity(0.9f);
+    g.drawImage(vizCache, bounds.toFloat());
+    g.setOpacity(1.0f);
+}
 void MainComponent::timerCallback() {
     pollUpdater(); // v0.19: surface a finished background update check / download on the message thread
     auto now = juce::Time::getCurrentTime().toMilliseconds();
@@ -540,6 +586,29 @@ void MainComponent::prepareFrame() {
     if (scopeSamples != lastScopeSamples) { scope.prepare(scopeSamples); lastScopeSamples = scopeSamples; }
     float f = 0; scope.capture(bufL.data() + (need - scopeSamples), scopeSamples, st.scopeTrigger, f, frame.sampleRate);
     frame.scopeBuf = scope.buffer(); frame.scopeFreq = f;
+    // v0.20.0 (item i): the scope's Multi display is a TRUE 3-band
+    // split of the captured buffer (core splitScopeBands) — computed
+    // once per frame here, drawn by ModuleView in three lanes.
+    if (st.scopeDisplay == meterbar::ScopeDisplay::Multi) {
+        auto bands = meterbar::splitScopeBands(frame.scopeBuf, frame.sampleRate);
+        frame.scopeLow = std::move(bands.low);
+        frame.scopeMid = std::move(bands.mid);
+        frame.scopeHigh = std::move(bands.high);
+    }
+    // v0.20.0 (item l): advance the visualizer model from the frame's
+    // own spectrum (per-band energies, core helper). dt follows the
+    // UI timer's real cadence (fpsLimit), clamped to sane bounds.
+    if (st.visualizerEnabled) {
+        auto e = meterbar::spectrumBandEnergies(frame.spectrumDb, st.fftSize, frame.sampleRate);
+        meterbar::VisualizerSettings vs;
+        vs.enabled = true;
+        vs.baseHue = st.visualizerBaseHue;
+        vs.saturation = st.visualizerSaturation;
+        vs.paletteSpread = st.visualizerSpread;
+        vs.cycleSeconds = st.visualizerCycleSec;
+        const float dt = (float)juce::jlimit(0.004, 0.1, 1.0 / std::max(1, st.fpsLimit));
+        visualizer.update(dt, e.data(), vs);
+    }
 }
 // ---------------- Menus ----------------
 enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,

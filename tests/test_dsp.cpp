@@ -16,6 +16,7 @@
 #include "../dsp/include/meterbar/SemVer.hpp"
 #include "../dsp/include/meterbar/ReleaseParse.hpp"
 #include "../dsp/include/meterbar/State.hpp"
+#include "../dsp/include/meterbar/Visualizer.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -666,6 +667,122 @@ int main() {
         CHECK(!httpStatusBlocksAuth(500));
         CHECK(!httpStatusBlocksAuth(0));
     }
+    // ---------- v0.20.0 (i): exact spectrum mapping — binAtX ----------
+    {
+        const int nb = 4097, fft = 8192; const double sr = 48000.0;
+        for (auto scale : { FreqScale::Log, FreqScale::Mel, FreqScale::Linear }) {
+            // left edge: the walk returns the LAST bin whose own freqToX
+            // position is <= frac (the spectrum view's exact LUT semantics);
+            // bins below minF clamp to x=0, so at frac 0 the next bin up
+            // must be the first with a positive position.
+            const int b0 = SpectrumAnalyser::binAtX(0.f, nb, fft, sr, 20.0, 20000.0, scale);
+            CHECK(b0 >= 1
+                  && SpectrumAnalyser::freqToX(SpectrumAnalyser::binFreq(b0, fft, sr), 20.0, 20000.0, scale) <= 0.f
+                  && SpectrumAnalyser::freqToX(SpectrumAnalyser::binFreq(b0 + 1, fft, sr), 20.0, 20000.0, scale) > 0.f);
+            CHECK(SpectrumAnalyser::binAtX(1.f, nb, fft, sr, 20.0, 20000.0, scale) == nb - 1);   // right edge: last bin
+            bool mono = true; int prev = 1;
+            for (int i = 0; i <= 100; ++i) {
+                int b = SpectrumAnalyser::binAtX(i / 100.f, nb, fft, sr, 20.0, 20000.0, scale);
+                if (b < prev) mono = false;
+                prev = b;
+            }
+            CHECK(mono); // never walks backwards
+            // round-trip: the position OF bin k selects bin k
+            for (int k : { 10, 100, 500, 2000, 3000 }) { // all within [minF, maxF]
+                float fx = SpectrumAnalyser::freqToX(SpectrumAnalyser::binFreq(k, fft, sr), 20.0, 20000.0, scale);
+                CHECK(SpectrumAnalyser::binAtX(fx, nb, fft, sr, 20.0, 20000.0, scale) == k);
+            }
+        }
+    }
+    // ---------- v0.20.0 (i): scope 3-band split ----------
+    {
+        const double sr = 48000.0; const int n = 8192;
+        auto sine = [&](double hz) {
+            std::vector<float> x((size_t)n);
+            for (int i = 0; i < n; ++i) x[(size_t)i] = (float)std::sin(2.0 * 3.141592653589793 * hz * i / sr);
+            return x;
+        };
+        auto rms = [](const std::vector<float>& v, int skip) {
+            double s2 = 0; int c = 0;
+            for (size_t i = (size_t)skip; i < v.size(); ++i) { s2 += (double)v[i] * v[i]; ++c; }
+            return std::sqrt(s2 / std::max(1, c));
+        };
+        auto lo = splitScopeBands(sine(100.0), sr);
+        CHECK(rms(lo.low, 1024) > rms(lo.mid, 1024) && rms(lo.low, 1024) > rms(lo.high, 1024));   // 100 Hz lives in LOW
+        auto md = splitScopeBands(sine(1000.0), sr);
+        CHECK(rms(md.mid, 1024) > rms(md.low, 1024) && rms(md.mid, 1024) > rms(md.high, 1024));   // 1 kHz lives in MID
+        auto hi = splitScopeBands(sine(8000.0), sr);
+        CHECK(rms(hi.high, 1024) > rms(hi.low, 1024) && rms(hi.high, 1024) > rms(hi.mid, 1024)); // 8 kHz lives in HIGH
+        // bands sum back to the input exactly (construction guarantee)
+        auto mix = sine(440.0);
+        auto sp = splitScopeBands(mix, sr);
+        double maxErr = 0;
+        for (int i = 0; i < n; ++i)
+            maxErr = std::max(maxErr, (double)std::abs(sp.low[(size_t)i] + sp.mid[(size_t)i] + sp.high[(size_t)i] - mix[(size_t)i]));
+        CHECK(maxErr < 1e-5);
+        CHECK(splitScopeBands({}, sr).low.empty());
+    }
+    // ---------- v0.20.0 (l): visualizer model ----------
+    {
+        VisualizerSettings vs; // defaults
+        CHECK(vs.enabled == false);                       // the toggle ships OFF
+        CHECK(vs.particleCap == 600);
+        VisualizerEngine eng;
+        const float silence[3] = { 0, 0, 0 };
+        for (int i = 0; i < 30; ++i) eng.update(1.f / 30.f, silence, vs);
+        CHECK((int)eng.particles().size() == VisualizerEngine::kAmbientTarget); // ambient population present
+        CHECK(eng.burstCount() == 0);                     // silence never bursts
+        bool allAmbient = true;
+        for (auto& pt : eng.particles()) if (pt.burst) allAmbient = false;
+        CHECK(allAmbient);
+        // convergence: individual particles move INWARD (the population
+        // mean is stationary by design — converged particles respawn at
+        // the rim, so the flow is continuous). Snapshot the cohort after
+        // one frame; 1 s later, of those not yet respawned, most must be
+        // closer to the centre than they started.
+        {
+            VisualizerEngine eng2;
+            eng2.update(1.f / 30.f, silence, vs);
+            std::vector<double> start;
+            for (auto& pt : eng2.particles()) start.push_back(std::hypot(pt.x - 0.5, pt.y - 0.5));
+            for (int i = 0; i < 30; ++i) eng2.update(1.f / 30.f, silence, vs);
+            int alive = 0, inward = 0;
+            for (size_t i = 0; i < start.size() && i < eng2.particles().size(); ++i) {
+                auto& pt = eng2.particles()[i];
+                if (pt.burst || pt.age < 0.9f) continue; // respawned this second: skip
+                ++alive;
+                if (std::hypot(pt.x - 0.5, pt.y - 0.5) < start[i]) ++inward;
+            }
+            CHECK(alive > 50);
+            CHECK(inward > alive * 4 / 5);
+        }
+        // a loud low band fires bursts; the cap is never exceeded, ever
+        const float loud[3] = { 0.9f, 0, 0 };
+        for (int i = 0; i < 600; ++i) {
+            eng.update(1.f / 30.f, loud, vs);
+            CHECK((int)eng.particles().size() <= vs.particleCap);
+        }
+        CHECK(eng.burstCount() > 0);
+        // band energies from a synthetic spectrum: hot 100 Hz bin -> low band leads
+        std::vector<float> db(4097, -120.f);
+        for (int b = 1; b <= 42; ++b) db[(size_t)b] = -8.f; // the whole <250 Hz band hot (8192/48k)
+        auto e = spectrumBandEnergies(db, 8192, 48000.0);
+        CHECK(e[0] > 0.5f && e[0] > e[1] && e[0] > e[2]);
+        CHECK(spectrumBandEnergies({}, 8192, 48000.0)[0] == 0.f);
+        // palette: saturation 0 = grey; ambient is always white-ish
+        VisualizerSettings grey = vs; grey.saturation = 0.f;
+        VizParticle bp; bp.burst = true; bp.hueT = 0.3f; bp.life = 1.f;
+        auto gc = eng.colorFor(bp, grey);
+        CHECK(gc.r == gc.g && gc.g == gc.b);
+        VizParticle ap; ap.burst = false; ap.age = 1.f;
+        auto ac = eng.colorFor(ap, vs);
+        CHECK(ac.r == ac.g && ac.g == ac.b); // ambient stays white at any palette setting
+        // hue wraps: baseHue near 1 + spread still yields a saturated colour
+        VisualizerSettings wrap = vs; wrap.baseHue = 0.97f;
+        auto wc = eng.colorFor(bp, wrap);
+        CHECK(!(wc.r == wc.g && wc.g == wc.b));
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

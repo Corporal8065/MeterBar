@@ -1584,3 +1584,66 @@ relaunch. Plus the private-repo handling agreed the same evening.
   copy also 271/0). The shipped kit is built from this committed
   tree and re-verified from its own extraction (see the release
   report; kit file: meterbar-test-kit-v0.19.2.zip).
+
+## 2026-10-29 — v0.20.0: exact mapping everywhere, true 3-band scope, visualizer background
+
+- **(i) One frequency mapping for every view.** The spectrum view has
+  used the core's tested `freqToX` walk since v0.12 — but the
+  SPECTROGRAM still mapped image rows/columns straight onto bin
+  indices, so under the default Log scale its frequency axis was
+  linear while the spectrum's was logarithmic: the same tone sat at
+  different heights in the two views. The walk now lives in the core
+  as `SpectrumAnalyser::binAtX` and the spectrogram builds its
+  frequency LUT from it (FFT scale honoured). Reported plainly: the
+  spectrum view itself was NOT still approximate — the spectrogram
+  was the remaining offender.
+- **(i) Oscilloscope "Multi" is now a true 3-band split.** It used
+  to draw the scope buffer, then the same left channel again
+  faintly — one signal twice wearing a "multi" label. New core
+  `splitScopeBands` (one-pole crossovers at 250 Hz / 4 kHz; the
+  bands sum back to the input exactly, pinned by test) feeds three
+  stacked lanes: LOW / MID / HIGH.
+- **(l) Visualizer background mode — NEEDS JACKSON'S VISUAL FIELD
+  TEST.** Behind a Settings → Appearance toggle (default OFF):
+  black background; white particles converge on the centre; the
+  three frequency bands (core `spectrumBandEnergies`) trigger
+  rainbow brush-stroke bursts that expand and dissolve into their
+  constituent dots; the layer renders at half resolution (capped
+  480×270) with a Gaussian-blur glow pass under the crisp dots.
+  Palette controls: base hue, saturation, palette spread, cycle
+  period — persisted in presets. Particle count is hard-capped at
+  600 (asserted every frame in the tests) for a 16 GB gaming PC.
+  The model is unit-tested; the LOOK (densities, speeds, blur
+  radius, trigger threshold) can only be tuned on Jackson's screen
+  — that field test is explicitly still owed.
+- **Theme parity:** MeterBar is the family's theme reference; this
+  release verifies the other two bars' defaults are value-for-value
+  identical to its Midnight Kids palette (see their build logs).
+- Version single-sourced as ever (root CMakeLists project VERSION
+  → 0.20.0; installer fallback literal updated to match). No tag
+  created by this work — the existing build-windows workflow will
+  build the release when a tag is pushed.
+
+Kit file: `meterbar-test-kit-v0.20.0.zip` — same layout as v0.19.2,
+plus `REQUESTS.md` and `dsp/include/meterbar/Visualizer.hpp`.
+
+Verified (Linux VM):
+- **DSP suite: 913 checks, 0 failures** (HEAD baseline rebuilt
+  separately: 271 checks, 0 failures). The +642 delta includes 600
+  per-frame particle-cap assertions in one loud-run loop; the rest
+  are binAtX (3 scales: edges/monotonic/round-trips), band-split
+  dominance + exact reconstruction, and the visualizer model suite.
+  Three new checks initially failed on MY expectations, not the
+  code — details and the corrected semantics are recorded in
+  REQUESTS.md, not hidden.
+- **Changed app TUs syntax-checked clean** against JUCE 8.0.4
+  headers (one real fix on the way: JUCE 8 removed
+  `Image::copyImage`; the blur layer now uses
+  `duplicateIfShared()`). The full CMake app build could not run on
+  this VM — the nested juceaide build needs libxrandr-dev, which is
+  not installed (environment gap, also recorded in REQUESTS.md);
+  CI builds the app on windows-latest.
+
+Honest limits: the visualizer's tuning constants are first-pass
+values chosen conservatively; expect one tuning round after
+Jackson sees it live. Linking (P4 item k) is NOT in this release.

@@ -12,6 +12,7 @@
 #include "Updater.h"
 #include "MeterBarVersion.h" // v0.19: generated — single-source version
 #include <meterbar/ReserveState.hpp>
+#include <meterbar/Visualizer.hpp> // v0.20.0
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
 // the pair's PresetState::moduleFlex weights (their sum is preserved, so
@@ -96,6 +97,9 @@ private:
     uint64_t lastOnsetCount = 0;                            // v0.16: mascot bob/excited triggers
     juce::int64 bobStartMs = 0, excitedUntilMs = 0;
     AnalysisData frame;
+    meterbar::VisualizerEngine visualizer;   // v0.20.0: background-mode particle model (pure core)
+    juce::Image vizCache, vizBlur;           // v0.20.0: half-res particle layer + its Gaussian-blurred copy
+    void drawVisualizerBackground(juce::Graphics&); // v0.20.0: black base + blurred glow + crisp dots
     int lastScopeSamples = 0;                                // v0.15: scope capture size (from scopeWindowMs)
     float dispDbL = -120.f, dispDbR = -120.f;                // v0.15: smoothed per-channel display levels
     float dispPeakDbL = -120.f, dispPeakDbR = -120.f;        // v0.15: per-channel peak holds

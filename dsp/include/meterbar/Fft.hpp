@@ -73,6 +73,21 @@ public:
         return (float)std::clamp((v - a) / std::max(b - a, 1e-9), 0.0, 1.0);
     }
     static float binFreq(int bin, int fftSize, double sr) { return (float)(bin * sr / fftSize); }
+    // The inverse walk (v0.20.0): the bin a normalised display position
+    // falls in, under the SAME freqToX scale. freqToX is monotonic in
+    // bin frequency, so the spectrum view's walking LUT and this
+    // helper agree by construction — one mapping for every view (the
+    // spectrogram previously indexed bins LINEARLY, so its frequency
+    // axis disagreed with the spectrum's: item (i) of the v0.20.0
+    // program). Bin 0 (DC) is never returned: views start at bin 1.
+    static int binAtX(float frac, int numBins, int fftSize, double sr,
+                      double minF, double maxF, FreqScale s) {
+        if (numBins < 2) return 0;
+        int b = 1;
+        while (b < numBins - 1 &&
+               freqToX(binFreq(b + 1, fftSize, sr), minF, maxF, s) <= frac) ++b;
+        return b;
+    }
 private:
     int size_ = 1024; float smoothing_ = 0.90f, tiltDb_ = 4.5f;
     std::vector<float> window_, smoothed_, rawDb_, buf_;

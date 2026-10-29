@@ -65,6 +65,16 @@ struct PresetState {
     // Pastel is appended (value 3) as the Anime theme's paired background.
     BackgroundStyle backgroundStyle = BackgroundStyle::CleanDark;
     bool beatPulseEnabled = true;          // v0.16: onset-reactive border glow, default ON in the Default recipe (subtle)
+    // v0.20.0 (item l): visualizer background mode — the pure model is
+    // meterbar::Visualizer (Visualizer.hpp); these are its palette
+    // controls, mirrored here like every other preset field. OFF by
+    // default; when ON the window background goes black and the
+    // particle layer renders behind the modules.
+    bool visualizerEnabled = false;
+    float visualizerBaseHue = 0.83f;       // 0..1 (family pink)
+    float visualizerSaturation = 0.85f;    // 0..1
+    float visualizerSpread = 0.75f;        // 0..1 of the hue wheel per burst stroke
+    float visualizerCycleSec = 24.0f;      // palette drift period; 0 = static
     bool animeClickSounds = true;          // v0.16: cute click sounds — only ever audible in the Anime theme
     float mascotFlex = 0.55f;              // v0.16: mascot cell width (relative), resizable like a module in Anime theme
     // Audio (§6)

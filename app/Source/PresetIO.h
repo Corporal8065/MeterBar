@@ -40,6 +40,9 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("vsync", s.vsync); set("fps", s.fpsLimit);
     set("pinned", s.pinned); set("stick", s.stick); set("showToolbar", s.showToolbar); set("showHint", s.showRepositionHint);
     set("reserveSpace", s.reserveScreenSpace); // v0.18
+    set("vizEnabled", s.visualizerEnabled); set("vizHue", s.visualizerBaseHue); // v0.20.0
+    set("vizSat", s.visualizerSaturation); set("vizSpread", s.visualizerSpread);
+    set("vizCycle", s.visualizerCycleSec);
     set("winX", s.windowX); set("winY", s.windowY); set("winW", s.windowW); set("winH", s.windowH);
     return juce::var(o);
 }
@@ -86,6 +89,11 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.vsync = gb("vsync", s.vsync); s.fpsLimit = gi("fps", s.fpsLimit);
     s.pinned = gb("pinned", s.pinned); s.stick = gb("stick", s.stick);
     s.reserveScreenSpace = gb("reserveSpace", s.reserveScreenSpace); // v0.18 (absent in old presets -> default off)
+    s.visualizerEnabled = gb("vizEnabled", s.visualizerEnabled); // v0.20.0 (absent -> OFF)
+    s.visualizerBaseHue = gf("vizHue", s.visualizerBaseHue);
+    s.visualizerSaturation = gf("vizSat", s.visualizerSaturation);
+    s.visualizerSpread = gf("vizSpread", s.visualizerSpread);
+    s.visualizerCycleSec = gf("vizCycle", s.visualizerCycleSec);
     s.showToolbar = gb("showToolbar", s.showToolbar); s.showRepositionHint = gb("showHint", s.showRepositionHint);
     s.windowX = gi("winX", s.windowX); s.windowY = gi("winY", s.windowY); s.windowW = gi("winW", s.windowW); s.windowH = gi("winH", s.windowH);
     return s;
