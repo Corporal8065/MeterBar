@@ -88,7 +88,7 @@ struct PresetState {
     std::string audioDeviceName;           // chosen INPUT device (source = Input)
     std::string outputDeviceName;          // chosen OUTPUT device (source = System Loopback captures THIS device)
     std::string outputDeviceId;            // v0.13: WASAPI endpoint ID of the chosen output — loopback keys on THIS, name is display/fallback
-    float trimDb = 10.18f;             // -24..+24 (v0.17 recipe: +10.18 dB exactly, Jackson's number)
+    float trimDb = 10.18f;             // -48..+48 since v0.20.3 (was -24..+24; v0.17 recipe: +10.18 dB exactly, Jackson's number)
     int routingPair = 0;               // stereo pair index
     int routingCh1 = 0, routingCh2 = 1;
     // Performance (§7)

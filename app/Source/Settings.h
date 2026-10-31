@@ -190,7 +190,7 @@ public:
         });
         panel("Audio Source", nullptr, [&]{
             soundSourceCombo();
-            slider("Trim dB (-24..+24)", -24.0, 24.0, st->trimDb, [&](double v){ st->trimDb = (float)v; });
+            slider("Trim dB (-48..+48)", -48.0, 48.0, st->trimDb, [&](double v){ st->trimDb = (float)v; }); // v0.20.3: range doubled (Jackson's ask — a larger input trim)
             combo("Channel Pair", {"Pair 1 (ch 1-2)","Pair 2 (ch 3-4)","Pair 3 (ch 5-6)","Pair 4 (ch 7-8)"}, st->routingPair,
                   [&](int v){ st->routingPair = v; });
             combo("Routing Ch 1", {"1","2","3","4","5","6","7","8"}, st->routingCh1, [&](int v){ st->routingCh1 = v; });

@@ -2,6 +2,34 @@
 
 # MeterBar — BUILD LOG (dated, honest: only what was actually observed)
 
+## v0.20.3 (2026-10-31) — Jackson's feel pass, MeterBar side: wider trim, quiet-in-silence visualizer
+
+The MeterBar half of Jackson's 2026-10-31 bar-apps ask (the
+rest — free resize, marquee, backdrop blur, transparent cells —
+is TickerBar v0.4.0; record in TickerBar's REQUESTS.md). Pure-core
+suite 985 → 989 checks, 0 failures; app layer is two render
+constants and a slider range. Committed locally as 6e51a5f; the
+push to main was blocked on 2026-10-31 (the VM's egress proxy
+resets SSH to GitHub), so the GitHub Actions Windows proof is
+owed once the push lands — no Windows live test was run by the
+builder either way.
+
+- **Trim range doubled.** Settings > Audio input trim now spans
+  −48..+48 dB (was −24..+24). Jackson's ask was "a larger input
+  in the trim"; TickerBar has no trim control, so the family's
+  trim got the wider range. Default +10.18 dB and the
+  pow(10, dB/20) gain law are unchanged, so existing installs
+  behave identically until the slider is actually moved.
+- **Visualizer: no white circles in silence + softer/darker.**
+  The ambient WHITE convergers in MeterBar's copy of the
+  visualizer engine are gated on smoothed band activity (fast
+  attack, slow release): in silence they fade out entirely
+  instead of idling white. Render matches TickerBar v0.4.0:
+  dots 1.35× plumper, Gaussian blur 5/1.8 → 7/2.8, crisp pass
+  0.9 → 0.45 opacity, plus a 0.18 black scrim for the darker
+  tone. (MeterBar's own windows are opaque, so TickerBar's
+  acrylic backdrop blur has no MeterBar counterpart.)
+
 ## v0.20.2 (2026-10-29) — freeze-fix round (field: buttons dead after linking; also after clean reinstall)
 
 Jackson's field reports: buttons froze on v0.20.1 after a Revo-clean

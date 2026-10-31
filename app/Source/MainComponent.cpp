@@ -473,19 +473,21 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
             auto c = visualizer.colorFor(p, vs);
             ig.setColour(juce::Colour(c.r, c.g, c.b));
             const float px = p.x * (float)iw, py = p.y * (float)ih;
-            const float r = p.size;
+            const float r = p.size * 1.35f; // v0.20.3: plumper dots — softer, rounder blobs (TickerBar v0.4.0 sibling)
             ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
         }
     }
     vizBlur = vizCache;
     vizBlur.duplicateIfShared(); // the convolution reads source while writing dest — they must not share pixels
-    juce::ImageConvolutionKernel kernel(5);
-    kernel.createGaussianBlur(1.8f);
+    juce::ImageConvolutionKernel kernel(7);
+    kernel.createGaussianBlur(2.8f); // v0.20.3: stronger blur (was 5/1.8) — the vibey wash
     kernel.applyToImage(vizBlur, vizCache, vizBlur.getBounds());
     g.drawImage(vizBlur, bounds.toFloat());
-    g.setOpacity(0.9f);
+    g.setOpacity(0.45f); // v0.20.3: crisp pass backed off (was 0.9)
     g.drawImage(vizCache, bounds.toFloat());
     g.setOpacity(1.0f);
+    g.setColour(juce::Colours::black.withAlpha(0.18f)); // v0.20.3: dark scrim — the moodier tone
+    g.fillRect(bounds);
 }
 void MainComponent::timerCallback() {
     pollUpdater(); // v0.19: surface a finished background update check / download on the message thread

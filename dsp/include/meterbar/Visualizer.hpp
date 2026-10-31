@@ -79,6 +79,18 @@ public:
     void update(float dt, const float bandEnergy[3], const VisualizerSettings& st) {
         if (dt <= 0) return;
         time_ += dt;
+        // --- activity gate (v0.20.3, Jackson's ask; TickerBar
+        // v0.4.0 sibling): the ambient WHITE convergers are only
+        // visible while the bands carry real energy. In silence
+        // activity decays to zero and the whites fade out entirely
+        // instead of idling white on screen. Fast attack, slow
+        // release, so a quiet gap between hits doesn't flicker.
+        {
+            const float frame = std::max({ bandEnergy[0], bandEnergy[1], bandEnergy[2] });
+            const float rate = frame > activity_ ? 6.f : 0.8f;
+            float a = rate * dt; if (a > 1.f) a = 1.f;
+            activity_ += (frame - activity_) * a;
+        }
         const int cap = st.particleCap < 16 ? 16 : (st.particleCap > kHardCap ? kHardCap : st.particleCap);
         // --- ambient: keep the converger population topped up ---
         int ambientWanted = kAmbientTarget;
@@ -120,6 +132,13 @@ public:
     const std::vector<VizParticle>& particles() const { return ps_; }
     int burstCount() const { return bursts_; } // total bursts fired (test/diagnostic)
     double time() const { return time_; }
+    float activity() const { return activity_; } // smoothed band activity 0..1 (v0.20.3)
+    // How visible the ambient whites are: full once activity
+    // reaches 0.30, zero in silence (see the gate in update()).
+    float ambientVisibility() const {
+        const float v = activity_ / 0.30f;
+        return v < 0.f ? 0.f : v > 1.f ? 1.f : v;
+    }
 
     // Colour of one particle under the palette settings. Ambient
     // particles are WHITE by design (fade by age only). Burst dots
@@ -128,7 +147,10 @@ public:
     VizRgb colorFor(const VizParticle& p, const VisualizerSettings& st) const {
         if (!p.burst) {
             const float fade = p.age < 0.5f ? 0.4f + 0.6f * (p.age / 0.5f) : 1.f;
-            const auto v = (std::uint8_t)std::lround(255.f * fade);
+            // v0.20.3: whites are gated by band activity — in
+            // silence this returns (near-)black, i.e. invisible
+            // against the black background composite.
+            const auto v = (std::uint8_t)std::lround(255.f * fade * ambientVisibility());
             return VizRgb{ v, v, v };
         }
         float cycle = 0.f;
@@ -189,6 +211,7 @@ private:
     std::vector<VizParticle> ps_;
     float refractory_[3] = { 0, 0, 0 };
     int bursts_ = 0;
+    float activity_ = 0; // v0.20.3: smoothed max band energy (the silence gate)
     double time_ = 0;
 };
 

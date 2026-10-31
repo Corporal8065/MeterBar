@@ -1016,6 +1016,26 @@ int main() {
         }
     }
 
+    // v0.20.3 silence gate (Jackson's ask): the ambient whites fade
+    // out when the bands carry no energy; colored content is
+    // unaffected. Same check as TickerBar's core suite.
+    {
+        meterbar::VisualizerEngine viz;
+        meterbar::VisualizerSettings vs;
+        const float zero[3] = { 0.f, 0.f, 0.f };
+        for (int i = 0; i < 240; ++i) viz.update(1.f / 60.f, zero, vs);
+        CHECK(viz.activity() < 0.02f);
+        int brightest = 0;
+        for (auto& p : viz.particles()) if (!p.burst) { auto c = viz.colorFor(p, vs); brightest = std::max(brightest, (int)c.r); }
+        CHECK(brightest < 12);
+        const float loud[3] = { 0.5f, 0.4f, 0.3f };
+        for (int i = 0; i < 30; ++i) viz.update(1.f / 60.f, loud, vs);
+        CHECK(viz.activity() > 0.3f);
+        brightest = 0;
+        for (auto& p : viz.particles()) if (!p.burst) { auto c = viz.colorFor(p, vs); brightest = std::max(brightest, (int)c.r); }
+        CHECK(brightest > 150);
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
