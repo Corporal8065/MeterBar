@@ -35,7 +35,25 @@ MainComponent::MainComponent() {
         engine.state.linkEnabled = linkBtn.getToggleState(); };
     linkClient_.getBounds = [this]{ return getScreenBounds(); };
     linkClient_.setBounds = [this](juce::Rectangle<int> r){
-        if (auto* tl = getTopLevelComponent()) tl->setBounds(r);
+        if (auto* tl = getTopLevelComponent()) {
+            // v0.21.1: EVERY remote apply (stack / follow / snap /
+            // group-dock) passes the visibility floor (core
+            // WindowGeom, ensureRectVisible). Before this, the link
+            // could move the bar off-screen a tick after the
+            // (clamped) startup restore, and the position-save feed
+            // kept it there — the defect behind Jackson's
+            // 2026-10-31 "stuck somewhere i cannot see upon load
+            // up" report on SessionBar, shared here by construction.
+            // Meaningfully-visible targets pass through untouched.
+            std::vector<meterbar::IntRect> areas;
+            for (auto& d : juce::Desktop::getInstance().getDisplays().displays) {
+                auto ua = d.userArea;
+                areas.push_back({ ua.getX(), ua.getY(), ua.getWidth(), ua.getHeight() });
+            }
+            auto safe = meterbar::ensureRectVisible(
+                { r.getX(), r.getY(), r.getWidth(), r.getHeight() }, areas);
+            tl->setBounds(safe.x, safe.y, safe.w, safe.h);
+        }
     };
     linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity }; };
     linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){

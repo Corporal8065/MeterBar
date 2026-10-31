@@ -900,6 +900,37 @@ int main() {
         CHECK(c2.x == 1920 - 500 && c2.y == 10);
         CHECK(clampRectToWorkAreas(inside, {}) == inside);
     }
+    // ---------- v0.21.1: WindowGeom visibility floor (link applies) ----------
+    {
+        std::vector<IntRect> areas{ IntRect{0, 0, 1920, 1040} };
+        std::vector<IntRect> two{ IntRect{0, 0, 1920, 1040}, IntRect{1920, 0, 1920, 1040} };
+        // fully off-screen: the floor fires — size kept, primary area,
+        // centred horizontally, near the top
+        IntRect lost{ 5000, 3000, 1060, 56 };
+        CHECK(!rectMeaningfullyVisible(lost, areas));
+        auto f = ensureRectVisible(lost, areas);
+        CHECK(f.x == (1920 - 1060) / 2 && f.y == 24 && f.w == 1060 && f.h == 56);
+        CHECK(rectMeaningfullyVisible(f, areas));
+        // genuinely on the second display: untouched
+        IntRect onSecond{ 2000, 50, 1060, 56 };
+        CHECK(rectMeaningfullyVisible(onSecond, two));
+        CHECK(ensureRectVisible(onSecond, two) == onSecond);
+        // partially visible ABOVE the floor (120x56 showing): untouched
+        IntRect partial{ 1800, 100, 1060, 56 };
+        CHECK(rectMeaningfullyVisible(partial, areas));
+        CHECK(ensureRectVisible(partial, areas) == partial);
+        // a 20 px sliver is below the floor: rescued to the primary
+        IntRect sliver{ 1900, 100, 1060, 56 };
+        CHECK(!rectMeaningfullyVisible(sliver, areas));
+        CHECK(ensureRectVisible(sliver, areas).x == (1920 - 1060) / 2);
+        // sunk so only 10 px of height shows: below the floor too
+        CHECK(!rectMeaningfullyVisible(IntRect{ 100, 1030, 1060, 56 }, areas));
+        // straddling two monitors with a real chunk on each: untouched
+        IntRect straddle{ 1700, 100, 1060, 56 };
+        CHECK(ensureRectVisible(straddle, two) == straddle);
+        // no areas = no opinion
+        CHECK(ensureRectVisible(lost, {}) == lost);
+    }
     // ---------- v0.20.1: BarLink BLK2 — stack planner + audio broadcast ----------
     {
         const long long now = 777000;

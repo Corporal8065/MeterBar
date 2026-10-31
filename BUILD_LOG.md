@@ -2,6 +2,30 @@
 
 # MeterBar — BUILD LOG (dated, honest: only what was actually observed)
 
+## v0.21.1 (2026-10-31) — visibility floor on link applies (off-screen on load)
+
+Jackson's report (2026-10-31, #crypto-book, about SessionBar —
+same defect here): the bar loads "somewhere i cannot see". The
+v0.20.1 startup clamp was doing its job — and the LINK was undoing
+it a tick later. The clamp covers the startup restore and preset
+apply; stack plans, drag follows, snap settles and group docks
+land through the link client's setBounds callback with no guard
+at all, and the position-save feed then persisted wherever the
+link had put the bar.
+
+- Core: `rectMeaningfullyVisible` / `ensureRectVisible` added to
+  WindowGeom.hpp (identical in all three repos, namespace aside):
+  at least 100x40 px inside one work area = visible, returned
+  untouched; below that, same size onto the primary work area,
+  centred horizontally, near the top.
+- App: the link client's setBounds callback now routes every
+  remote apply through the floor with the live displays' user
+  areas before touching the window.
+- Tests: 12 new checks — off-screen rescued, second display and
+  straddle untouched, above-floor partial untouched, sliver and
+  sunk rects rescued. Suite 1006 → 1018 checks, 0 failures.
+- Version 0.21.0 → 0.21.1 (root CMakeLists.txt).
+
 ## v0.21.0 (2026-10-31) — one linked background: the visualizer field spans the linked bars
 
 Jackson's ask (dictated, same day): the background-graphics

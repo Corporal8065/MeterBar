@@ -56,4 +56,46 @@ inline IntRect clampRectToWorkAreas(IntRect r, const std::vector<IntRect>& areas
     r.y = r.h >= a.h ? a.y : (r.y < a.y ? a.y : (r.y > a.bottom() - r.h ? a.bottom() - r.h : r.y));
     return r;
 }
+
+// VISIBILITY FLOOR FOR REMOTE APPLIES (v0.21.1) — the hole the
+// startup clamp never covered. clampRectToWorkAreas guards the two
+// places a SAVED rect is applied (startup restore, preset apply),
+// but the family link moves a bar AFTER startup: stack plans, drag
+// follows, snap settles and group docks all land through the link
+// client's setBounds callback with NO guard — so with Link on, a
+// stale stack request or a peer docked against space no monitor
+// owns any more could move a just-restored bar off-screen within a
+// tick of launch, and the position-save feed then kept it there.
+// Jackson, 2026-10-31 (of SessionBar, same defect here by
+// construction): "Session bar is also for me still stuck somewhere
+// i cannot see upon load up and have no idea how to fix plz help".
+//
+// The rule for remote applies is a floor, not a clamp: a rect that
+// is MEANINGFULLY visible — at least 100x40 px of it inside ONE
+// display's work area (the bar itself when it is smaller than that)
+// — is returned untouched, straddles included, so link choreography
+// is never fought. Below that floor the rect keeps its size and is
+// placed on the PRIMARY work area (areas[0], in the order the app
+// feeds the displays), centred horizontally, near the top — a spot
+// the user can always see and grab.
+inline bool rectMeaningfullyVisible(const IntRect& r, const std::vector<IntRect>& areas) {
+    const int needW = r.w < 100 ? r.w : 100;
+    const int needH = r.h < 40 ? r.h : 40;
+    for (auto& a : areas) {
+        const int iw = (r.right() < a.right() ? r.right() : a.right()) - (r.x > a.x ? r.x : a.x);
+        const int ih = (r.bottom() < a.bottom() ? r.bottom() : a.bottom()) - (r.y > a.y ? r.y : a.y);
+        if (iw >= needW && ih >= needH) return true;
+    }
+    return false;
+}
+
+inline IntRect ensureRectVisible(IntRect r, const std::vector<IntRect>& areas) {
+    if (areas.empty() || r.w <= 0 || r.h <= 0) return r;
+    if (rectMeaningfullyVisible(r, areas)) return r;
+    const IntRect& a = areas.front(); // primary display
+    r.x = r.w >= a.w ? a.x : a.x + (a.w - r.w) / 2;
+    r.y = r.h >= a.h ? a.y : a.y + 24;
+    if (r.h < a.h && r.y > a.bottom() - r.h) r.y = a.bottom() - r.h;
+    return r;
+}
 } // namespace meterbar
