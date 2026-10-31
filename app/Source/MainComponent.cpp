@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include <meterbar/WindowGeom.hpp> // v0.20.1: preset/startup position clamp
+#include <meterbar/Recordings.hpp> // v0.21.4: Recordings submenu model
 #if JUCE_WINDOWS
  #include <windows.h> // native window move (v0.11)
 #endif
@@ -22,7 +23,7 @@ MainComponent::MainComponent() {
         c->setInterceptsMouseClicks(false, false); // clicks fall through to the toolbar drag (v0.8)
     }
     for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                     &reserveBtn, &arrangeBtn, &restoreBtn, &linkBtn }) addAndMakeVisible(b);
+                     &arrangeBtn, &restoreBtn, &linkBtn }) addAndMakeVisible(b);
     // v0.20.0 (k): family LINK toggle + client wiring. Geometry leads
     // via notifyWindowGeometryChanged. v0.2.1: the settings feed is
     // wired too (see onChanged below) — MeterBar was the only bar not
@@ -55,12 +56,14 @@ MainComponent::MainComponent() {
             tl->setBounds(safe.x, safe.y, safe.w, safe.h);
         }
     };
-    linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity }; };
+    linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, engine.state.visualizerEnabled ? 1 : 0 }; };
     linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){
         engine.state.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 3, bg.style); // v0.20.1: Pastel (3) is a family style too
         engine.state.backgroundOpacity = juce::jlimit(0.15f, 1.0f, bg.opacity);
+        engine.state.visualizerEnabled = bg.effect != 0; // BLK3: MeterBar's only effect is the visualizer — a peer's visualizer OR glow lands as visualizer-on
         repaint();
     };
+    linkClient_.bgLinkEnabled = [this]{ return engine.state.linkBackground; }; // v0.21.3
     linkClient_.getDockedEdge = [this]{ return reserveMachine.reserved() ? (int)reserveMachine.edge() : -1; };
     linkClient_.isLinked = [this]{ return engine.state.linkEnabled; };
     // v0.20.1 (item 17): broadcast the band energies + level the
@@ -72,12 +75,12 @@ MainComponent::MainComponent() {
     linkClient_.start();
     presetBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showPresetMenu(); };
     reposBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showRepositionMenu(); };
-    // v0.18 screen-space controls: Reserve toggles the AppBar reservation
-    // (state is the source of truth; the button mirrors it), Arrange /
-    // Restore run the one-shot window sweep on this monitor.
-    reserveBtn.setClickingTogglesState(true);
-    reserveBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop);
-        engine.state.reserveScreenSpace = reserveBtn.getToggleState(); syncScreenSpace(); };
+    // v0.18 screen-space controls: Arrange / Restore run the one-shot
+    // window sweep on this monitor. Reserve — the AppBar reservation
+    // toggle — lived here as a standalone button until v0.21.2, when
+    // it moved into the Reposition menu as the ticked "Reserve
+    // Screen Space" item (Jackson's ask); engine.state.
+    // reserveScreenSpace is unchanged, so existing users keep it.
     arrangeBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); doArrangeWindows(); };
     restoreBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); doRestoreWindows(); };
     burgerBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showHamburgerMenu(); };
@@ -110,6 +113,7 @@ MainComponent::MainComponent() {
     settingsWin->content.onChanged = [this]{ applyTheme(); layoutModules(); repaint(); syncScreenSpace(); linkClient_.notifyLocalSettings(); }; // v0.2.1: bg publish feed (was missing)
     settingsWin->content.onSourceChanged = [this]{ engine.applySource(); };
     settingsWin->content.onFpsChanged = [this]{ applyFps(); };
+    settingsWin->content.onBgLinkToggled = [this]{ linkClient_.notifyBgLinkChanged(); }; // v0.21.3
     settingsWin->content.onArrange = [this]{ doArrangeWindows(); };   // v0.18: Settings > Window buttons
     settingsWin->content.onRestore = [this]{ doRestoreWindows(); };   // v0.18
     settingsWin->content.build();
@@ -133,7 +137,7 @@ void MainComponent::applyTheme() {
     versionLabel.setColour(juce::Label::textColourId, theme.dim);
     hintLabel.setColour(juce::Label::textColourId, theme.dim);
     for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                     &reserveBtn, &arrangeBtn, &restoreBtn }) {
+                     &arrangeBtn, &restoreBtn }) {
         b->setColour(juce::TextButton::buttonColourId, theme.panel);
         b->setColour(juce::TextButton::buttonOnColourId, theme.deepest);
         b->setColour(juce::TextButton::textColourOffId, theme.accent);
@@ -263,10 +267,10 @@ void MainComponent::syncScreenSpace() {
 #else
     screenSpace.release();
 #endif
-    // The toolbar toggle mirrors state whichever surface changed it
-    // (toolbar button, Settings > Window, a loaded preset).
-    if (reserveBtn.getToggleState() != engine.state.reserveScreenSpace)
-        reserveBtn.setToggleState(engine.state.reserveScreenSpace, juce::dontSendNotification);
+    // The toolbar Link toggle mirrors state whichever surface
+    // changed it. (Reserve's old toolbar mirror went with its
+    // button in v0.21.2 — the Reposition menu reads
+    // engine.state.reserveScreenSpace fresh each time it opens.)
     if (linkBtn.getToggleState() != engine.state.linkEnabled)
         linkBtn.setToggleState(engine.state.linkEnabled, juce::dontSendNotification);
 }
@@ -348,11 +352,11 @@ void MainComponent::resized() {
         burgerBtn.setBounds(bar.removeFromRight(56)); settingsBtn.setBounds(bar.removeFromRight(74));
         pauseBtn.setBounds(bar.removeFromRight(58)); recBtn.setBounds(bar.removeFromRight(48));
         reposBtn.setBounds(bar.removeFromRight(96)); presetBtn.setBounds(bar.removeFromRight(66));
-        // v0.18: the screen-space trio sits just left of Preset (visual
-        // order: Reserve | Arrange | Restore | Preset | Reposition ...).
+        // v0.18: the screen-space pair sits just left of Preset (visual
+        // order: Arrange | Restore | Preset | Reposition ...). v0.21.2:
+        // Reserve moved into the Reposition menu, so the row closes up.
         restoreBtn.setBounds(bar.removeFromRight(62)); arrangeBtn.setBounds(bar.removeFromRight(66));
         linkBtn.setBounds(bar.removeFromRight(48));
-        reserveBtn.setBounds(bar.removeFromRight(64));
         // v0.19.2: the update indicator takes a slice of the leftover
         // middle strip (where the hint label lives) — only while lit.
         if (updateAvailable) { updateBtn.setBounds(bar.removeFromLeft(78)); updateBtn.setVisible(true); }
@@ -360,12 +364,12 @@ void MainComponent::resized() {
         if (st.showRepositionHint) { hintLabel.setBounds(bar); hintLabel.setVisible(true); } else hintLabel.setVisible(false);
     } else {
         for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                         &reserveBtn, &arrangeBtn, &restoreBtn }) b->setVisible(false);
+                         &arrangeBtn, &restoreBtn }) b->setVisible(false);
         logoLabel.setVisible(false); versionLabel.setVisible(false); hintLabel.setVisible(false);
         updateBtn.setVisible(false);
     }
     if (st.showToolbar) for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                                         &reserveBtn, &arrangeBtn, &restoreBtn }) b->setVisible(true);
+                                         &arrangeBtn, &restoreBtn }) b->setVisible(true);
     logoLabel.setVisible(st.showToolbar); versionLabel.setVisible(st.showToolbar);
     layoutModules();
     syncScreenSpace(); // v0.18.1: a resize is a reserve-machine event (bar height / position may have changed)
@@ -682,10 +686,11 @@ void MainComponent::prepareFrame() {
 }
 // ---------------- Menus ----------------
 enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
-       idTop=2001, idBottom, idStick, idPin, idDisplayBase=2100,
+       idTop=2001, idBottom, idStick, idPin, idReserve, idDisplayBase=2100,
        idAbout=3001, idOpenSettings, idSrcTone, idSrcInput, idSrcLoop, idThemeBase=3100, idMapBase=3200,
        idCapPause, idCapRecord, idClip10, idClip60, idHint, idToolbar, idDebug, idUpdates, idQuit,
-       idInDevBase=3300, idOutDevBase=3400 };
+       idInDevBase=3300, idOutDevBase=3400,
+       idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101 }; // v0.21.4: Recordings submenu (idRecBase + up to 25 entries)
 void MainComponent::savePresetInteractive(bool saveAs) {
     auto& st = engine.state;
     if (!saveAs && st.name != "Default" && !st.name.empty()) { presetio::save(st, juce::String(st.name)); return; }
@@ -751,6 +756,7 @@ void MainComponent::showRepositionMenu() {
     juce::PopupMenu m; auto& st = engine.state;
     m.addItem(idTop, "At the Top"); m.addItem(idBottom, "At the Bottom");
     m.addItem(idStick, "Stick", true, st.stick); m.addItem(idPin, "Pin Above Other Windows", true, st.pinned);
+    m.addItem(idReserve, "Reserve Screen Space", true, st.reserveScreenSpace); // v0.21.2: the old Reserve button, same state + sync path
     juce::PopupMenu disp; auto displays = juce::Desktop::getInstance().getDisplays().displays;
     for (int i = 0; i < displays.size(); ++i) disp.addItem(idDisplayBase + i, "Display " + juce::String(i + 1));
     m.addSubMenu("Move to Display", disp);
@@ -764,16 +770,17 @@ void MainComponent::showRepositionMenu() {
             else if (r == idStick) doStick();
             else if (r == idPin) { engine.state.pinned = !engine.state.pinned;
                 if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setAlwaysOnTop(engine.state.pinned); }
+            else if (r == idReserve) { engine.state.reserveScreenSpace = !engine.state.reserveScreenSpace; syncScreenSpace(); }
             else if (r >= idDisplayBase) doMoveToDisplay(r - idDisplayBase);
         });
     });
 }
 void MainComponent::toggleRecord() {
-    if (engine.isRecording()) { engine.stopRecording(); recBtn.setButtonText("Rec"); return; }
+    if (engine.isRecording()) { engine.stopRecording(); recordingFile_ = juce::File{}; recBtn.setButtonText("Rec"); return; }
     auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
     dir.createDirectory();
     auto f = dir.getChildFile("record-" + juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S") + ".wav");
-    if (engine.startRecording(f)) recBtn.setButtonText("Stop");
+    if (engine.startRecording(f)) { recordingFile_ = f; recBtn.setButtonText("Stop"); }
 }
 void MainComponent::exportClip(double seconds) {
     auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
@@ -858,13 +865,39 @@ void MainComponent::showHamburgerMenu() {
     cap.addItem(idCapRecord, engine.isRecording() ? "Stop Recording" : "Begin Recording");
     cap.addItem(idClip10, "Clip Last 10 Seconds"); cap.addItem(idClip60, "Clip Last 60 Seconds");
     m.addSubMenu("Audio Capture", cap);
+    // v0.21.4: Recordings — rebuilt from a FRESH folder scan on every
+    // open (no cached list); the core plan filters/sorts/caps and
+    // drops the take currently being written.
+    juce::PopupMenu rec; std::vector<juce::File> recFiles;
+    {
+        auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
+        std::vector<meterbar::RecordingFileInfo> infos;
+        for (auto& f : dir.findChildFiles(juce::File::findFiles, false, "*.wav")) {
+            meterbar::RecordingFileInfo info;
+            info.name = f.getFileName().toStdString();
+            info.mtimeMs = f.getLastModificationTime().toMilliseconds();
+            info.sizeBytes = f.getSize();
+            infos.push_back(info);
+        }
+        auto plan = meterbar::planRecordingsMenu(infos, engine.isRecording() ? recordingFile_.getFileName().toStdString() : std::string{});
+        if (plan.empty()) rec.addItem(idRecEmpty, "No recordings yet", false);
+        else for (size_t i = 0; i < plan.size(); ++i) {
+            auto label = juce::String(plan[i].clip ? "Clip — " : "") + plan[i].name
+                       + "  (" + juce::File::descriptionOfSizeInBytes(plan[i].sizeBytes) + ")";
+            rec.addItem(idRecBase + (int)i, label);
+            recFiles.push_back(dir.getChildFile(juce::String(plan[i].name)));
+        }
+    }
+    rec.addSeparator();
+    rec.addItem(idOpenRecFolder, "Open Recordings Folder");
+    m.addSubMenu("Recordings", rec);
     m.addSeparator();
     m.addItem(idHint, "Show Reposition Hint", true, st.showRepositionHint);
     m.addItem(idToolbar, "Show Toolbar", true, st.showToolbar);
     m.addItem(idDebug, "Show Debug Window", true, debugWin->isVisible());
     m.addItem(idUpdates, "Check For Updates");
     m.addSeparator(); m.addItem(idQuit, "Quit");
-    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(burgerBtn), [this, inNames, outNames](int r){
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(burgerBtn), [this, inNames, outNames, recFiles](int r){
         auto& s = engine.state;
         if (r == idAbout) juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "MeterBar",
             "MeterBar " + kVersion + "\nA compact audio metering bar: Spectrum, Spectrogram, Waveform,\nLoudness, Stereometer, Oscilloscope.\nBuilt with JUCE + a custom DSP core.\nMade with JUCE (juce.com) — free-license attribution.");
@@ -884,6 +917,8 @@ void MainComponent::showHamburgerMenu() {
         else if (r == idCapRecord) toggleRecord();
         else if (r == idClip10) exportClip(10);
         else if (r == idClip60) exportClip(60);
+        else if (r == idOpenRecFolder) { auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar"); dir.createDirectory(); dir.startAsProcess(); }
+        else if (r >= idRecBase && r < idRecBase + (int)recFiles.size()) recFiles[(size_t)(r - idRecBase)].startAsProcess();
         else if (r == idHint) { s.showRepositionHint = !s.showRepositionHint; resized(); }
         else if (r == idToolbar) { s.showToolbar = !s.showToolbar; resized(); repaint(); }
         else if (r == idDebug) debugWin->setVisible(!debugWin->isVisible());

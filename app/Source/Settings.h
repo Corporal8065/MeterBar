@@ -2,6 +2,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <meterbar/State.hpp>
 #include <functional>
+#include "MeterBarVersion.h" // v0.21.2: generated single-source version (About panel below)
 #include "Theme.h" // v0.12: panel headers wear their module's accent colour
 #include "WindowsLoopback.h" // v0.13: the output picker is built from real WASAPI endpoints (name + ID)
 // v0.19: the dark-title-bar call below is Windows-only. The guard tests
@@ -98,6 +99,7 @@ public:
     juce::AudioDeviceManager* deviceManager = nullptr; // v0.8 device pickers
     std::function<void()> onChanged, onSourceChanged, onFpsChanged;
     std::function<void()> onArrange, onRestore; // v0.18: Window panel buttons (wired by MainComponent)
+    std::function<void()> onBgLinkToggled; // v0.21.3: "Link background" flipped (wired by MainComponent)
     SettingsContent() { setSize(760, 640); }
     // v0.19: Settings paints its OWN background in the fixed palette —
     // this is the line that ends the theme.panel inheritance (near-white
@@ -170,6 +172,7 @@ public:
             note("Below 100 the desktop shows through the module backgrounds (traces and text stay solid). Translucency only — no background blur in this build.");
             toggle("Beat Pulse (subtle glow on beats)", st->beatPulseEnabled, [&](bool b){ st->beatPulseEnabled = b; });
             toggle("Visualizer background (particles + rainbow bursts, v0.20.0)", st->visualizerEnabled, [&](bool b){ st->visualizerEnabled = b; });
+            toggle("Link background (share style, opacity and visualizer with linked bars)", st->linkBackground, [&](bool b){ st->linkBackground = b; if (onBgLinkToggled) onBgLinkToggled(); });
             slider("Visualizer base hue (deg)", 0.0, 360.0, st->visualizerBaseHue * 360.0,
                    [&](double v){ st->visualizerBaseHue = (float)(v / 360.0); });
             slider("Visualizer saturation %", 0.0, 100.0, st->visualizerSaturation * 100.0,
@@ -184,9 +187,9 @@ public:
         });
         panel("Window", nullptr, [&]{
             toggle("Reserve screen space when docked at a screen edge (Windows)", st->reserveScreenSpace, [&](bool b){ st->reserveScreenSpace = b; });
-            note("Windows only: while ON and the bar is docked flush at any edge of a monitor (top, bottom, or a side), the bar registers as an App Bar on that edge — Windows shrinks that monitor's work area, so maximised windows stop at the bar instead of sliding under it. Same control as the toolbar's Reserve button. Moving the bar off its edge releases the space again; dragging it to another edge moves the reservation with it.");
+            note("Windows only: while ON and the bar is docked flush at any edge of a monitor (top, bottom, or a side), the bar registers as an App Bar on that edge — Windows shrinks that monitor's work area, so maximised windows stop at the bar instead of sliding under it. Same control as the Reposition menu's Reserve Screen Space item. Moving the bar off its edge releases the space again; dragging it to another edge moves the reservation with it.");
             buttonRow("Arrange windows clear of the bar", "Restore arranged windows");
-            note("Arrange slides every other (non-maximised) window on the bar's monitor into the space clear of the bar's docked edge; Restore puts them back where they were. The Debug window's 'Screen space' line shows the current state, including which edge is reserved. On non-Windows builds these do nothing.");
+            note("Arrange slides every other window on the bar's monitor into the space clear of the bar's docked edge — maximised windows included (they are un-maximised, fitted, and Restore puts them back maximised). Restore puts every window back where it was. The Debug window's 'Screen space' line shows the current state, including which edge is reserved. On non-Windows builds these do nothing.");
         });
         panel("Audio Source", nullptr, [&]{
             soundSourceCombo();
@@ -201,6 +204,15 @@ public:
             toggle("VSync (default on)", st->vsync, [&](bool b){ st->vsync = b; });
             combo("FPS Limit", {"15","30","60","120"}, st->fpsLimit == 15 ? 0 : st->fpsLimit == 30 ? 1 : st->fpsLimit == 60 ? 2 : 3,
                   [&](int v){ st->fpsLimit = v == 0 ? 15 : v == 1 ? 30 : v == 2 ? 60 : 120; if (onFpsChanged) onFpsChanged(); });
+        });
+        panel("About", nullptr, [&]{
+            note("MeterBar v" + juce::String(meterbar::kVersionString) + " — audio meters that dock to any screen edge.");
+            auto* gh = add(new juce::TextButton("GitHub"));
+            gh->setBounds(24, y_, 120, 22);
+            gh->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+            gh->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
+            gh->onClick = []{ juce::URL("https://github.com/Corporal8065/MeterBar").launchInDefaultBrowser(); };
+            y_ += 26;
         });
         setSize(760, y_ + 8);
     }

@@ -84,4 +84,39 @@ inline IntRect arrangeFit(IntRect window, IntRect monitor, ReserveEdge edge, int
 inline IntRect arrangeFit(IntRect window, IntRect monitor, int stripPx) {
     return arrangeFit(window, monitor, ReserveEdge::Top, stripPx);
 }
+
+// ------------------------------------------------------------------
+// MAXIMIZED WINDOWS (v0.21.4) — Jackson: "the arrange does not work
+// when the application is already meximized". The old sweep SKIPPED
+// zoomed windows outright (IsZoomed in the skip condition), so a
+// maximized app was never arranged. A maximized window's live rect
+// is the whole monitor — meaningless to fit; its NORMAL (restored)
+// rect (GetWindowPlacement's rcNormalPosition) is the one
+// arrangeFit can place. The plan: a zoomed window participates via
+// its normal rect, is snapshotted BEFORE being touched (normal rect
+// + wasMaximized), restored, then fitted. Restore reverses the
+// state, not just the rect: a window that was maximized goes back
+// to maximized after its snapshot rect is applied.
+struct ArrangeWindowPlan {
+    bool participate = false;  // false: skip this window entirely
+    bool restoreFirst = false; // true when zoomed: un-maximize before fitting
+    IntRect fitInput{};        // the rect to run through arrangeFit
+};
+inline ArrangeWindowPlan planArrangeWindow(bool visible, bool iconic, bool zoomed,
+                                           IntRect windowRect, IntRect normalRect) {
+    if (!visible || iconic) return {};             // the historical skips stay skips
+    if (zoomed) {
+        if (normalRect.w <= 0 || normalRect.h <= 0) return {};
+        return { true, true, normalRect };         // fit the NORMAL rect, never the zoomed one
+    }
+    if (windowRect.w <= 0 || windowRect.h <= 0) return {};
+    return { true, false, windowRect };
+}
+struct RestoreWindowPlan {
+    bool applyRect = true;   // SetWindowPos the snapshot rect first
+    bool remaximize = false; // then SW_MAXIMIZE — a maximized home is a maximized window
+};
+inline RestoreWindowPlan planRestoreWindow(bool wasMaximized) {
+    return { true, wasMaximized };
+}
 } // namespace meterbar

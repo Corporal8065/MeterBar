@@ -173,7 +173,7 @@ bool ScreenSpace::isReserved() const { return g_appBar.registered; }
 
 // ---- Arrange sweep ------------------------------------------------------
 namespace {
-struct ArrangeMove { HWND hwnd; meterbar::IntRect from, to; };
+struct ArrangeMove { HWND hwnd; meterbar::IntRect from, to; bool wasMaximized = false; };
 struct ArrangeCtx {
     HMONITOR mon; HWND exclude; int strip;
     meterbar::ReserveEdge edge;
@@ -183,10 +183,14 @@ struct ArrangeCtx {
 BOOL CALLBACK arrangeEnumProc(HWND hwnd, LPARAM lp) {
     auto* ctx = reinterpret_cast<ArrangeCtx*>(lp);
     if (hwnd == ctx->exclude || hwnd == GetShellWindow()) return TRUE;
-    // Minimised windows have no meaningful on-screen rect; MAXIMISED
-    // windows are deliberately left alone — the AppBar reservation owns
-    // them (Windows sizes them against the shrunken work area).
-    if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd)) return TRUE;
+    // Minimised windows have no meaningful on-screen rect. MAXIMISED
+    // windows DO participate since v0.21.4 — via their normal rect
+    // (core planArrangeWindow); before that the sweep skipped them
+    // outright (IsZoomed in this condition), which was Jackson's
+    // "the arrange does not work when the application is already
+    // meximized".
+    const bool zoomed = IsZoomed(hwnd) != FALSE;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
     // Never fight the user: a window in an interactive move/size loop
     // (being dragged or edge-resized at this very moment) is skipped
     // outright. v0.18 had no such guard, so a sweep could yank the very
@@ -206,11 +210,22 @@ BOOL CALLBACK arrangeEnumProc(HWND hwnd, LPARAM lp) {
     RECT r{};
     if (!GetWindowRect(hwnd, &r)) return TRUE;
     const meterbar::IntRect wr{ r.left, r.top, r.right - r.left, r.bottom - r.top };
-    if (wr.w <= 0 || wr.h <= 0) return TRUE;
+    meterbar::IntRect normal{};
+    if (zoomed) {
+        WINDOWPLACEMENT wp{}; wp.length = sizeof wp;
+        if (!GetWindowPlacement(hwnd, &wp)) return TRUE;
+        normal = { wp.rcNormalPosition.left, wp.rcNormalPosition.top,
+                   wp.rcNormalPosition.right - wp.rcNormalPosition.left,
+                   wp.rcNormalPosition.bottom - wp.rcNormalPosition.top };
+    }
+    const auto plan = meterbar::planArrangeWindow(true, false, zoomed, wr, normal);
+    if (!plan.participate) return TRUE;
     // Fit FIRST, move later: mutating windows mid-enumeration can disturb
-    // the enumeration itself, so this pass only collects the plan.
-    const meterbar::IntRect fit = meterbar::arrangeFit(wr, ctx->monRect, ctx->edge, ctx->strip);
-    if (fit != wr) ctx->moves.push_back({ hwnd, wr, fit });
+    // the enumeration itself, so this pass only collects the plan. The
+    // snapshot (plan.fitInput + the zoomed flag) is recorded in the
+    // move, BEFORE anything is touched.
+    const meterbar::IntRect fit = meterbar::arrangeFit(plan.fitInput, ctx->monRect, ctx->edge, ctx->strip);
+    if (fit != plan.fitInput) ctx->moves.push_back({ hwnd, plan.fitInput, fit, zoomed });
     return TRUE;
 }
 } // namespace
@@ -240,7 +255,8 @@ int ScreenSpace::arrange(void* hwndV, meterbar::ReserveEdge edge, int stripPhysP
         // "permanently moving the tabs". Only restore() clears this.
         bool known = false;
         for (auto& s : impl_->saved) if (s.hwnd == mv.hwnd) { known = true; break; }
-        if (!known) impl_->saved.push_back({ mv.hwnd, mv.from });
+        if (!known) impl_->saved.push_back({ mv.hwnd, mv.from, mv.wasMaximized });
+        if (mv.wasMaximized) ShowWindow(mv.hwnd, SW_RESTORE); // un-maximize first; the fit then applies to the restored window
         if (SetWindowPos(mv.hwnd, nullptr, mv.to.x, mv.to.y, mv.to.w, mv.to.h,
                          SWP_NOZORDER | SWP_NOACTIVATE))
             ++moved;
@@ -255,10 +271,14 @@ int ScreenSpace::restore() {
     int n = 0;
     for (auto it = impl_->saved.rbegin(); it != impl_->saved.rend(); ++it) {
         HWND hwnd = static_cast<HWND>(it->hwnd);
-        if (IsWindow(hwnd) && SetWindowPos(hwnd, nullptr, it->rect.x, it->rect.y,
-                                            it->rect.w, it->rect.h,
-                                            SWP_NOZORDER | SWP_NOACTIVATE))
+        if (!IsWindow(hwnd)) continue;
+        const auto plan = meterbar::planRestoreWindow(it->wasMaximized);
+        if (SetWindowPos(hwnd, nullptr, it->rect.x, it->rect.y,
+                         it->rect.w, it->rect.h,
+                         SWP_NOZORDER | SWP_NOACTIVATE)) {
             ++n;
+            if (plan.remaximize) ShowWindow(hwnd, SW_MAXIMIZE); // home was maximized: go back maximized, never stranded restored-down
+        }
     }
     impl_->saved.clear();
     char buf[96];

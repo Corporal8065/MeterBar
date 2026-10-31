@@ -88,3 +88,13 @@ Using MeterBar and want something changed, added, or fixed? Open an **issue** (t
 ---
 
 *Built with [JUCE](https://juce.com) and a hand-rolled DSP core. Made with JUCE — free-license attribution.*
+
+## Code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+MeterBar's Windows releases are code-signed under a certificate issued to
+SignPath Foundation, so Windows shows "SignPath Foundation" as the publisher.
+Only release builds produced by this repository's GitHub Actions workflow are
+signed — see the full [Code signing policy](CODE_SIGNING_POLICY.md) for what
+is signed, who approves it, and the privacy statement.

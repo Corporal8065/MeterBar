@@ -30,10 +30,12 @@ namespace meterbar {
 // A drag session is "live" while its stamp is fresher than
 // kLeaderStaleMs; staleness — never a stuck flag — ends it.
 
-inline constexpr unsigned kLinkMagic = 0x424C4B32; // "BLK2" — v0.3.0/v0.20.1 appended the one-click-stack
-    // request fields and MeterBar's audio broadcast to LinkSlot. Mixed old/new
-    // binaries never link (magic mismatch = the whole block reads empty), the
-    // same failure shape as BLK1 vs the pre-link world.
+inline constexpr unsigned kLinkMagic = 0x424C4B33; // "BLK3" — v0.21.3 appended bgEffect to LinkSlot
+    // (the background packet now carries the effect selection, not just
+    // style + opacity). BLK2 appended the one-click-stack request fields
+    // and MeterBar's audio broadcast. Mixed old/new binaries never link
+    // (magic mismatch = the whole block reads empty), the same failure
+    // shape as BLK1 vs the pre-link world.
 inline constexpr int kLinkAppMeter = 0, kLinkAppTicker = 1, kLinkAppSession = 2;
 inline constexpr int kSnapPx = 10;
 inline constexpr long long kLeaderStaleMs = 600;
@@ -64,6 +66,12 @@ struct LinkSlot {
     // their reactive backgrounds from it (bands + onset pump).
     float audioLow = 0.f, audioMid = 0.f, audioHigh = 0.f, audioLevel = 0.f;
     unsigned audioSeq = 0;
+    // Background effect (BLK3, v0.21.3): the publisher's bgEffect
+    // ordinal (0 styled, 1 visualizer, 2 glow). MeterBar has no
+    // 3-way effect: it publishes 1 when its visualizer is on, else
+    // 0, and adopts effect != 0 as visualizer-on. Appended last,
+    // like every field since BLK1.
+    int bgEffect = 0;
 };
 struct LinkShared {
     unsigned magic = kLinkMagic;
@@ -167,15 +175,18 @@ inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge)
 struct BgPacket {
     int style = 0;      // family background-style ordinal (LinkSlot::bgStyle)
     int opacityPct = 100;
+    int effect = 0;     // bgEffect ordinal (LinkSlot::bgEffect) — BLK3
 };
 struct BgSyncState {
     int publishedStyle = -999, publishedPct = -999; // values this app last published OR adopted (-999 = none yet)
+    int publishedEffect = -999;                     // same, for the effect ordinal
     unsigned seenSeq[3] = { 0, 0, 0 };              // newest bgSeq consumed per app slot
 };
-// True when (style, pct) differ from what this app last published or
-// adopted — the ONLY condition under which bgSeq may be bumped.
-inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct) {
-    return style != s.publishedStyle || pct != s.publishedPct;
+// True when (style, pct, effect) differ from what this app last
+// published or adopted — the ONLY condition under which bgSeq may
+// be bumped.
+inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct, int effect) {
+    return style != s.publishedStyle || pct != s.publishedPct || effect != s.publishedEffect;
 }
 // Live-linked opacity repair (v0.3.0, item 13): drop this client's
 // published markers to the "none yet" sentinel, so the next publish
@@ -183,7 +194,7 @@ inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct) {
 // them. The client calls this when its link turns on — the join path
 // where the v0.2.1 "an opacity change only lands after re-linking"
 // report lived.
-inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publishedPct = -999; }
+inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publishedPct = -999; s.publishedEffect = -999; }
 // Scan the shared block for a background this app has not consumed.
 // Every live, linked peer with an unseen non-zero bgSeq is marked
 // seen; when at least one qualifies, the LAST one in slot order wins:
@@ -197,10 +208,10 @@ inline bool bgAdoption(const LinkShared& sh, int selfApp, BgSyncState& s, long l
         if (p.appId < 0 || p.appId == selfApp || !p.linked || !slotLive(p, nowMs)) continue;
         if (p.bgSeq == 0 || p.bgSeq == s.seenSeq[i]) continue;
         s.seenSeq[i] = p.bgSeq;
-        out = BgPacket{ p.bgStyle, p.bgOpacityPct };
+        out = BgPacket{ p.bgStyle, p.bgOpacityPct, p.bgEffect };
         found = true;
     }
-    if (found) { s.publishedStyle = out.style; s.publishedPct = out.opacityPct; }
+    if (found) { s.publishedStyle = out.style; s.publishedPct = out.opacityPct; s.publishedEffect = out.effect; }
     return found;
 }
 // ONE-CLICK STACK PLANNER (v0.3.0, item 12). Given the shared state

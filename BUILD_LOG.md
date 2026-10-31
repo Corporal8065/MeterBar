@@ -2,6 +2,60 @@
 
 # MeterBar — BUILD LOG (dated, honest: only what was actually observed)
 
+## v0.21.4 (2026-10-31) — Arrange takes maximized windows; Recordings submenu
+
+Jackson (2026-10-31 15:00 PT): "the arrange does not work when
+the application is already meximized" + "also add a section in
+the menu drop down to view all recordings".
+
+- Arrange: IsZoomed removed from the sweep's skip condition;
+  zoomed windows plan from rcNormalPosition via core
+  planArrangeWindow (Arrange.hpp, +8 checks), snapshot gains
+  wasMaximized (write-once preserved), SW_RESTORE before the fit;
+  Restore applies the rect then SW_MAXIMIZE per core
+  planRestoreWindow. Identical change in TickerBar v0.5.7 /
+  SessionBar v0.4.6. MinGW syntax+type check of ScreenSpace.cpp:
+  clean.
+- Recordings: new core Recordings.hpp (planRecordingsMenu:
+  name filter, active-take exclusion, newest-first, cap 25 —
+  +16 checks); hamburger submenu beside Audio Capture, fresh
+  folder scan per open, entries open via startAsProcess, folder
+  item opens Documents\MeterBar; recordingFile_ tracks the live
+  take in MainComponent.
+- Suite: 1043 checks, 0 failures.
+
+## v0.21.3 (2026-10-31) — Link background toggle; bgEffect in the packet (BLK3)
+
+Jackson (2026-10-31 14:57 PT): "...and to link th ebackground".
+
+- Core BarLink: BgPacket/BgSyncState carry the effect ordinal,
+  bgIsLocalChange is 4-arg (tests updated + effect checks),
+  LinkSlot gains bgEffect appended, magic BLK3. MeterBar maps
+  visualizerEnabled <-> effect 1/0 (adopts any nonzero effect as
+  visualizer-on).
+- Client gates publish + adoption on the new persisted
+  state.linkBackground (default on; PresetIO set/get); Settings >
+  Appearance gains the "Link background" toggle; turning it on
+  re-stamps via notifyBgLinkChanged.
+- Suite: 1019 checks, 0 failures.
+
+## v0.21.2 (2026-10-31) — GitHub link; Reserve into the Reposition dropdown
+
+Jackson's asks (2026-10-31 14:13 PT): GitHub link in Settings next
+to the version display; one shared Reposition dropdown across the
+three bars; Reserve leaves the button row for a ticked menu item.
+
+- reserveBtn removed everywhere (grep over app/Source: zero hits);
+  the Reposition menu's new ticked "Reserve Screen Space" item
+  toggles engine.state.reserveScreenSpace + syncScreenSpace() — the
+  button's exact behaviour, same settings key.
+- Settings gains an About panel: version from the generated
+  meterbar::kVersionString (Settings.h now includes the generated
+  MeterBarVersion.h) and a GitHub button opening
+  https://github.com/Corporal8065/MeterBar.
+- Version: root CMakeLists project VERSION 0.21.1 -> 0.21.2 (sole
+  carrier; the generated header follows).
+
 ## v0.21.1 (2026-10-31) — visibility floor on link applies (off-screen on load)
 
 Jackson's report (2026-10-31, #crypto-book, about SessionBar —

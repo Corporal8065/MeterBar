@@ -71,6 +71,7 @@ struct PresetState {
     // default; when ON the window background goes black and the
     // particle layer renders behind the modules.
     bool linkEnabled = false;              // v0.20.0 (k): family linking — opt-in, default OFF
+    bool linkBackground = true;            // v0.21.3: share background (style/opacity/effect) with linked bars — default ON; the visible toggle Jackson asked for
     bool visualizerEnabled = false;
     float visualizerBaseHue = 0.83f;       // 0..1 (family pink)
     float visualizerSaturation = 0.85f;    // 0..1

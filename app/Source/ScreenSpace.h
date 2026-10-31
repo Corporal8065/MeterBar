@@ -45,7 +45,7 @@ public:
                      int physX, int physY, int physW, int physH);
     void release(); // ABM_REMOVE; safe to call at any time
     bool isReserved() const;
-    struct SavedWindow { void* hwnd; meterbar::IntRect rect; };
+    struct SavedWindow { void* hwnd; meterbar::IntRect rect; bool wasMaximized = false; }; // wasMaximized: v0.21.4 — Restore re-maximizes it
     // Fit every other top-level window on hwnd's monitor into the area
     // clear of a strip of stripPhysPx pixels along `edge` of that
     // monitor (the caller passes the bar's far edge measured from that

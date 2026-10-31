@@ -87,7 +87,7 @@ private:
                      settingsBtn{"Settings"}, burgerBtn{"Menu"}, minBtn{"_"}, quitBtn{"Quit"};
     // v0.18 screen-space controls, sitting with the Reposition/pin family:
     // Reserve = the AppBar toggle; Arrange/Restore = the window sweep.
-    juce::TextButton reserveBtn{"Reserve"}, arrangeBtn{"Arrange"}, restoreBtn{"Restore"};
+    juce::TextButton arrangeBtn{"Arrange"}, restoreBtn{"Restore"}; // v0.21.2: Reserve left the button row — it lives in the Reposition menu now ("Reserve Screen Space")
     juce::TextButton linkBtn{"Link"};                             // v0.20.0 (k)
     BarLinkClient linkClient_{ meterbar::kLinkAppMeter };        // v0.20.0 (k)
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
@@ -120,6 +120,7 @@ private:
     int debugEpsCount = -1; juce::int64 lastEpsCheckMs = 0; // v0.15 item 8: render-endpoint count shown in Debug (refreshed ~2 s)
     std::unique_ptr<juce::FileChooser> chooser;
     double uiFpsMeasured = 0; juce::int64 lastFrameMs = 0; int clipCounter = 1;
+    juce::File recordingFile_; // v0.21.4: the take currently being written (the Recordings menu omits it)
     // Whole-toolbar drag state (v0.8, Jackson's ask: the entire top bar
     // moves the window, grip dots removed). v0.20.2: ComponentDragger is
     // back (SessionBar's path) — the v0.11 OS caption move loop that

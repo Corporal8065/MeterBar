@@ -37,7 +37,7 @@
 
 class BarLinkClient : private juce::Timer {
 public:
-    struct Bg { int style = 0; float opacity = 1.0f; };
+    struct Bg { int style = 0; float opacity = 1.0f; int effect = 0; }; // effect: BLK3 (v0.21.3) — MeterBar maps it to/from visualizerEnabled
     // Host callbacks (all message-thread).
     std::function<juce::Rectangle<int>()> getBounds;
     std::function<void(juce::Rectangle<int>)> setBounds;   // position apply (size preserved by the rect itself)
@@ -45,6 +45,7 @@ public:
     std::function<void(const Bg&)> applyBg;
     std::function<int()> getDockedEdge;                    // protocol ordinal or -1
     std::function<bool()> isLinked;
+    std::function<bool()> bgLinkEnabled; // v0.21.3: the host's "Link background" toggle; empty = enabled
     std::function<void(float out[4])> getAudio; // v0.3.0 item 17: band energies [low,mid,high] + level (MeterBar wires this; the others leave it empty)
 
     explicit BarLinkClient(int appId) : appId_(appId) {}
@@ -106,6 +107,16 @@ public:
     // change by the core rule; the v0.2.0 force path bumped bgSeq on
     // EVERY settings interaction, changed background or not.
     void notifyLocalSettings() { publishBg(); }
+
+    // v0.21.3: the host's "Link background" toggle flipped ON —
+    // re-stamp the current background under a fresh bgSeq so linked
+    // peers adopt it immediately (the link-join repair, reused). OFF
+    // needs no call: publishBg and the adoption scan both consult
+    // bgLinkEnabled.
+    void notifyBgLinkChanged() {
+        if (bgLinkEnabled && bgLinkEnabled()) { meterbar::bgForceRepublish(bgSync_); publishBg(); }
+    }
+    bool bgLinkOn() const { return !bgLinkEnabled || bgLinkEnabled(); }
 
     // v0.3.0 item 12: ask every linked bar to stack against this one.
     // The host snaps ITSELF to its dock edge first, then calls this
@@ -211,8 +222,8 @@ private:
         // order let a live peer drag postpone adoption indefinitely)
         {
             meterbar::BgPacket pkt;
-            if (meterbar::bgAdoption(snap, appId_, bgSync_, now, pkt) && applyBg)
-                applyBg(Bg{ pkt.style, pkt.opacityPct / 100.0f });
+            if (bgLinkOn() && meterbar::bgAdoption(snap, appId_, bgSync_, now, pkt) && applyBg)
+                applyBg(Bg{ pkt.style, pkt.opacityPct / 100.0f, pkt.effect });
         }
         // --- one-click stack requests (item 12): a peer's fresh
         // stackSeq moves this bar to its planned target ---
@@ -276,13 +287,14 @@ private:
 
     void publishBg() {
         if (!shared_ || !getBg) return;
+        if (!bgLinkOn()) return; // v0.21.3: "Link background" off — publish nothing
         auto bg = getBg();
         const int pct = (int)std::lround(bg.opacity * 100.0f);
         // Core gate: publish ONLY a value this app has not already
         // published or adopted (adopted values are recorded in
         // bgSync_ by bgAdoption, so an adoption is never re-published
         // as a local change — the v0.2.0 echo).
-        if (!meterbar::bgIsLocalChange(bgSync_, bg.style, pct)) return;
+        if (!meterbar::bgIsLocalChange(bgSync_, bg.style, pct, bg.effect)) return;
         meterbar::LinkShared snap;
         if (!readShared(snap)) return;
         meterbar::LinkSlot mine = snap.slots[(size_t)appId_];
@@ -290,9 +302,10 @@ private:
         mine.heartbeatMs = nowMs();
         mine.bgStyle = bg.style;
         mine.bgOpacityPct = pct;
+        mine.bgEffect = bg.effect;
         mine.bgSeq += 1;
         writeSlot(mine);
-        bgSync_.publishedStyle = bg.style; bgSync_.publishedPct = pct;
+        bgSync_.publishedStyle = bg.style; bgSync_.publishedPct = pct; bgSync_.publishedEffect = bg.effect;
     }
 
     // --- shared-memory plumbing ---

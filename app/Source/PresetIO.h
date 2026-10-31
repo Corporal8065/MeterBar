@@ -41,6 +41,7 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("pinned", s.pinned); set("stick", s.stick); set("showToolbar", s.showToolbar); set("showHint", s.showRepositionHint);
     set("reserveSpace", s.reserveScreenSpace); // v0.18
     set("linkEnabled", s.linkEnabled); // v0.20.0 (k)
+    set("linkBackground", s.linkBackground); // v0.21.3
     set("vizEnabled", s.visualizerEnabled); set("vizHue", s.visualizerBaseHue); // v0.20.0
     set("vizSat", s.visualizerSaturation); set("vizSpread", s.visualizerSpread);
     set("vizCycle", s.visualizerCycleSec);
@@ -91,6 +92,7 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.pinned = gb("pinned", s.pinned); s.stick = gb("stick", s.stick);
     s.reserveScreenSpace = gb("reserveSpace", s.reserveScreenSpace); // v0.18 (absent in old presets -> default off)
     s.linkEnabled = gb("linkEnabled", s.linkEnabled); // v0.20.0 (k) (absent -> OFF)
+    s.linkBackground = gb("linkBackground", s.linkBackground); // v0.21.3 (absent -> ON)
     s.visualizerEnabled = gb("vizEnabled", s.visualizerEnabled); // v0.20.0 (absent -> OFF)
     s.visualizerBaseHue = gf("vizHue", s.visualizerBaseHue);
     s.visualizerSaturation = gf("vizSat", s.visualizerSaturation);

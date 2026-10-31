@@ -4,6 +4,87 @@ Verification rule (Jackson, 2026-10-29): every item is DONE only with
 proof — the full DSP suite green after the change, new checks for new
 behaviour, and errors recorded here with their actual text, never hidden.
 
+## v0.21.4 (2026-10-31) — Arrange takes maximized windows; Recordings submenu (Jackson's asks)
+
+Jackson (2026-10-31 15:00 PT, verbatim): "the arrange does not
+work when the application is already meximized" and "also add a
+section in the menu drop down to view all recordings".
+
+- **Arrange + maximized — DONE (all three bars, identical).** Root
+  cause, in the code: the EnumWindows callback skipped IsZoomed
+  windows outright, so a maximized app was never arranged. Now a
+  zoomed window participates through its NORMAL rect
+  (GetWindowPlacement rcNormalPosition): the core plan
+  (planArrangeWindow in Arrange.hpp) fits that rect, the window is
+  snapshotted BEFORE being touched (normal rect + wasMaximized,
+  write-once as ever), un-maximized (SW_RESTORE), then fitted.
+  Restore honours the flag (planRestoreWindow): snapshot rect
+  applied, then SW_MAXIMIZE — never stranded restored-down. The
+  v0.18.1 invariants stand: one-shot per press, write-once
+  snapshots, GUI_INMOVESIZE windows still skipped. (The Settings
+  Window note that said Arrange skips maximised windows is
+  updated.) Windows TU verified by the MinGW syntax+type check;
+  real AppBar/arrange behaviour is field-verified on Jackson's PC.
+- **Recordings submenu — DONE.** Hamburger menu gains a
+  "Recordings" submenu beside Audio Capture, rebuilt from a fresh
+  scan of Documents\MeterBar on every open: every record-*.wav
+  take plus clip*.wav clips (labelled "Clip — "), newest first,
+  filename + file size, capped at the 25 newest, with an "Open
+  Recordings Folder" item; empty folder shows a disabled "No
+  recordings yet". Clicking an entry opens it with the OS default
+  handler. The take currently being written is omitted
+  (MainComponent now tracks it in recordingFile_; the filter/sort/
+  cap logic is core planRecordingsMenu, suite-graded).
+
+## v0.21.3 (2026-10-31) — visible Link background toggle + effect in the packet (Jackson's ask)
+
+Jackson (2026-10-31 14:57 PT, verbatim): "still need a visual UI
+way of changing the size of each thing thats going by for the
+ticker bar and to link th ebackground". (The Sizes half is
+TickerBar-only, v0.5.6.)
+
+- **Link background — DONE (with TickerBar v0.5.6 / SessionBar
+  v0.4.5).** Diagnosis and protocol fix as in TickerBar's entry:
+  style/opacity already propagated; the EFFECT selection was not
+  in the packet, and no visible control existed. LinkSlot gains
+  bgEffect (appended), magic BLK2 -> BLK3. MeterBar has no 3-way
+  effect: it publishes visualizerEnabled as effect 1/0 and adopts
+  effect != 0 as visualizer-on (a peer's glow lands as the
+  visualizer — MeterBar's only effect). Visible control: a
+  persisted "Link background" toggle (state.linkBackground,
+  default ON) in Settings > Appearance under the Visualizer
+  toggle; the client gates publish + adoption on it, and turning
+  it on re-stamps the current background for peers.
+
+## v0.21.2 (2026-10-31) — GitHub link in Settings; Reserve moves into the Reposition menu (Jackson's asks)
+
+Jackson's asks (2026-10-31 14:13 PT, paraphrased faithfully): (a) a
+GitHub link inside each bar's Settings, next to the version display,
+opening the app's own repo; (b) all three bars end up with the same
+Reposition dropdown (MeterBar's is the template); (c) the standalone
+Reserve button leaves the button row and becomes a ticked "Reserve
+Screen Space" item in the Reposition dropdown, toggling the same
+state through the same path, with existing users' settings carrying
+over untouched.
+
+- **GitHub link — DONE.** MeterBar's Settings had no version display
+  at all, so this adds an About panel (after Performance): the
+  version line composed from the generated single-source
+  `meterbar::kVersionString`, plus a GitHub button that opens
+  https://github.com/Corporal8065/MeterBar in the default browser.
+- **Reserve into the dropdown — DONE.** `reserveBtn` is deleted
+  (member, ctor wiring, toolbar bounds, visibility lists, and the
+  syncScreenSpace toggle mirror). The Reposition menu gains a ticked
+  "Reserve Screen Space" item (new idReserve) that flips
+  `engine.state.reserveScreenSpace` and calls `syncScreenSpace()` —
+  exactly what the button did. Same persisted key, so a user who had
+  Reserve on still has it on. The button row closes up in resized()
+  (Arrange | Restore now sit directly left of Link/Preset). The
+  Settings Window-panel Reserve toggle and its note now point at the
+  menu item instead of the removed button.
+- **Reposition menu** — unchanged here (it is the template the
+  siblings were ported to).
+
 ## v0.21.1 (2026-10-31) — link applies get a visibility floor (Jackson's "stuck somewhere i cannot see" report)
 
 Jackson's report (2026-10-31, #crypto-book, about SessionBar —

@@ -22,6 +22,7 @@
 #include "../dsp/include/meterbar/State.hpp"
 #include "../dsp/include/meterbar/Visualizer.hpp"
 #include "../dsp/include/meterbar/BarLink.hpp"
+#include "../dsp/include/meterbar/Recordings.hpp"
 #include "../dsp/include/meterbar/WindowGeom.hpp"
 #include "../dsp/include/meterbar/BoundedThread.hpp"
 static int failures = 0, checks = 0;
@@ -423,6 +424,23 @@ int main() {
         const IntRect M3{-1920, 0, 1920, 1080};
         auto m3 = arrangeFit({-1900, 20, 1000, 500}, M3, 170);
         CHECK(m3.x == -1900 && m3.y == 170);
+        // --- maximized windows (v0.21.4): plan + restore plan ---
+        {
+            const IntRect zoomedRect{ 0, 0, 1920, 1080 };  // a maximized window's live rect
+            const IntRect normalRect{ 100, 50, 800, 600 }; // its rcNormalPosition — pokes under the strip
+            auto zp = planArrangeWindow(true, false, true, zoomedRect, normalRect);
+            CHECK(zp.participate && zp.restoreFirst && zp.fitInput == normalRect); // NORMAL rect, never the zoomed one
+            CHECK(arrangeFit(zp.fitInput, M, 170).y == 170);                       // fitted clear of the strip
+            auto np = planArrangeWindow(true, false, false, normalRect, normalRect);
+            CHECK(np.participate && !np.restoreFirst && np.fitInput == normalRect);
+            CHECK(!planArrangeWindow(false, false, true, zoomedRect, normalRect).participate); // invisible stays skipped
+            CHECK(!planArrangeWindow(true, true, true, zoomedRect, normalRect).participate);   // iconic stays skipped
+            CHECK(!planArrangeWindow(true, false, true, zoomedRect, IntRect{ 0, 0, 0, 0 }).participate); // degenerate normal rect: left alone
+            auto rp = planRestoreWindow(true);
+            CHECK(rp.applyRect && rp.remaximize);   // was maximized -> re-maximize after the rect
+            auto rp2 = planRestoreWindow(false);
+            CHECK(rp2.applyRect && !rp2.remaximize);
+        }
         // Exactly the free area: unchanged.
         CHECK(arrangeFit({0, 170, 1920, 910}, M, 170) == (IntRect{0, 170, 1920, 910}));
         // Degenerate monitor: unchanged rather than garbage.
@@ -843,32 +861,68 @@ int main() {
     LinkSlot d; d.dragSeq = 3; d.dragStampMs = now;
     CHECK(dragLive(d, now)); CHECK(!dragLive(d, now + kLeaderStaleMs + 1));
 }
+// ---- Recordings menu model (v0.21.4) ----
+{
+    using namespace meterbar;
+    CHECK(isRecordingFileName("record-20261031-141500.wav"));
+    CHECK(isRecordingFileName("clip10s-3.wav"));
+    CHECK(isRecordingFileName("clip60s-12.wav"));
+    CHECK(!isRecordingFileName("notes.txt"));
+    CHECK(!isRecordingFileName("random.wav"));       // a wav, but not one of ours
+    CHECK(!isRecordingFileName("record-2026.mp3"));  // right prefix, wrong format
+    std::vector<RecordingFileInfo> files = {
+        { "record-20261031-120000.wav", 1000, 5000 },
+        { "record-20261031-130000.wav", 3000, 7000 },  // newest take
+        { "clip10s-1.wav",              2000, 900  },
+        { "clip60s-2.wav",              4000, 3000 },  // newest overall
+        { "unrelated.wav",              9000, 100  },  // newest of all, still not listed
+        { "record-20261031-140000.wav", 5000, 1000 },  // the take being written right now
+    };
+    auto plan = planRecordingsMenu(files, "record-20261031-140000.wav");
+    CHECK(plan.size() == 4);                            // unrelated + active take excluded
+    CHECK(plan[0].name == "clip60s-2.wav" && plan[0].clip);
+    CHECK(plan[1].name == "record-20261031-130000.wav" && !plan[1].clip);
+    CHECK(plan[2].name == "clip10s-1.wav" && plan[2].clip);
+    CHECK(plan[3].name == "record-20261031-120000.wav");
+    CHECK(plan[0].sizeBytes == 3000);                   // facts ride through untouched
+    // no active recording: the newest take is listed
+    CHECK(planRecordingsMenu(files, "").size() == 5);
+    // cap: 30 takes -> the 25 newest, oldest dropped
+    std::vector<RecordingFileInfo> many;
+    for (int i = 0; i < 30; ++i) many.push_back({ "record-x" + std::to_string(i) + ".wav", 100 + i, 1 });
+    auto capped = planRecordingsMenu(many, "");
+    CHECK(capped.size() == 25);
+    CHECK(capped.front().mtimeMs == 129 && capped.back().mtimeMs == 105);
+    // empty in, empty out (the app renders "No recordings yet")
+    CHECK(planRecordingsMenu({}, "").empty());
+}
 // ---- Background sync decisions (v0.2.1, item k hardening) ----
 {
     using namespace meterbar;
     const long long now = 200000;
     BgSyncState sync;
     // first sight of our own background is a change (nothing published yet)
-    CHECK(bgIsLocalChange(sync, 1, 100));
-    sync.publishedStyle = 1; sync.publishedPct = 100;
-    CHECK(!bgIsLocalChange(sync, 1, 100));
-    CHECK(bgIsLocalChange(sync, 1, 55));  // opacity moved
-    CHECK(bgIsLocalChange(sync, 2, 100)); // style moved
+    CHECK(bgIsLocalChange(sync, 1, 100, 0));
+    sync.publishedStyle = 1; sync.publishedPct = 100; sync.publishedEffect = 0;
+    CHECK(!bgIsLocalChange(sync, 1, 100, 0));
+    CHECK(bgIsLocalChange(sync, 1, 55, 0));  // opacity moved
+    CHECK(bgIsLocalChange(sync, 2, 100, 0)); // style moved
+    CHECK(bgIsLocalChange(sync, 1, 100, 1)); // effect moved (BLK3)
     // a peer publishes a new background: adopted once
     LinkShared sh;
     auto& peer = sh.slots[1]; peer.appId = 1; peer.linked = 1; peer.heartbeatMs = now;
-    peer.bgSeq = 7; peer.bgStyle = 2; peer.bgOpacityPct = 40;
+    peer.bgSeq = 7; peer.bgStyle = 2; peer.bgOpacityPct = 40; peer.bgEffect = 2;
     BgPacket out;
     CHECK(bgAdoption(sh, 0, sync, now, out));
-    CHECK(out.style == 2 && out.opacityPct == 40);
+    CHECK(out.style == 2 && out.opacityPct == 40 && out.effect == 2);
     // the adopted values are now OUR published values: no echo publish
-    CHECK(!bgIsLocalChange(sync, 2, 40));
+    CHECK(!bgIsLocalChange(sync, 2, 40, 2));
     // the same seq is never adopted twice
     CHECK(!bgAdoption(sh, 0, sync, now, out));
     // a genuinely new seq adopts again
-    peer.bgSeq = 8; peer.bgStyle = 0; peer.bgOpacityPct = 90;
+    peer.bgSeq = 8; peer.bgStyle = 0; peer.bgOpacityPct = 90; peer.bgEffect = 1;
     CHECK(bgAdoption(sh, 0, sync, now, out));
-    CHECK(out.style == 0 && out.opacityPct == 90);
+    CHECK(out.style == 0 && out.opacityPct == 90 && out.effect == 1);
     // unlinked peers, stale peers, seq 0 and self never supply a background
     peer.linked = 0; peer.bgSeq = 9;
     CHECK(!bgAdoption(sh, 0, sync, now, out));
@@ -954,10 +1008,10 @@ int main() {
         CHECK(audioPacket(m, now, pkt));
         CHECK(pkt[0] == 0.75f && pkt[1] == 0.5f && pkt[2] == 0.25f && pkt[3] == 0.6f);
         CHECK(!audioPacket(m, now + kPeerStaleMs + 1, pkt));
-        BgSyncState bs; bs.publishedStyle = 3; bs.publishedPct = 40;
-        CHECK(!bgIsLocalChange(bs, 3, 40));
+        BgSyncState bs; bs.publishedStyle = 3; bs.publishedPct = 40; bs.publishedEffect = 1;
+        CHECK(!bgIsLocalChange(bs, 3, 40, 1));
         bgForceRepublish(bs);
-        CHECK(bgIsLocalChange(bs, 3, 40));
+        CHECK(bgIsLocalChange(bs, 3, 40, 1));
     }
     // --- group field map: one visualizer field across the linked bars
     {
