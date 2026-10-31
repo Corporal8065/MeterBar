@@ -73,6 +73,7 @@ struct PresetState {
     bool linkEnabled = false;              // v0.20.0 (k): family linking — opt-in, default OFF
     bool linkBackground = true;            // v0.21.3: share background (style/opacity/effect) with linked bars — default ON; the visible toggle Jackson asked for
     bool visualizerEnabled = false;
+    int visualizerStyle = 0;               // v0.21.5: 0 = Bubbles (particle engine), 1 = Lines (flowing ribbons) — Jackson's second style, chosen beside the toggle in Settings; rides the link packet as bgEffect 1 vs 3 (BLK4)
     float visualizerBaseHue = 0.83f;       // 0..1 (family pink)
     float visualizerSaturation = 0.85f;    // 0..1
     float visualizerSpread = 0.75f;        // 0..1 of the hue wheel per burst stroke

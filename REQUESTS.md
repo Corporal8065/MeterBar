@@ -4,6 +4,63 @@ Verification rule (Jackson, 2026-10-29): every item is DONE only with
 proof — the full DSP suite green after the change, new checks for new
 behaviour, and errors recorded here with their actual text, never hidden.
 
+## v0.21.5 (2026-10-31) — Visualizer round: melted blur, calmed whites, Lines style (Jackson's asks)
+
+Jackson (2026-10-31 14:17 PT, with reference frames at 14:32 PT):
+(1) background blur increased so the colours smudge together into
+a wash — the dots should melt into each other, not read as
+distinct dotted circles; (2) the white bulbs calmed — clusters of
+near-opaque grey-white discs are the loudest element in the bar;
+give them the same movement strength/smoothing as the colourful
+dots so they sit at the same energy as the rest of the field;
+(3) a NEW "Lines" visualizer style alongside Bubbles (not
+replacing it): smooth, hand-drawn-feeling flowing lines/ribbons,
+one per frequency band (low/mid/high), spring-smoothed, thickness
+swelling with the band's level, near-still when quiet.
+
+- **Blur melt — DONE (all three bars, identical).** The composite
+  kernel goes 7/2.8 -> 15/5.5 and the crisp pass backs off
+  0.45 -> 0.30 (drawVisualizerBackground), so the blurred wash is
+  what reads and the dots smudge into it.
+- **Whites calmed — DONE (all three bars, identical, core
+  Visualizer.hpp).** Three changes to the ambient convergers:
+  velocity ease-out 0.995 -> 0.985 per frame (the burst dots' own
+  value — they streamed hotter and piled up at the centre);
+  brightness envelope gains the burst dots' fade-OUT over the
+  last 30% of life (they used to sit at full brightness until the
+  respawn pop); peak capped at kAmbientPeak = 0.55 of full white
+  (they rendered at a full 255). The silence gate is untouched:
+  no energy, no whites. New checks pin the cap and the fade-out;
+  the v0.20.3 gate check's brightness threshold was retuned to
+  the new scale (intent unchanged, recorded in the test).
+- **Lines style — DONE (all three bars, identical).** New pure
+  core model VisualizerLines (Visualizer.hpp): three ribbons at
+  the burst anchors, each band's level a damped spring
+  (k=42, d=9) toward the band energy, centreline = two detuned
+  sines + a baked per-point wobble (hand-drawn, never a machine
+  sine), half-thickness swelling with the level and breathing
+  along the line; phase creep and amplitude collapse when quiet
+  (near-still), and the particle field's activity gate fades the
+  ribbons out in silence. Rendered as filled paths through the
+  same group field map + blur composite as the dots. Selectable
+  beside the existing visualizer controls (MeterBar: "Visualizer
+  style" combo next to the toggle in Settings -> Appearance;
+  siblings: beside "Background effect"), persisted like the other
+  appearance settings (MeterBar PresetIO "vizStyle"; siblings'
+  SettingsStore "vizStyle").
+- **Link carrying — the style is shared background state, carried
+  like the effect.** BLK4 (magic bumped in all three cores; slot
+  layout unchanged, the bgEffect ordinal's domain widened):
+  1 = visualizer Bubbles, 3 = visualizer Lines. A style change in
+  any linked bar adopts in the others with the effect, so the
+  linked strip never mixes Bubbles on one bar with Lines on the
+  next. MeterBar publishes 1/3 by its style and adopts 1/3 as
+  visualizer-on with that style (a peer's glow, 2, still lands as
+  visualizer-on, style untouched — MeterBar has no glow).
+  Mixed BLK3/BLK4 binaries never link (the family's magic rule).
+- Honest limit: the LOOK is verified only on Jackson's PC. The
+  evidence here is the code, the checks, and his frames.
+
 ## v0.21.4 (2026-10-31) — Arrange takes maximized windows; Recordings submenu (Jackson's asks)
 
 Jackson (2026-10-31 15:00 PT, verbatim): "the arrange does not

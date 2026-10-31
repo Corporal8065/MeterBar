@@ -101,6 +101,7 @@ private:
     juce::int64 bobStartMs = 0, excitedUntilMs = 0;
     AnalysisData frame;
     meterbar::VisualizerEngine visualizer;   // v0.20.0: background-mode particle model (pure core)
+    meterbar::VisualizerLines vizLines;      // v0.21.5: the Lines style's ribbon model (pure core)
     std::array<float, 3> latestBands_{};     // v0.20.1: newest spectrum band energies (BarLink audio broadcast, item 17)
     float latestLevel_ = 0.f;                // v0.20.1: newest overall level 0..1 for the same broadcast
     juce::Image vizCache, vizBlur;           // v0.20.0: half-res particle layer + its Gaussian-blurred copy

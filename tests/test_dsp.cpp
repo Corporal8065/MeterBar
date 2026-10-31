@@ -807,6 +807,70 @@ int main() {
         auto wc = eng.colorFor(bp, wrap);
         CHECK(!(wc.r == wc.g && wc.g == wc.b));
     }
+    // ---------- v0.21.5: calmed whites + Lines style ----------
+    {
+        VisualizerSettings vs;
+        VisualizerEngine eng;
+        const float loudMid[3] = { 0, 0.9f, 0 };
+        for (int i = 0; i < 90; ++i) eng.update(1.f / 30.f, loudMid, vs); // 3 s of music: gate fully open
+        CHECK(eng.ambientVisibility() == 1.f);
+        // the whites' peak is capped: no ambient particle renders
+        // brighter than kAmbientPeak of full white (they used to
+        // sit at a full 255 — the loudest discs in the bar)
+        int peak = 0; bool sawAmbient = false;
+        for (auto& pt : eng.particles()) {
+            if (pt.burst) continue;
+            sawAmbient = true;
+            auto c = eng.colorFor(pt, vs);
+            if ((int)c.r > peak) peak = (int)c.r;
+        }
+        CHECK(sawAmbient);
+        CHECK(peak <= (int)std::lround(255.f * VisualizerEngine::kAmbientPeak) + 1);
+        CHECK(peak > 60); // still present, not deleted
+        // and they fade OUT at end of life, like the burst dots:
+        // a white at 95% of its life is dimmer than at mid-life
+        VizParticle mid; mid.burst = false; mid.age = 2.f; mid.life = 4.f;
+        VizParticle old; old.burst = false; old.age = 3.8f; old.life = 4.f;
+        CHECK(eng.colorFor(old, vs).r < eng.colorFor(mid, vs).r);
+
+        // Lines: silence = still, thin, invisible
+        VisualizerLines lines;
+        const float silence[3] = { 0, 0, 0 };
+        for (int i = 0; i < 60; ++i) lines.update(1.f / 30.f, silence);
+        CHECK(lines.visibility() == 0.f);
+        CHECK(lines.level(1) == 0.f);
+        CHECK(lines.halfThick(1, 24) <= 0.0045f); // hairline at rest (0.004 x breathe <= 1)
+        bool inRange = true;
+        for (int b = 0; b < 3; ++b)
+            for (int i = 0; i < VisualizerLines::kPoints; ++i) {
+                float y = lines.centreY(b, i);
+                if (!(y > 0.f && y < 1.f)) inRange = false;
+            }
+        CHECK(inRange);
+        // a loud band swells its ribbon: the level springs up, the
+        // thickness grows, the silence gate opens
+        const float loudLow[3] = { 0.95f, 0, 0 };
+        const float thickRest = lines.halfThick(0, 24);
+        for (int i = 0; i < 60; ++i) lines.update(1.f / 30.f, loudLow);
+        CHECK(lines.level(0) > 0.5f);
+        CHECK(lines.level(1) == 0.f); // other bands untouched
+        CHECK(lines.halfThick(0, 24) > thickRest * 2.f);
+        CHECK(lines.visibility() == 1.f);
+        // spring, not a copy: one frame of loud must NOT slam the
+        // level to target (the raw-copy jitter this style avoids)
+        VisualizerLines one;
+        one.update(1.f / 30.f, loudLow);
+        CHECK(one.level(0) < 0.2f);
+        // geometry stays in the unit square even at full level
+        for (int i = 0; i < 30; ++i) lines.update(1.f / 30.f, loudLow);
+        inRange = true;
+        for (int b = 0; b < 3; ++b)
+            for (int i = 0; i < VisualizerLines::kPoints; ++i) {
+                float y = lines.centreY(b, i);
+                if (!(y > 0.f && y < 1.f)) inRange = false;
+            }
+        CHECK(inRange);
+    }
 
 // ---- BarLink protocol geometry (v0.2.0, item k) ----
 {
@@ -923,6 +987,12 @@ int main() {
     peer.bgSeq = 8; peer.bgStyle = 0; peer.bgOpacityPct = 90; peer.bgEffect = 1;
     CHECK(bgAdoption(sh, 0, sync, now, out));
     CHECK(out.style == 0 && out.opacityPct == 90 && out.effect == 1);
+    // BLK4: effect 3 (visualizer Lines) rides the same packet,
+    // adopted verbatim like every other ordinal
+    peer.bgSeq = 12; peer.bgEffect = 3;
+    CHECK(bgAdoption(sh, 0, sync, now, out));
+    CHECK(out.effect == 3);
+    CHECK(!bgIsLocalChange(sync, 0, 90, 3)); // adopted = published: no echo
     // unlinked peers, stale peers, seq 0 and self never supply a background
     peer.linked = 0; peer.bgSeq = 9;
     CHECK(!bgAdoption(sh, 0, sync, now, out));
@@ -1164,7 +1234,12 @@ int main() {
         CHECK(viz.activity() > 0.3f);
         brightest = 0;
         for (auto& p : viz.particles()) if (!p.burst) { auto c = viz.colorFor(p, vs); brightest = std::max(brightest, (int)c.r); }
-        CHECK(brightest > 150);
+        // v0.21.5 retune: the intent is unchanged (whites clearly
+        // present once music plays) but the scale is the calmed
+        // peak now — kAmbientPeak x 255 = 140, not the old
+        // full-brightness 255 this check was written against.
+        CHECK(brightest > 100);
+        CHECK(brightest <= (int)std::lround(255.f * meterbar::VisualizerEngine::kAmbientPeak) + 1);
     }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);

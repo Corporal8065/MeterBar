@@ -172,6 +172,7 @@ public:
             note("Below 100 the desktop shows through the module backgrounds (traces and text stay solid). Translucency only — no background blur in this build.");
             toggle("Beat Pulse (subtle glow on beats)", st->beatPulseEnabled, [&](bool b){ st->beatPulseEnabled = b; });
             toggle("Visualizer background (particles + rainbow bursts, v0.20.0)", st->visualizerEnabled, [&](bool b){ st->visualizerEnabled = b; });
+            combo("Visualizer style", {"Bubbles (particles)", "Lines (flowing ribbons)"}, st->visualizerStyle, [&](int v){ st->visualizerStyle = v; }); // v0.21.5: Jackson's second style, beside the toggle
             toggle("Link background (share style, opacity and visualizer with linked bars)", st->linkBackground, [&](bool b){ st->linkBackground = b; if (onBgLinkToggled) onBgLinkToggled(); });
             slider("Visualizer base hue (deg)", 0.0, 360.0, st->visualizerBaseHue * 360.0,
                    [&](double v){ st->visualizerBaseHue = (float)(v / 360.0); });
@@ -181,7 +182,7 @@ public:
                    [&](double v){ st->visualizerSpread = (float)(v / 100.0); });
             slider("Visualizer palette cycle (s, 0 = static)", 0.0, 60.0, st->visualizerCycleSec,
                    [&](double v){ st->visualizerCycleSec = (float)v; });
-            note("Visualizer: black background, white particles converging to the centre, frequency bands bursting rainbow strokes that dissolve into dots, over a blurred glow layer. Particle count is hard-capped (600) for gaming PCs. Needs a visual field test for tuning — see BUILD_LOG.");
+            note("Visualizer: black background over a heavily blurred glow layer. Bubbles style: white particles converging to the centre (calmed in v0.21.5 — same ease-out and brightness envelope as the dots), frequency bands bursting rainbow strokes that dissolve into dots; particle count is hard-capped (600) for gaming PCs. Lines style: three flowing ribbons, one per band, spring-smoothed, swelling with the music and near-still in quiet. Both styles fade out entirely in silence.");
             toggle("Cute click sounds (Anime theme only)", st->animeClickSounds, [&](bool b){ st->animeClickSounds = b; });
             note("Click sounds only ever play in the Anime theme; switching themes silences them completely.");
         });

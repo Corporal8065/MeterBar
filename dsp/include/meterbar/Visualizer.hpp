@@ -72,6 +72,11 @@ public:
     static constexpr int kAmbientTarget = 140;
     static constexpr float kTrigger = 0.55f;      // band energy that fires a burst
     static constexpr float kRefractorySec = 0.12f;
+    // v0.21.5: peak brightness of the ambient whites, as a fraction
+    // of full white. They used to render at a full 255 — the loudest
+    // thing in the bar (Jackson's frames, 2026-10-31). 0.55 puts
+    // them at the colourful burst dots' energy, where they belong.
+    static constexpr float kAmbientPeak = 0.55f;
 
     // Advance the model. bandEnergy = [low, mid, high], each 0..1
     // (see spectrumBandEnergies). timeSec = a free-running clock for
@@ -118,7 +123,11 @@ public:
                 const float pull = 0.10f, swirl = 0.05f;
                 p.vx += (dx / dist * pull + (-dy / dist) * swirl) * dt;
                 p.vy += (dy / dist * pull + (dx / dist) * swirl) * dt;
-                p.vx *= 0.995f; p.vy *= 0.995f;
+                // v0.21.5: the burst dots' own ease-out (0.985,
+                // below) — the whites kept 99.5% of their velocity
+                // per frame, so they streamed hotter than the
+                // colourful dots and piled up at the centre.
+                p.vx *= 0.985f; p.vy *= 0.985f;
             } else {
                 p.vx *= 0.985f; p.vy *= 0.985f; // expansion eases out
             }
@@ -146,11 +155,16 @@ public:
     // drifted by the cycle clock.
     VizRgb colorFor(const VizParticle& p, const VisualizerSettings& st) const {
         if (!p.burst) {
-            const float fade = p.age < 0.5f ? 0.4f + 0.6f * (p.age / 0.5f) : 1.f;
-            // v0.20.3: whites are gated by band activity — in
-            // silence this returns (near-)black, i.e. invisible
-            // against the black background composite.
-            const auto v = (std::uint8_t)std::lround(255.f * fade * ambientVisibility());
+            const float fadeIn = p.age < 0.5f ? 0.4f + 0.6f * (p.age / 0.5f) : 1.f;
+            // v0.21.5: the burst dots' envelope, mirrored — fade
+            // OUT over the last 30% of life (the bursts' own rule,
+            // below) instead of sitting at full brightness until
+            // the respawn pop, and cap the peak at kAmbientPeak.
+            const float fadeOut = p.age > p.life * 0.7f ? 1.f - (p.age - p.life * 0.7f) / (p.life * 0.3f + 1e-6f) : 1.f;
+            // v0.20.3 gate unchanged: whites are gated by band
+            // activity — in silence this returns (near-)black,
+            // i.e. invisible against the black background.
+            const auto v = (std::uint8_t)std::lround(255.f * kAmbientPeak * fadeIn * fadeOut * ambientVisibility());
             return VizRgb{ v, v, v };
         }
         float cycle = 0.f;
@@ -212,6 +226,110 @@ private:
     float refractory_[3] = { 0, 0, 0 };
     int bursts_ = 0;
     float activity_ = 0; // v0.20.3: smoothed max band energy (the silence gate)
+    double time_ = 0;
+};
+
+// ------------------------------------------------------------------
+// LINES STYLE (v0.21.5, Jackson's ask 2026-10-31) — the second
+// visualizer style, alongside the particle Bubbles (the engine
+// above; NOT replaced). Three flowing ribbons, one per frequency
+// band (low/mid/high) at the burst anchors, drawn like hand-inked
+// lines: each band's level is a damped SPRING toward the band
+// energy, so a ribbon swells and settles instead of jittering;
+// the centreline is two detuned sines plus a fixed per-point
+// wobble (baked at construction from a splitmix stream), so the
+// curve never reads as a perfect machine sine. Thickness swells
+// with the springed level and breathes along the line. When the
+// music is quiet the phase creep and the amplitude collapse —
+// near-still — and the SAME activity gate as the particle field
+// fades the ribbons out entirely in silence (the family's
+// no-visuals-in-silence rule). Pure model, like the engine: the
+// app layer turns centreY/halfThick into a filled path.
+class VisualizerLines {
+public:
+    static constexpr int kPoints = 48;
+
+    VisualizerLines() {
+        // Fixed hand-drawn wobble: a per-(band, point) phase
+        // offset in [-0.35, 0.35] rad, baked once from a splitmix
+        // stream — deterministic across runs, like the engine's.
+        std::uint32_t rng = 0x51ab3f19u;
+        for (int b = 0; b < 3; ++b)
+            for (int i = 0; i < kPoints; ++i) {
+                rng += 0x9e3779b9u;
+                std::uint32_t z = rng;
+                z = (z ^ (z >> 16)) * 0x85ebca6bu;
+                z = (z ^ (z >> 13)) * 0xc2b2ae35u;
+                wob_[b][i] = ((float)((z ^ (z >> 16)) >> 8) / 16777216.f - 0.5f) * 0.7f;
+            }
+    }
+
+    void update(float dt, const float bandEnergy[3]) {
+        if (dt <= 0) return;
+        time_ += dt;
+        {   // the particle engine's activity gate, same constants
+            const float frame = std::max({ bandEnergy[0], bandEnergy[1], bandEnergy[2] });
+            const float rate = frame > activity_ ? 6.f : 0.8f;
+            float a = rate * dt; if (a > 1.f) a = 1.f;
+            activity_ += (frame - activity_) * a;
+        }
+        static constexpr float kSpeed[3] = { 1.0f, 1.31f, 1.73f }; // bands flow at detuned rates
+        for (int b = 0; b < 3; ++b) {
+            float target = bandEnergy[b];
+            target = target < 0.f ? 0.f : target > 1.f ? 1.f : target;
+            // Damped spring: stiff enough to answer a hit, soft
+            // enough to settle like ink — never a raw copy of the
+            // frame energy (that jitter is what this style avoids).
+            vel_[b] += ((target - level_[b]) * 42.f - vel_[b] * 9.f) * dt;
+            level_[b] += vel_[b] * dt;
+            if (level_[b] < 0.f) { level_[b] = 0.f; if (vel_[b] < 0.f) vel_[b] = 0.f; }
+            if (level_[b] > 1.15f) { level_[b] = 1.15f; if (vel_[b] > 0.f) vel_[b] = 0.f; }
+            // Near-still when quiet: the creep floor is 0.15 rad/s
+            // and the amplitude (centreY) collapses with the level.
+            phase_[b] += dt * (0.15f + 1.35f * level_[b]) * kSpeed[b];
+        }
+    }
+
+    float level(int band) const { return level_[band]; }
+    double time() const { return time_; }
+    // The particle field's gate curve: full at activity 0.30,
+    // zero in silence.
+    float visibility() const {
+        const float v = activity_ / 0.30f;
+        return v < 0.f ? 0.f : v > 1.f ? 1.f : v;
+    }
+    // Centreline height (unit space) of ribbon `band` at control
+    // point i: the band anchor (the burst anchors) plus the
+    // two-sine flow. Amplitude collapses with the springed level.
+    float centreY(int band, int i) const {
+        const float anchor = band == 0 ? 0.72f : band == 1 ? 0.5f : 0.28f;
+        const float u = kPoints > 1 ? (float)i / (float)(kPoints - 1) : 0.f;
+        const float amp = 0.012f + 0.085f * level_[band];
+        const float ph = phase_[band] + wob_[band][i];
+        return anchor + (std::sin(ph + u * 4.6f) * 0.55f + std::sin(ph * 1.7f - u * 7.9f) * 0.45f) * amp;
+    }
+    // Ribbon half-thickness (unit space): swells with the level,
+    // breathes along the line so the stroke feels hand-inked.
+    float halfThick(int band, int i) const {
+        const float u = kPoints > 1 ? (float)i / (float)(kPoints - 1) : 0.f;
+        const float breathe = 0.75f + 0.25f * std::sin(phase_[band] * 0.9f + u * 3.1f + (float)band * 1.7f);
+        return (0.004f + 0.030f * level_[band]) * breathe;
+    }
+    // Band colour from the same palette as the burst dots: the
+    // three bands fan across the palette spread from the base hue.
+    VizRgb colorFor(int band, const VisualizerSettings& st) const {
+        float cycle = 0.f;
+        if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
+        const float h = st.baseHue + cycle + (float)band * st.paletteSpread * 0.33f;
+        return vizHsvToRgb(h, st.saturation, 0.9f);
+    }
+
+private:
+    float level_[3] = { 0, 0, 0 };
+    float vel_[3] = { 0, 0, 0 };
+    float phase_[3] = { 0, 0, 0 };
+    float wob_[3][kPoints] = {};
+    float activity_ = 0;
     double time_ = 0;
 };
 

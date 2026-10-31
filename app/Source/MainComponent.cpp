@@ -56,11 +56,17 @@ MainComponent::MainComponent() {
             tl->setBounds(safe.x, safe.y, safe.w, safe.h);
         }
     };
-    linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, engine.state.visualizerEnabled ? 1 : 0 }; };
+    linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, engine.state.visualizerEnabled ? (engine.state.visualizerStyle == 1 ? 3 : 1) : 0 }; }; // BLK4: the visualizer style rides the effect ordinal (1 Bubbles / 3 Lines)
     linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){
         engine.state.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 3, bg.style); // v0.20.1: Pastel (3) is a family style too
         engine.state.backgroundOpacity = juce::jlimit(0.15f, 1.0f, bg.opacity);
-        engine.state.visualizerEnabled = bg.effect != 0; // BLK3: MeterBar's only effect is the visualizer — a peer's visualizer OR glow lands as visualizer-on
+        // BLK4: MeterBar's only effect is the visualizer — a peer's
+        // Bubbles (1) or Lines (3) lands as visualizer-on WITH that
+        // style; a peer's glow (2) lands as visualizer-on keeping
+        // the current style (MeterBar has no glow to show).
+        if (bg.effect == 1) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 0; }
+        else if (bg.effect == 3) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 1; }
+        else engine.state.visualizerEnabled = bg.effect != 0;
         repaint();
     };
     linkClient_.bgLinkEnabled = [this]{ return engine.state.linkBackground; }; // v0.21.3
@@ -505,23 +511,55 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
     {
         juce::Graphics ig(vizCache);
         ig.fillAll(juce::Colours::black);
-        for (auto& p : visualizer.particles()) {
-            auto c = visualizer.colorFor(p, vs);
-            ig.setColour(juce::Colour(c.r, c.g, c.b));
-            float px, py;
-            meterbar::fieldToLocal(fm, p.x, p.y, px, py);
-            const float r = p.size * 1.35f; // v0.20.3: plumper dots — softer, rounder blobs (TickerBar v0.4.0 sibling)
-            if (!meterbar::fieldDotVisible(px, py, r, iw, ih)) continue; // another bar's slice of the field
-            ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
+        if (engine.state.visualizerStyle == 1) {
+            // v0.21.5 LINES: three filled ribbons from the core
+            // model — top edge along centreY - halfThick, back
+            // along centreY + halfThick — mapped through the same
+            // group field map as the dots, so a linked strip reads
+            // as one set of lines across the seams. Alpha is the
+            // model's silence gate: quiet = nothing drawn.
+            const float alpha = vizLines.visibility();
+            if (alpha > 0.01f) {
+                constexpr int n = meterbar::VisualizerLines::kPoints;
+                for (int band = 0; band < 3; ++band) {
+                    auto c = vizLines.colorFor(band, vs);
+                    juce::Path path;
+                    for (int i = 0; i < n; ++i) {
+                        float px, py;
+                        meterbar::fieldToLocal(fm, (float)i / (float)(n - 1),
+                                               vizLines.centreY(band, i) - vizLines.halfThick(band, i), px, py);
+                        if (i == 0) path.startNewSubPath(px, py); else path.lineTo(px, py);
+                    }
+                    for (int i = n - 1; i >= 0; --i) {
+                        float px, py;
+                        meterbar::fieldToLocal(fm, (float)i / (float)(n - 1),
+                                               vizLines.centreY(band, i) + vizLines.halfThick(band, i), px, py);
+                        path.lineTo(px, py);
+                    }
+                    path.closeSubPath();
+                    ig.setColour(juce::Colour(c.r, c.g, c.b).withAlpha(alpha * 0.85f));
+                    ig.fillPath(path);
+                }
+            }
+        } else {
+            for (auto& p : visualizer.particles()) {
+                auto c = visualizer.colorFor(p, vs);
+                ig.setColour(juce::Colour(c.r, c.g, c.b));
+                float px, py;
+                meterbar::fieldToLocal(fm, p.x, p.y, px, py);
+                const float r = p.size * 1.35f; // v0.20.3: plumper dots — softer, rounder blobs (TickerBar v0.4.0 sibling)
+                if (!meterbar::fieldDotVisible(px, py, r, iw, ih)) continue; // another bar's slice of the field
+                ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
+            }
         }
     }
     vizBlur = vizCache;
     vizBlur.duplicateIfShared(); // the convolution reads source while writing dest — they must not share pixels
-    juce::ImageConvolutionKernel kernel(7);
-    kernel.createGaussianBlur(2.8f); // v0.20.3: stronger blur (was 5/1.8) — the vibey wash
+    juce::ImageConvolutionKernel kernel(15);
+    kernel.createGaussianBlur(5.5f); // v0.21.5: a much stronger melt (was 7/2.8) — Jackson: the dots still read as distinct circles; they should smudge together into one wash
     kernel.applyToImage(vizBlur, vizCache, vizBlur.getBounds());
     g.drawImage(vizBlur, bounds.toFloat());
-    g.setOpacity(0.45f); // v0.20.3: crisp pass backed off (was 0.9)
+    g.setOpacity(0.30f); // v0.21.5: crisp pass backed off further (was 0.45) so the wash, not the dots, is what reads
     g.drawImage(vizCache, bounds.toFloat());
     g.setOpacity(1.0f);
     g.setColour(juce::Colours::black.withAlpha(0.18f)); // v0.20.3: dark scrim — the moodier tone
@@ -681,7 +719,10 @@ void MainComponent::prepareFrame() {
         vs.paletteSpread = st.visualizerSpread;
         vs.cycleSeconds = st.visualizerCycleSec;
         const float dt = (float)juce::jlimit(0.004, 0.1, 1.0 / std::max(1, st.fpsLimit));
-        visualizer.update(dt, e.data(), vs);
+        // v0.21.5: advance whichever style is selected — the
+        // particle engine (Bubbles) or the ribbon model (Lines).
+        if (st.visualizerStyle == 1) vizLines.update(dt, e.data());
+        else visualizer.update(dt, e.data(), vs);
     }
 }
 // ---------------- Menus ----------------
