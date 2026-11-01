@@ -15,6 +15,7 @@
 #include <meterbar/Visualizer.hpp> // v0.20.0
 #include <meterbar/Glyphs.hpp> // v0.22.2: icon glyphs as explicit UTF-8 bytes
 #include "BarLink.h" // v0.20.0 (k): family link client
+#include "Captions/CaptionController.h" // v0.23.0: Live Captions (MeterBar only)
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
 // the pair's PresetState::moduleFlex weights (their sum is preserved, so
@@ -50,9 +51,19 @@ class IconButtonLookAndFeel : public juce::LookAndFeel_V4 {
 public:
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override {
         const float h = juce::jmin(16.0f, (float)buttonHeight * 0.62f);
-        for (auto* name : { "Segoe UI Emoji", "Segoe UI Symbol" })
-            if (juce::Font::findAllTypefaceNames().contains(name))
-                return juce::Font(juce::FontOptions(juce::String(name), h, juce::Font::plain));
+        // Drag-lag fix (2026-10-31): findAllTypefaceNames() enumerates the
+        // whole system font collection, and this callback runs per glyph
+        // button per paint — the bar repaints full-window at frame rate,
+        // so the enumeration ran hundreds of times a second on the
+        // message thread. Resolve the typeface choice ONCE.
+        static const juce::String emojiTypeface = [] {
+            for (auto* name : { "Segoe UI Emoji", "Segoe UI Symbol" })
+                if (juce::Font::findAllTypefaceNames().contains(name))
+                    return juce::String(name);
+            return juce::String{};
+        }();
+        if (emojiTypeface.isNotEmpty())
+            return juce::Font(juce::FontOptions(emojiTypeface, h, juce::Font::plain));
         return juce::Font(juce::FontOptions(h));
     }
 };
@@ -125,6 +136,7 @@ private:
                      settingsBtn{juce::String::fromUTF8(meterbar::glyphSettingsUtf8())},
                      burgerBtn{juce::String::fromUTF8(meterbar::glyphMenuUtf8())};
     BarLinkClient linkClient_{ meterbar::kLinkAppMeter };        // v0.20.0 (k)
+    int linkBgEffectShadow_ = -1;   // drag-lag fix (2026-10-31): last adopted link effect ordinal MeterBar cannot natively emit (peer glow = 2); getBg passes it through until a local settings change clears it
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
     meterbar::ReserveMachine reserveMachine;                      // v0.18.1: event-driven dock/reserve decisions (hysteresis) — replaces the v0.18 ~4x/sec timer poll
     juce::Label logoLabel, versionLabel, hintLabel;
@@ -150,6 +162,7 @@ private:
     meterbar::OscilloscopeEngine scope;
     std::vector<float> bufL, bufR, mono;
     bool analyserReady = false; int lastFftSize = 0;
+    double cachedLoudIntegrated_ = -120.0; long long lastLoudIntegratedMs_ = 0; // drag-lag fix: 4 Hz throttle cache (prepareFrame)
     Theme theme = themeByName("Midnight Kids");
     std::unique_ptr<SettingsWindow> settingsWin;
     std::unique_ptr<juce::DocumentWindow> debugWin; juce::Label debugLabel;
@@ -157,6 +170,11 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     double uiFpsMeasured = 0; juce::int64 lastFrameMs = 0; int clipCounter = 1;
     juce::File recordingFile_; // v0.21.4: the take currently being written (the Recordings menu omits it)
+    // v0.23.0 Live Captions: declared late so it destructs BEFORE
+    // engine (reverse declaration order) — the controller stops the
+    // tap/streamer first, then engine teardown cannot call into a
+    // dead client (spec step 6).
+    CaptionController captions_;
     // Whole-toolbar drag state (v0.8, Jackson's ask: the entire top bar
     // moves the window, grip dots removed). v0.20.2: ComponentDragger is
     // back (SessionBar's path) — the v0.11 OS caption move loop that

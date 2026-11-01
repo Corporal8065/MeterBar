@@ -15,7 +15,14 @@ target_sources(MeterBar PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/ScreenSpace.cpp
-    Source/WindowsLoopback.cpp)
+    Source/WindowsLoopback.cpp
+    # v0.23.0: Live Captions (MeterBar only — see
+    # ~/workspace/bar-apps/captions-spec/SPEC.md)
+    Source/Captions/CaptionTap.cpp
+    Source/Captions/CaptionClient.cpp
+    Source/Captions/CaptionOverlay.cpp
+    Source/Captions/CaptionSettings.cpp
+    Source/Captions/CaptionController.cpp)
 target_include_directories(MeterBar PRIVATE Source ${CMAKE_CURRENT_SOURCE_DIR}/../dsp/include
     ${CMAKE_BINARY_DIR}/generated) # v0.19: the generated MeterBarVersion.h (single-source version)
 target_compile_definitions(MeterBar PRIVATE

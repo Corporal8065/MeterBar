@@ -41,6 +41,14 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; v0.23.0: Live Captions helper (spec section 3.5) — the Python
+; helper + requirements + runtime setup ship under {app}\Captions.
+; The venv and models do NOT ship: they are created by the explicit
+; setup step under %LOCALAPPDATA%\MeterBar\Captions. Guarded so a
+; bare manual ISCC without the staged dist\Captions still compiles.
+#if FileExists("dist\Captions\meterbar_captions_helper.py")
+Source: "dist\Captions\*"; DestDir: "{app}\Captions"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 #if FileExists("dist\vc_redist.x64.exe")
 Source: "dist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 #endif

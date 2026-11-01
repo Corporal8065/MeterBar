@@ -10,6 +10,7 @@
 #include <meterbar/Modules.hpp>
 #include <meterbar/State.hpp>
 #include "WindowsLoopback.h"
+#include "Captions/CaptionTap.h"
 
 // Owns: JUCE device input, WASAPI loopback, a test-tone generator thread,
 // the shared stereo ring buffer (analysis source), the loudness engine,
@@ -28,12 +29,22 @@ public:
     meterbar::PresetState state; // single source of truth (UI edits, engine reads trim/routing/source)
     meterbar::StereoRingBuffer ring;
     meterbar::LoudnessEngine loudness;
+    // v0.23.0 Live Captions: the pre-trim tap (spec 2.2). The
+    // CaptionController owns its enable flag; the epoch below bumps
+    // on every applySource() so captions never splice two sources.
+    CaptionTap captionTap;
+    uint32_t captionEpoch() const { return captionEpoch_.load(); }
     std::atomic<bool> paused{false};
     std::atomic<double> activeSampleRate{48000};
     std::atomic<int64_t> buffersReceived{0};
     juce::AudioDeviceManager deviceManager;
 
     void applySource() {
+        // v0.23.0: a source switch is a caption epoch boundary — the
+        // tap drops everything from the old source (spec 2.2), and
+        // Test Tone never reaches the tap at all.
+        captionTap.setEpoch(captionEpoch_.fetch_add(1) + 1);
+        captionTap.setSourceLive(state.audioSource != "Test Tone");
         // A recording is bound to one source at one sample rate: the writer's
         // rate header is fixed at start, so a source switch mid-record would
         // silently produce a wrong-rate WAV. End the take cleanly instead
@@ -65,6 +76,11 @@ public:
     // layer for multichannel input; stereo path uses pair 0), trim, then fan-out.
     void pushStereo(const float* L, const float* R, int n, double sr) {
         if (paused.load()) return;
+        // v0.23.0 Live Captions tap: PRE-TRIM samples (spec 2.2) —
+        // MeterBar's default +10.18 dB trim is a metering preference
+        // and must not clip speech on its way to ASR. Sibling fan-out
+        // beside the Recorder; neither affects the other.
+        captionTap.push(L, R, n, sr);
         if (sr > 0 && std::abs(sr - activeSampleRate.load()) > 1.0) { activeSampleRate = sr; }
         float gain = std::pow(10.0f, state.trimDb / 20.0f);
         scratchL.resize(n); scratchR.resize(n);
@@ -238,6 +254,7 @@ private:
     }
     void shutdownRecorder() { stopRecording(); }
     WindowsLoopback loopback;
+    std::atomic<uint32_t> captionEpoch_{1}; // v0.23.0: caption stream epoch
     meterbar::BeatPulse beatPulse; double beatSr_ = 0; // v0.16
     juce::AudioFormatManager formatManager;
     std::unique_ptr<RecorderThread> recorder_;

@@ -64,7 +64,23 @@ MainComponent::MainComponent() {
             tl->setBounds(safe.x, safe.y, safe.w, safe.h);
         }
     };
-    linkClient_.getBg = [this]{ return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, engine.state.visualizerEnabled ? (engine.state.visualizerStyle == 1 ? 3 : 1) : 0 }; }; // BLK4: the visualizer style rides the effect ordinal (1 Bubbles / 3 Lines)
+    linkClient_.getBg = [this]{
+        // BLK4: the visualizer style rides the effect ordinal (1 Bubbles / 3 Lines).
+        // Drag-lag fix (2026-10-31): effect 2 (a peer's glow) has NO
+        // MeterBar-native emission — the visualizer mapping can only
+        // produce 0/1/3. Adopting a glow packet records
+        // publishedEffect=2 in the link bookkeeping while an unshadowed
+        // getBg keeps emitting 1/3, so the publish gate misreads the
+        // adoption as a NEW local change and MeterBar re-publishes its
+        // interpretation — vetoing the peer's glow (the peer adopts
+        // the visualizer back within a tick) and re-firing adoption
+        // work on both bars at every link join and every peer glow
+        // change. While the shadow is set, pass the adopted ordinal
+        // through; the display mapping in applyBg is unchanged.
+        const int effect = linkBgEffectShadow_ >= 0 ? linkBgEffectShadow_
+            : (engine.state.visualizerEnabled ? (engine.state.visualizerStyle == 1 ? 3 : 1) : 0);
+        return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, effect };
+    };
     linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){
         engine.state.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 3, bg.style); // v0.20.1: Pastel (3) is a family style too
         engine.state.backgroundOpacity = juce::jlimit(0.15f, 1.0f, bg.opacity);
@@ -75,6 +91,7 @@ MainComponent::MainComponent() {
         if (bg.effect == 1) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 0; }
         else if (bg.effect == 3) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 1; }
         else engine.state.visualizerEnabled = bg.effect != 0;
+        linkBgEffectShadow_ = (bg.effect == 2) ? 2 : -1; // 2 (glow) is the only ordinal getBg cannot emit natively — see getBg
         repaint();
     };
     linkClient_.bgLinkEnabled = [this]{ return engine.state.linkBackground; }; // v0.21.3
@@ -118,7 +135,7 @@ MainComponent::MainComponent() {
     settingsWin = std::make_unique<SettingsWindow>();
     settingsWin->content.st = &engine.state;
     settingsWin->content.deviceManager = &engine.deviceManager;
-    settingsWin->content.onChanged = [this]{ applyTheme(); layoutModules(); repaint(); syncScreenSpace(); linkClient_.notifyLocalSettings(); }; // v0.2.1: bg publish feed (was missing)
+    settingsWin->content.onChanged = [this]{ linkBgEffectShadow_ = -1; applyTheme(); layoutModules(); repaint(); syncScreenSpace(); linkClient_.notifyLocalSettings(); }; // v0.2.1: bg publish feed (was missing). Drag-lag fix: any LOCAL settings change drops the adopted-effect shadow — local intent wins and MeterBar publishes its true values again
     settingsWin->content.onSourceChanged = [this]{ engine.applySource(); };
     settingsWin->content.onFpsChanged = [this]{ applyFps(); };
     settingsWin->content.onBgLinkToggled = [this]{ linkClient_.notifyBgLinkChanged(); }; // v0.21.3
@@ -129,6 +146,11 @@ MainComponent::MainComponent() {
     debugLabel.setFont(12.5f); // v0.13: endpoint IDs are long — smaller font + wider window keeps them on one line
     debugWin->setContentNonOwned(&debugLabel, true); debugWin->setSize(470, 262); debugWin->setUsingNativeTitleBar(true);
     engine.applySource(); applyTheme(); applyFps();
+    // v0.23.0: Live Captions initialise AFTER the first applySource
+    // (the controller reads the engine's caption epoch/source) and
+    // after the window exists (the overlay's placement rule wants
+    // the bar's screen bounds).
+    captions_.initialise(engine, [this] { return getScreenBounds(); });
     setSize(engine.state.windowW, engine.state.windowH);
     syncScreenSpace(); // v0.18: a preset loaded at startup may already ask for the reservation
     // v0.19.2: silent background check on launch — non-blocking, no
@@ -137,7 +159,7 @@ MainComponent::MainComponent() {
     // the toolbar "Update!" indicator (see pollUpdater).
     if (mbupdate::configured()) startUpdateCheck(true);
 }
-MainComponent::~MainComponent() { stopTimer(); screenSpace.release(); screenSpace.restore(); if (engine.isRecording()) engine.stopRecording(); }
+MainComponent::~MainComponent() { captions_.shutdown(); stopTimer(); screenSpace.release(); screenSpace.restore(); if (engine.isRecording()) engine.stopRecording(); }
 void MainComponent::applyTheme() {
     theme = themeByName(engine.state.themeName);
     frame.cmap = meterbar::ColorMap(engine.state.colorMap);
@@ -563,6 +585,7 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
 }
 void MainComponent::timerCallback() {
     pollUpdater(); // v0.19: surface a finished background update check / download on the message thread
+    captions_.poll(); // v0.23.0: Live Captions — drain helper events, track pause/source/epoch edges, drive the overlay
     auto now = juce::Time::getCurrentTime().toMilliseconds();
     // v0.18.1: NO screen-space work happens here any more. The v0.18
     // ~4x/sec timer poll of syncScreenSpace() was the flicker's engine;
@@ -660,7 +683,19 @@ void MainComponent::prepareFrame() {
     frame.loudDb = engine.loudnessValue(); frame.peakLin = engine.peakValue();
     // v0.16 loudness pack readouts (integrated is gated BS.1770; true peak
     // is the oversampled inter-sample peak — see Loudness.hpp).
-    frame.loudIntegrated = engine.loudnessIntegrated();
+    // Drag-lag fix (2026-10-31): integratedLufs() re-runs two gated
+    // passes over the whole 100 ms block history every call — a history
+    // that grows to 36,000 entries (1 h) — and this ran once per UI
+    // frame. The integrated readout is a session integral; recompute
+    // at 4 Hz and serve the cached value between recomputes.
+    {
+        const long long nowMs = (long long)juce::Time::getMillisecondCounterHiRes();
+        if (nowMs - lastLoudIntegratedMs_ >= 250) {
+            lastLoudIntegratedMs_ = nowMs;
+            cachedLoudIntegrated_ = engine.loudnessIntegrated();
+        }
+        frame.loudIntegrated = cachedLoudIntegrated_;
+    }
     frame.loudShortTerm = engine.loudnessShortTerm();
     frame.loudTruePeakDb = engine.loudnessTruePeakDb();
     // v0.15: per-channel display levels for the VERTICAL loudness bars —
@@ -728,7 +763,8 @@ enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
        idCapPause, idCapRecord, idClip10, idClip60, idHint, idToolbar, idDebug, idUpdates, idQuit,
        idArrange=6001, idRestore, idMinimize, // v0.22.0: compressed toolbar items in the hamburger menu
        idInDevBase=3300, idOutDevBase=3400,
-       idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101 }; // v0.21.4: Recordings submenu (idRecBase + up to 25 entries)
+       idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101, // v0.21.4: Recordings submenu (idRecBase + up to 25 entries)
+       idLcOff=7001, idLcTranscribe, idLcTranslate, idLcTop, idLcMove, idLcResetPos, idLcSetup, idLcStatus }; // v0.23.0: Live Captions submenu
 void MainComponent::savePresetInteractive(bool saveAs) {
     auto& st = engine.state;
     if (!saveAs && st.name != "Default" && !st.name.empty()) { presetio::save(st, juce::String(st.name)); return; }
@@ -905,6 +941,25 @@ void MainComponent::showHamburgerMenu() {
     cap.addItem(idCapRecord, engine.isRecording() ? "Stop Recording" : "Begin Recording");
     cap.addItem(idClip10, "Clip Last 10 Seconds"); cap.addItem(idClip60, "Clip Last 60 Seconds");
     m.addSubMenu("Audio Capture", cap);
+    // v0.23.0: Live Captions — radio-style mode rows (the tick is the
+    // SELECTED mode; the controller's runtime state is separate and
+    // the disabled status row reports it). Built fresh on every open,
+    // like the rest of this menu.
+    {
+        juce::PopupMenu lc;
+        const auto cmode = captions_.mode();
+        lc.addItem(idLcOff, "Off", true, cmode == meterbar::CaptionMode::Off);
+        lc.addItem(idLcTranscribe, "Captions", true, cmode == meterbar::CaptionMode::Transcribe);
+        lc.addItem(idLcTranslate, "Translate to English", true, cmode == meterbar::CaptionMode::Translate);
+        lc.addSeparator();
+        lc.addItem(idLcTop, "Always on Top", true, captions_.overlayAlwaysOnTop());
+        lc.addItem(idLcMove, "Move Caption Window");
+        lc.addItem(idLcResetPos, "Reset Caption Position");
+        lc.addSeparator();
+        if (captions_.setupNeeded()) lc.addItem(idLcSetup, "Set Up Caption Runtime...");
+        lc.addItem(idLcStatus, captions_.statusText(), false);
+        m.addSubMenu("Live Captions", lc);
+    }
     // v0.21.4: Recordings — rebuilt from a FRESH folder scan on every
     // open (no cached list); the core plan filters/sorts/caps and
     // drops the take currently being written.
@@ -958,6 +1013,13 @@ void MainComponent::showHamburgerMenu() {
         else if (r == idCapRecord) toggleRecord();
         else if (r == idClip10) exportClip(10);
         else if (r == idClip60) exportClip(60);
+        else if (r == idLcOff) captions_.setMode(meterbar::CaptionMode::Off);
+        else if (r == idLcTranscribe) captions_.setMode(meterbar::CaptionMode::Transcribe);
+        else if (r == idLcTranslate) captions_.setMode(meterbar::CaptionMode::Translate);
+        else if (r == idLcTop) captions_.setOverlayAlwaysOnTop(!captions_.overlayAlwaysOnTop());
+        else if (r == idLcMove) captions_.moveCaptionWindow();
+        else if (r == idLcResetPos) captions_.resetCaptionPosition();
+        else if (r == idLcSetup) captions_.launchSetup();
         else if (r == idOpenRecFolder) { auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar"); dir.createDirectory(); dir.startAsProcess(); }
         else if (r >= idRecBase && r < idRecBase + (int)recFiles.size()) recFiles[(size_t)(r - idRecBase)].startAsProcess();
         else if (r == idHint) { s.showRepositionHint = !s.showRepositionHint; resized(); }

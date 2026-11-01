@@ -77,6 +77,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "build-app/app/MeterBar_artefacts/Release/MeterBar.exe" "dist/MeterBar.exe"
+          # v0.23.0: stage the Live Captions helper (mirrors build-release.bat)
+          New-Item -ItemType Directory -Force dist/Captions | Out-Null
+          Copy-Item "tools/captions/meterbar_captions_helper.py" "dist/Captions/"
+          Copy-Item "tools/captions/requirements.txt" "dist/Captions/"
+          Copy-Item "tools/captions/download_models.py" "dist/Captions/"
+          Copy-Item "tools/captions/setup_captions_runtime.bat" "dist/Captions/"
           if ("${{ steps.cert.outputs.have_cert }}" -eq "true") {
             $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
             & $signtool sign /f "$env:RUNNER_TEMP\selfsign.pfx" /p "${{ secrets.SELF_SIGN_PFX_PASSWORD }}" /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 "dist/MeterBar.exe"

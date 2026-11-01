@@ -73,6 +73,17 @@ if errorlevel 1 (
 )
 echo [MeterBar] Staged: dist\MeterBar.exe
 
+REM v0.23.0: stage the Live Captions helper into dist\Captions -
+REM MeterBar.iss installs it under {app}\Captions. The venv and
+REM models are NOT staged: they belong to the explicit runtime
+REM setup under %LOCALAPPDATA%\MeterBar\Captions.
+if not exist dist\Captions mkdir dist\Captions
+copy /Y "tools\captions\meterbar_captions_helper.py" "dist\Captions\" >> "%LOG%" 2>&1
+copy /Y "tools\captions\requirements.txt" "dist\Captions\" >> "%LOG%" 2>&1
+copy /Y "tools\captions\download_models.py" "dist\Captions\" >> "%LOG%" 2>&1
+copy /Y "tools\captions\setup_captions_runtime.bat" "dist\Captions\" >> "%LOG%" 2>&1
+echo [MeterBar] Staged: dist\Captions (Live Captions helper)
+
 REM Optional dynamic-link fallback: if a vc_redist.x64.exe sits in
 REM this folder, stage it too - MeterBar.iss then bundles it and
 REM installs it silently. Not needed with the static /MT build.

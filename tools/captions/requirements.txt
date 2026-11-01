@@ -1,0 +1,10 @@
+# MeterBar Live Captions helper runtime (spec section 3.5).
+# Mirrors the Room Voice Link installer list; PyAV is pinned
+# DIRECTLY (the helper resamples with it — it must not arrive only
+# as a transitive faster-whisper dependency).
+faster-whisper>=1.0
+av>=11
+numpy>=1.24
+huggingface_hub>=0.20
+nvidia-cublas-cu12; sys_platform == "win32"
+nvidia-cudnn-cu12; sys_platform == "win32"

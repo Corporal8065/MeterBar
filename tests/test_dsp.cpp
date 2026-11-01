@@ -27,6 +27,7 @@
 #include "../dsp/include/meterbar/WindowGeom.hpp"
 #include "../dsp/include/meterbar/BoundedThread.hpp"
 #include "../dsp/include/meterbar/Glyphs.hpp"
+#include "../dsp/include/meterbar/Captions.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -1284,6 +1285,101 @@ int main() {
         CHECK(std::string(meterbar::glyphSettingsUtf8()) == std::string("\xE2\x9A\x99", 3));
         CHECK(std::string(meterbar::glyphMenuUtf8()) == encodeUtf8(0x2630));
         CHECK(std::string(meterbar::glyphMenuUtf8()) == std::string("\xE2\x98\xB0", 3));
+    }
+
+    // ---- Live Captions framing (v0.23.0): MBC1 round-trip, partial
+    // reads, multiple packets per feed, desync latching, audio prefix.
+    {
+        CaptionPacket p; p.type = CaptionPacketType::Config; p.epoch = 7; p.sequence = 42;
+        p.payload = { 'h', 'i' };
+        auto bytes = encodeCaptionPacket(p);
+        CHECK(bytes.size() == kCaptionHeaderBytes + 2);
+        CHECK(bytes[0] == 'M' && bytes[1] == 'B' && bytes[2] == 'C' && bytes[3] == '1');
+        CaptionPacketDecoder dec; CaptionPacket out;
+        dec.feed(bytes.data(), 10);                 // partial header
+        CHECK(!dec.next(out));
+        dec.feed(bytes.data() + 10, bytes.size() - 10);
+        CHECK(dec.next(out));
+        CHECK(out.type == CaptionPacketType::Config && out.epoch == 7 && out.sequence == 42);
+        CHECK(out.payload.size() == 2 && out.payload[0] == 'h');
+        CHECK(!dec.next(out));                      // drained
+        // two packets in one feed
+        auto b2 = encodeCaptionPacket(p);
+        std::vector<uint8_t> both = bytes; both.insert(both.end(), b2.begin(), b2.end());
+        CaptionPacketDecoder dec2; dec2.feed(both.data(), both.size());
+        CHECK(dec2.next(out)); CHECK(dec2.next(out)); CHECK(!dec2.next(out));
+        // bad magic latches the error state
+        auto bad = bytes; bad[0] = 'X';
+        CaptionPacketDecoder dec3; dec3.feed(bad.data(), bad.size());
+        CHECK(!dec3.next(out)); CHECK(dec3.error());
+        // audio payload prefix round-trip
+        CaptionAudioPrefix pre; pre.firstNativeSample = 123456789; pre.sampleRate = 44100; pre.frameSamples = 3;
+        int16_t samples[3] = { -32768, 0, 32767 };
+        auto ap = buildCaptionAudioPayload(pre, samples);
+        CaptionAudioPrefix pre2; size_t off = 0;
+        CHECK(parseCaptionAudioPayload(ap.data(), ap.size(), pre2, off));
+        CHECK(pre2.firstNativeSample == 123456789 && pre2.sampleRate == 44100 && pre2.frameSamples == 3);
+        CHECK(off == kCaptionAudioPrefixBytes);
+        int16_t s0 = (int16_t)((uint16_t)ap[off] | ((uint16_t)ap[off + 1] << 8));
+        CHECK(s0 == -32768);
+        CHECK(!parseCaptionAudioPayload(ap.data(), 10, pre2, off)); // truncated
+    }
+    // ---- Live Captions display model (v0.23.0): provisional replace,
+    // final immutability, demotion to previous, expiry rules.
+    {
+        CaptionDisplay d;
+        auto blk = [](int64_t start, const char* text, bool fin) {
+            CaptionBlock b; b.epoch = 1; b.startMs = start; b.endMs = start + 1000;
+            b.id = captionBlockId(1, start); b.text = text; b.final = fin; return b;
+        };
+        CHECK(d.empty(0));
+        d.apply(blk(0, "hello wor", false), 1000);
+        auto v = d.view(1000);
+        CHECK(v.hasCurrent && !v.current.final && v.current.text == "hello wor");
+        d.apply(blk(0, "hello world", false), 1500);   // provisional revises in place
+        CHECK(d.view(1500).current.text == "hello world");
+        d.apply(blk(0, "hello world.", true), 1800);   // final locks
+        CHECK(d.view(1800).current.final);
+        d.apply(blk(0, "hello world REWRITTEN", true), 2000); // final is immutable
+        CHECK(d.view(2000).current.text == "hello world.");
+        d.apply(blk(0, "late provisional", false), 2100);     // ...against provisionals too
+        CHECK(d.view(2100).current.text == "hello world.");
+        d.apply(blk(2000, "next line", true), 3000);   // new final demotes the old to previous
+        v = d.view(3000);
+        CHECK(v.hasCurrent && v.current.text == "next line");
+        CHECK(v.hasPrevious && v.previous.text == "hello world.");
+        v = d.view(3000 + kCaptionPreviousHoldMs + 1); // previous expires after 4 s
+        CHECK(!v.hasPrevious && v.hasCurrent);
+        v = d.view(3000 + kCaptionFinalHoldMs + 1);    // current final expires after 6 s
+        CHECK(!v.hasCurrent);
+        CHECK(d.empty(3000 + kCaptionFinalHoldMs + 1));
+        // an unfinalised provisional is discarded, never promoted to history
+        CaptionDisplay d2;
+        d2.apply(blk(0, "draft", false), 0);
+        d2.apply(blk(5000, "real", true), 1000);
+        v = d2.view(1000);
+        CHECK(v.hasCurrent && !v.hasPrevious);
+        // a stale provisional (no final within 3 s) disappears
+        CaptionDisplay d3;
+        d3.apply(blk(0, "fading", false), 0);
+        CHECK(d3.view(kCaptionProvisionalStaleMs).hasCurrent);
+        CHECK(!d3.view(kCaptionProvisionalStaleMs + 1).hasCurrent);
+        CHECK(captionBlockId(3, 2500) == "cap-3-2500");
+    }
+    // ---- Live Captions two-line planning (v0.23.0): wrap, overflow
+    // keeps the newest words, over-long words hard-split.
+    {
+        auto p1 = planCaptionLines("one two three", 20);
+        CHECK(p1.lines.size() == 1 && p1.lines[0] == "one two three" && !p1.overflowed);
+        auto p2 = planCaptionLines("aaa bbb ccc ddd eee fff", 11);
+        CHECK(p2.lines.size() == 2 && !p2.overflowed);
+        auto p3 = planCaptionLines("w1 w2 w3 w4 w5 w6 w7 w8 w9 wa wb wc", 8);
+        CHECK(p3.lines.size() == 2 && p3.overflowed);
+        CHECK(p3.lines[1].find("wc") != std::string::npos); // newest words survive
+        auto p4 = planCaptionLines("abcdefghijklmnop", 6);
+        CHECK(p4.overflowed && p4.lines.size() == 2 && p4.lines[1] == "mnop");
+        auto p5 = planCaptionLines("", 20);
+        CHECK(p5.lines.empty() && !p5.overflowed);
     }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
