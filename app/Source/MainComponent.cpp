@@ -29,6 +29,9 @@ MainComponent::MainComponent() {
     pauseBtn.setTooltip("Pause / resume audio");
     settingsBtn.setTooltip("Settings");
     burgerBtn.setTooltip("Menu: presets, arrange / restore windows, reposition, minimize, quit");
+    // v0.22.1: the glyph buttons wear the emoji typeface (see
+    // IconButtonLookAndFeel) — everything else keeps the stock font.
+    for (auto* b : { &linkBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setLookAndFeel(&iconLnf_);
     // v0.20.0 (k): family LINK toggle + client wiring. Geometry leads
     // via notifyWindowGeometryChanged. v0.2.1: the settings feed is
     // wired too (see onChanged below) — MeterBar was the only bar not
