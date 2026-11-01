@@ -505,7 +505,7 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
     const int ih = juce::jlimit(1, 270, bounds.getHeight() / 2);
     if (!vizCache.isValid() || vizCache.getWidth() != iw || vizCache.getHeight() != ih) {
         vizCache = juce::Image(juce::Image::RGB, iw, ih, true);
-        vizBlur = juce::Image(juce::Image::RGB, iw, ih, true);
+        vizBlurFrame_ = 0; // v0.23.1: layer resized — force a blur recompute below (frame counter reset)
     }
     meterbar::VisualizerSettings vs;
     vs.baseHue = engine.state.visualizerBaseHue;
@@ -571,11 +571,39 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
             }
         }
     }
-    vizBlur = vizCache;
-    vizBlur.duplicateIfShared(); // the convolution reads source while writing dest — they must not share pixels
-    juce::ImageConvolutionKernel kernel(15);
-    kernel.createGaussianBlur(5.5f); // v0.21.5: a much stronger melt (was 7/2.8) — Jackson: the dots still read as distinct circles; they should smudge together into one wash
-    kernel.applyToImage(vizBlur, vizCache, vizBlur.getBounds());
+    // v0.23.1 (LAG FIX — audit Finding 3): the blur used to be a full
+    // 15x15 Gaussian over the entire half-res layer EVERY frame (at
+    // cap ~130k px x 225 taps of scalar code on the message thread).
+    // With the visualizer + background sync on, that constant cost is
+    // what starves mouse-move events, so the whole linked stack lags
+    // while dragging. Now the convolution runs on a QUARTER-res copy
+    // (half the half-res layer again: capped 240x135) with the
+    // spatially equivalent kernel (9 taps / sigma 2.75 == the old
+    // 15 / 5.5 at half scale), and only every 2nd frame — the result
+    // is held between recomputes and upscaled on draw. A wash this
+    // soft loses nothing visible at quarter res or ~30 Hz; the crisp
+    // particle pass below still renders every frame, so the motion
+    // stays fluid. Convolution cost drops to roughly 1/20th.
+    {
+        const int bw = juce::jmax(1, iw / 2), bh = juce::jmax(1, ih / 2);
+        const bool blurSizeChanged = !vizBlurSrc.isValid() || vizBlurSrc.getWidth() != bw || vizBlurSrc.getHeight() != bh
+                                  || !vizBlur.isValid() || vizBlur.getWidth() != bw || vizBlur.getHeight() != bh;
+        if (blurSizeChanged) {
+            vizBlurSrc = juce::Image(juce::Image::RGB, bw, bh, true);
+            vizBlur = juce::Image(juce::Image::RGB, bw, bh, true);
+        }
+        if (blurSizeChanged || (vizBlurFrame_++ % 2) == 0) {
+            {
+                juce::Graphics bg(vizBlurSrc);
+                bg.drawImage(vizCache, 0, 0, bw, bh, 0, 0, iw, ih); // downsample
+            }
+            vizBlur = vizBlurSrc;
+            vizBlur.duplicateIfShared(); // the convolution reads source while writing dest — they must not share pixels
+            juce::ImageConvolutionKernel kernel(9);
+            kernel.createGaussianBlur(2.75f); // v0.23.1: == v0.21.5's 15/5.5 melt, at quarter res
+            kernel.applyToImage(vizBlur, vizBlurSrc, vizBlur.getBounds());
+        }
+    }
     g.drawImage(vizBlur, bounds.toFloat());
     g.setOpacity(0.30f); // v0.21.5: crisp pass backed off further (was 0.45) so the wash, not the dots, is what reads
     g.drawImage(vizCache, bounds.toFloat());

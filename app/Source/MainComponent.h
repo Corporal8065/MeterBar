@@ -151,7 +151,9 @@ private:
     meterbar::VisualizerLines vizLines;      // v0.21.5: the Lines style's ribbon model (pure core)
     std::array<float, 3> latestBands_{};     // v0.20.1: newest spectrum band energies (BarLink audio broadcast, item 17)
     float latestLevel_ = 0.f;                // v0.20.1: newest overall level 0..1 for the same broadcast
-    juce::Image vizCache, vizBlur;           // v0.20.0: half-res particle layer + its Gaussian-blurred copy
+    juce::Image vizCache, vizBlur;           // v0.20.0: half-res particle layer + its Gaussian-blurred glow
+    juce::Image vizBlurSrc;                  // v0.23.1: quarter-res downsample the blur convolves (lag fix, audit Finding 3)
+    int vizBlurFrame_ = 0;                   // v0.23.1: blur recompute cadence — every 2nd frame, held between
     void drawVisualizerBackground(juce::Graphics&); // v0.20.0: black base + blurred glow + crisp dots
     int lastScopeSamples = 0;                                // v0.15: scope capture size (from scopeWindowMs)
     float dispDbL = -120.f, dispDbR = -120.f;                // v0.15: smoothed per-channel display levels
