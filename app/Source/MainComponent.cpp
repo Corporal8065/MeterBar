@@ -143,7 +143,7 @@ void MainComponent::applyTheme() {
     versionLabel.setColour(juce::Label::textColourId, theme.dim);
     hintLabel.setColour(juce::Label::textColourId, theme.dim);
     for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                     &arrangeBtn, &restoreBtn }) {
+                     &arrangeBtn, &restoreBtn, &linkBtn }) {
         b->setColour(juce::TextButton::buttonColourId, theme.panel);
         b->setColour(juce::TextButton::buttonOnColourId, theme.deepest);
         b->setColour(juce::TextButton::textColourOffId, theme.accent);
