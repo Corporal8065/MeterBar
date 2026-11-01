@@ -58,12 +58,35 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
+      - name: Decode self-signing certificate (skips cleanly when the secret is not set)
+        id: cert
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.SELF_SIGN_PFX_BASE64 }}
+        run: |
+          if (-not $env:PFX_B64) {
+            Write-Host "::warning::SELF_SIGN_PFX_BASE64 secret is not set - this build will be UNSIGNED."
+            "have_cert=false" >> $env:GITHUB_OUTPUT
+          } else {
+            [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\selfsign.pfx", [Convert]::FromBase64String($env:PFX_B64))
+            "have_cert=true" >> $env:GITHUB_OUTPUT
+          }
+
       - name: Stage dist and compile the installer (mirrors build-release.bat)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "build-app/app/MeterBar_artefacts/Release/MeterBar.exe" "dist/MeterBar.exe"
+          if ("${{ steps.cert.outputs.have_cert }}" -eq "true") {
+            $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+            & $signtool sign /f "$env:RUNNER_TEMP\selfsign.pfx" /p "${{ secrets.SELF_SIGN_PFX_PASSWORD }}" /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 "dist/MeterBar.exe"
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on the app exe" }
+          }
           ISCC "/DMyAppVersion=${{ steps.ver.outputs.version }}" MeterBar.iss
+          if ("${{ steps.cert.outputs.have_cert }}" -eq "true") {
+            & $signtool sign /f "$env:RUNNER_TEMP\selfsign.pfx" /p "${{ secrets.SELF_SIGN_PFX_PASSWORD }}" /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 "dist/MeterBar-Setup.exe"
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on the installer" }
+          }
 
       - name: Upload installer as a workflow artifact
         uses: actions/upload-artifact@v4
@@ -76,3 +99,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/MeterBar-Setup.exe
+
+      - name: Remove self-signing certificate from the runner
+        if: always()
+        shell: pwsh
+        run: Remove-Item "$env:RUNNER_TEMP\selfsign.pfx" -Force -ErrorAction SilentlyContinue
