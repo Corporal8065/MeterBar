@@ -53,7 +53,14 @@ private:
     void prepareFrame();
     void layoutModules();
     void applyTheme(); void applyFps(); void rebuildSettings();
-    void showPresetMenu(); void showRepositionMenu(); void showHamburgerMenu();
+    void showHamburgerMenu();
+    // v0.22.0: the Preset and Reposition dropdowns are SUBMENUS of
+    // the hamburger menu now (their toolbar buttons are gone); the
+    // builders read live state at open, exactly as the old
+    // standalone menus did, and showHamburgerMenu's callback handles
+    // their item ids.
+    juce::PopupMenu buildPresetSubMenu(std::vector<juce::File>& filesOut);
+    juce::PopupMenu buildRepositionSubMenu();
     void savePresetInteractive(bool saveAs);
     void loadPresetFile(const juce::File&);
     void doTopBottom(bool top); void doStick(); void doMoveToDisplay(int idx);
@@ -82,13 +89,14 @@ private:
     std::unique_ptr<juce::URL::DownloadTask> updateDownload;
     bool updateDownloadPending = false;
     juce::File updateInstallerFile;
-    // toolbar
-    juce::TextButton presetBtn{"Preset"}, reposBtn{"Reposition"}, recBtn{"Rec"}, pauseBtn{"Pause"},
-                     settingsBtn{"Settings"}, burgerBtn{"Menu"}, minBtn{"_"}, quitBtn{"Quit"};
-    // v0.18 screen-space controls, sitting with the Reposition/pin family:
-    // Reserve = the AppBar toggle; Arrange/Restore = the window sweep.
-    juce::TextButton arrangeBtn{"Arrange"}, restoreBtn{"Restore"}; // v0.21.2: Reserve left the button row — it lives in the Reposition menu now ("Reserve Screen Space")
-    juce::TextButton linkBtn{"Link"};                             // v0.20.0 (k)
+    // toolbar — v0.22.0: ICON-ONLY (Jackson's ask: compress the top
+    // row into the Menu). Link / Rec / Pause / Settings / Menu stay
+    // as glyph buttons with tooltips; Presets, Arrange, Restore,
+    // Reposition, Minimize and Quit live in the hamburger menu now.
+    // (v0.21.2 had already moved Reserve into the Reposition menu.)
+    juce::TextButton linkBtn{"🔗"};                               // v0.20.0 (k)
+    juce::TextButton recBtn{"🔴"}, pauseBtn{"⏸"},
+                     settingsBtn{"⚙"}, burgerBtn{"☰"};
     BarLinkClient linkClient_{ meterbar::kLinkAppMeter };        // v0.20.0 (k)
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
     meterbar::ReserveMachine reserveMachine;                      // v0.18.1: event-driven dock/reserve decisions (hysteresis) — replaces the v0.18 ~4x/sec timer poll

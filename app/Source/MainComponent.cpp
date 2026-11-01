@@ -22,8 +22,13 @@ MainComponent::MainComponent() {
         addAndMakeVisible(c);
         c->setInterceptsMouseClicks(false, false); // clicks fall through to the toolbar drag (v0.8)
     }
-    for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                     &arrangeBtn, &restoreBtn, &linkBtn }) addAndMakeVisible(b);
+    for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &linkBtn }) addAndMakeVisible(b);
+    // v0.22.0: the icon buttons carry tooltips — with the text labels
+    // gone, the hover text is what names each glyph.
+    recBtn.setTooltip("Record: start / stop recording the current source (WAV in Documents\\MeterBar)");
+    pauseBtn.setTooltip("Pause / resume audio");
+    settingsBtn.setTooltip("Settings");
+    burgerBtn.setTooltip("Menu: presets, arrange / restore windows, reposition, minimize, quit");
     // v0.20.0 (k): family LINK toggle + client wiring. Geometry leads
     // via notifyWindowGeometryChanged. v0.2.1: the settings feed is
     // wired too (see onChanged below) — MeterBar was the only bar not
@@ -79,22 +84,16 @@ MainComponent::MainComponent() {
         out[0] = latestBands_[0]; out[1] = latestBands_[1]; out[2] = latestBands_[2]; out[3] = latestLevel_;
     };
     linkClient_.start();
-    presetBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showPresetMenu(); };
-    reposBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showRepositionMenu(); };
-    // v0.18 screen-space controls: Arrange / Restore run the one-shot
-    // window sweep on this monitor. Reserve — the AppBar reservation
-    // toggle — lived here as a standalone button until v0.21.2, when
-    // it moved into the Reposition menu as the ticked "Reserve
-    // Screen Space" item (Jackson's ask); engine.state.
-    // reserveScreenSpace is unchanged, so existing users keep it.
-    arrangeBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); doArrangeWindows(); };
-    restoreBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); doRestoreWindows(); };
+    // v0.22.0: Preset / Reposition / Arrange / Restore / Minimize /
+    // Quit have no toolbar buttons any more — they are items in the
+    // hamburger menu (showHamburgerMenu), calling the same handlers.
+    // Reserve — the AppBar reservation toggle — had already moved
+    // into the Reposition menu at v0.21.2 as the ticked "Reserve
+    // Screen Space" item; engine.state.reserveScreenSpace is
+    // unchanged, so existing users keep it.
     burgerBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showHamburgerMenu(); };
     settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true); };
-    minBtn.onClick = [this]{ if (auto* w = findParentComponentOfClass<juce::DocumentWindow>())
-                                 if (auto* peer = w->getPeer()) peer->setMinimised(true); };
-    quitBtn.onClick = [this]{ juce::JUCEApplication::getInstance()->systemRequestedQuit(); };
-    pauseBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); engine.paused = !engine.paused.load(); pauseBtn.setButtonText(engine.paused ? "Resume" : "Pause"); };
+    pauseBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); engine.paused = !engine.paused.load(); pauseBtn.setButtonText(engine.paused ? "▶" : "⏸"); }; // v0.22.0: glyph swap replaces the Pause/Resume text swap
     recBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleRecord(); };
     // v0.19.2: the update indicator lives in the toolbar but starts
     // hidden and stays hidden until a check actually finds a newer
@@ -142,8 +141,7 @@ void MainComponent::applyTheme() {
     logoLabel.setColour(juce::Label::textColourId, theme.accent);
     versionLabel.setColour(juce::Label::textColourId, theme.dim);
     hintLabel.setColour(juce::Label::textColourId, theme.dim);
-    for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                     &arrangeBtn, &restoreBtn, &linkBtn }) {
+    for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &linkBtn }) {
         b->setColour(juce::TextButton::buttonColourId, theme.panel);
         b->setColour(juce::TextButton::buttonOnColourId, theme.deepest);
         b->setColour(juce::TextButton::textColourOffId, theme.accent);
@@ -354,28 +352,23 @@ void MainComponent::resized() {
         auto bar = area.removeFromTop(30);
         logoLabel.setBounds(bar.removeFromLeft(128).withTrimmedLeft(30));
         versionLabel.setBounds(bar.removeFromLeft(46));
-        quitBtn.setBounds(bar.removeFromRight(52)); minBtn.setBounds(bar.removeFromRight(30));
-        burgerBtn.setBounds(bar.removeFromRight(56)); settingsBtn.setBounds(bar.removeFromRight(74));
-        pauseBtn.setBounds(bar.removeFromRight(58)); recBtn.setBounds(bar.removeFromRight(48));
-        reposBtn.setBounds(bar.removeFromRight(96)); presetBtn.setBounds(bar.removeFromRight(66));
-        // v0.18: the screen-space pair sits just left of Preset (visual
-        // order: Arrange | Restore | Preset | Reposition ...). v0.21.2:
-        // Reserve moved into the Reposition menu, so the row closes up.
-        restoreBtn.setBounds(bar.removeFromRight(62)); arrangeBtn.setBounds(bar.removeFromRight(66));
-        linkBtn.setBounds(bar.removeFromRight(48));
+        // v0.22.0: the icon-only cluster — Link | Rec | Pause |
+        // Settings | Menu, uniform 44 px glyph buttons. Everything
+        // else that used to sit here is in the Menu now.
+        burgerBtn.setBounds(bar.removeFromRight(44)); settingsBtn.setBounds(bar.removeFromRight(44));
+        pauseBtn.setBounds(bar.removeFromRight(44)); recBtn.setBounds(bar.removeFromRight(44));
+        linkBtn.setBounds(bar.removeFromRight(44));
         // v0.19.2: the update indicator takes a slice of the leftover
         // middle strip (where the hint label lives) — only while lit.
         if (updateAvailable) { updateBtn.setBounds(bar.removeFromLeft(78)); updateBtn.setVisible(true); }
         else updateBtn.setVisible(false);
         if (st.showRepositionHint) { hintLabel.setBounds(bar); hintLabel.setVisible(true); } else hintLabel.setVisible(false);
     } else {
-        for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                         &arrangeBtn, &restoreBtn }) b->setVisible(false);
+        for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setVisible(false);
         logoLabel.setVisible(false); versionLabel.setVisible(false); hintLabel.setVisible(false);
         updateBtn.setVisible(false);
     }
-    if (st.showToolbar) for (auto* b : { &presetBtn, &reposBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &minBtn, &quitBtn,
-                                         &arrangeBtn, &restoreBtn }) b->setVisible(true);
+    if (st.showToolbar) for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setVisible(true);
     logoLabel.setVisible(st.showToolbar); versionLabel.setVisible(st.showToolbar);
     layoutModules();
     syncScreenSpace(); // v0.18.1: a resize is a reserve-machine event (bar height / position may have changed)
@@ -730,6 +723,7 @@ enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
        idTop=2001, idBottom, idStick, idPin, idReserve, idDisplayBase=2100,
        idAbout=3001, idOpenSettings, idSrcTone, idSrcInput, idSrcLoop, idThemeBase=3100, idMapBase=3200,
        idCapPause, idCapRecord, idClip10, idClip60, idHint, idToolbar, idDebug, idUpdates, idQuit,
+       idArrange=6001, idRestore, idMinimize, // v0.22.0: compressed toolbar items in the hamburger menu
        idInDevBase=3300, idOutDevBase=3400,
        idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101 }; // v0.21.4: Recordings submenu (idRecBase + up to 25 entries)
 void MainComponent::savePresetInteractive(bool saveAs) {
@@ -761,19 +755,18 @@ void MainComponent::loadPresetFile(const juce::File& f) {
         }
     }
 }
-void MainComponent::showPresetMenu() {
+// v0.22.0: the old Preset dropdown, verbatim, as a submenu builder —
+// the hamburger callback handles the ids (same actions as the old
+// showPresetMenu callback). filesOut keeps the listed files alive
+// for the load-range id check in that callback.
+juce::PopupMenu MainComponent::buildPresetSubMenu(std::vector<juce::File>& filesOut) {
     juce::PopupMenu m;
     m.addItem(idNew, "New Preset"); m.addItem(idSave, "Save"); m.addItem(idSaveAs, "Save As...");
     m.addItem(idOpenFolder, "Open Preset Folder"); m.addSeparator();
     auto files = presetio::presetFolder().findChildFiles(juce::File::findFiles, false, "*.json");
+    filesOut.assign(files.begin(), files.end());
     int i = 0; for (auto& f : files) m.addItem(idLoadBase + (i++), f.getFileNameWithoutExtension());
-    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(presetBtn), [this, files](int r){
-        if (r == idNew) { auto keepTheme = engine.state.themeName; engine.state = PresetState(); engine.state.themeName = keepTheme; engine.applySource(); applyTheme(); applyFps(); layoutModules(); }
-        else if (r == idSave) savePresetInteractive(false);
-        else if (r == idSaveAs) savePresetInteractive(true);
-        else if (r == idOpenFolder) presetio::presetFolder().revealToUser();
-        else if (r >= idLoadBase && r < idLoadBase + (int)files.size()) loadPresetFile(files[r - idLoadBase]);
-    });
+    return m;
 }
 void MainComponent::doTopBottom(bool top) {
     auto disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
@@ -793,7 +786,13 @@ void MainComponent::doMoveToDisplay(int idx) {
     if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setBounds(target);
     else setBounds(target);
 }
-void MainComponent::showRepositionMenu() {
+// v0.22.0: the old Reposition dropdown, verbatim, as a submenu
+// builder (ticks read live state at open). Its actions run in the
+// hamburger callback, which DEFERS them via callAsync exactly as
+// the old menu did — field report (2026-10-13): moving the window
+// from inside a menu callback left it stuck at the top with dead
+// buttons (stuck mouse capture during menu dismissal on Windows).
+juce::PopupMenu MainComponent::buildRepositionSubMenu() {
     juce::PopupMenu m; auto& st = engine.state;
     m.addItem(idTop, "At the Top"); m.addItem(idBottom, "At the Bottom");
     m.addItem(idStick, "Stick", true, st.stick); m.addItem(idPin, "Pin Above Other Windows", true, st.pinned);
@@ -801,27 +800,14 @@ void MainComponent::showRepositionMenu() {
     juce::PopupMenu disp; auto displays = juce::Desktop::getInstance().getDisplays().displays;
     for (int i = 0; i < displays.size(); ++i) disp.addItem(idDisplayBase + i, "Display " + juce::String(i + 1));
     m.addSubMenu("Move to Display", disp);
-    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(reposBtn), [this](int r){
-        // Defer ALL window moves until the popup menu has fully closed.
-        // Field report (2026-10-13): moving the window from inside the menu
-        // callback left it stuck at the top with dead buttons (stuck mouse
-        // capture during menu dismissal on Windows).
-        juce::MessageManager::callAsync([this, r]{
-            if (r == idTop) doTopBottom(true); else if (r == idBottom) doTopBottom(false);
-            else if (r == idStick) doStick();
-            else if (r == idPin) { engine.state.pinned = !engine.state.pinned;
-                if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setAlwaysOnTop(engine.state.pinned); }
-            else if (r == idReserve) { engine.state.reserveScreenSpace = !engine.state.reserveScreenSpace; syncScreenSpace(); }
-            else if (r >= idDisplayBase) doMoveToDisplay(r - idDisplayBase);
-        });
-    });
+    return m;
 }
 void MainComponent::toggleRecord() {
-    if (engine.isRecording()) { engine.stopRecording(); recordingFile_ = juce::File{}; recBtn.setButtonText("Rec"); return; }
+    if (engine.isRecording()) { engine.stopRecording(); recordingFile_ = juce::File{}; recBtn.setToggleState(false, juce::dontSendNotification); return; }
     auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
     dir.createDirectory();
     auto f = dir.getChildFile("record-" + juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S") + ".wav");
-    if (engine.startRecording(f)) { recordingFile_ = f; recBtn.setButtonText("Stop"); }
+    if (engine.startRecording(f)) { recordingFile_ = f; recBtn.setToggleState(true, juce::dontSendNotification); } // v0.22.0: the lit 🔴 replaces the Rec/Stop text swap
 }
 void MainComponent::exportClip(double seconds) {
     auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
@@ -865,6 +851,16 @@ void MainComponent::showHamburgerMenu() {
     auto& st = engine.state; juce::PopupMenu m;
     juce::PopupMenu help; help.addItem(idAbout, "About MeterBar"); help.addItem(idUpdates, "Check For Updates");
     m.addSubMenu("Help", help);
+    // v0.22.0: the compressed toolbar — the old Preset and Reposition
+    // dropdowns as submenus (built fresh here, so ticks and the
+    // preset list read live state), plus Arrange / Restore items.
+    // Minimize joins Quit at the bottom (below).
+    std::vector<juce::File> presetFiles;
+    m.addSubMenu("Presets", buildPresetSubMenu(presetFiles));
+    m.addItem(idArrange, "Arrange Windows");
+    m.addItem(idRestore, "Restore Windows");
+    m.addSubMenu("Reposition", buildRepositionSubMenu());
+    m.addSeparator();
     juce::PopupMenu settings; settings.addItem(idOpenSettings, "Open Settings Window"); m.addSubMenu("Settings", settings);
     juce::PopupMenu src; src.addItem(idSrcTone, "Test Tone", true, st.audioSource == "Test Tone");
     // v0.9 unified: pick ANY device below and it becomes the sound source —
@@ -937,8 +933,9 @@ void MainComponent::showHamburgerMenu() {
     m.addItem(idToolbar, "Show Toolbar", true, st.showToolbar);
     m.addItem(idDebug, "Show Debug Window", true, debugWin->isVisible());
     m.addItem(idUpdates, "Check For Updates");
-    m.addSeparator(); m.addItem(idQuit, "Quit");
-    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(burgerBtn), [this, inNames, outNames, recFiles](int r){
+    m.addSeparator(); m.addItem(idMinimize, "Minimize"); m.addItem(idQuit, "Quit");
+    const int numDisplays = juce::Desktop::getInstance().getDisplays().displays.size();
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(burgerBtn), [this, inNames, outNames, recFiles, presetFiles, numDisplays](int r){
         auto& s = engine.state;
         if (r == idAbout) juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "MeterBar",
             "MeterBar " + kVersion + "\nA compact audio metering bar: Spectrum, Spectrogram, Waveform,\nLoudness, Stereometer, Oscilloscope.\nBuilt with JUCE + a custom DSP core.\nMade with JUCE (juce.com) — free-license attribution.");
@@ -964,6 +961,32 @@ void MainComponent::showHamburgerMenu() {
         else if (r == idToolbar) { s.showToolbar = !s.showToolbar; resized(); repaint(); }
         else if (r == idDebug) debugWin->setVisible(!debugWin->isVisible());
         else if (r == idUpdates) checkForUpdates();
+        // v0.22.0: the compressed toolbar items. Preset actions are
+        // the old dropdown's, unchanged; Arrange / Restore call the
+        // same handlers the buttons did.
+        else if (r == idNew) { auto keepTheme = engine.state.themeName; engine.state = PresetState(); engine.state.themeName = keepTheme; engine.applySource(); applyTheme(); applyFps(); layoutModules(); }
+        else if (r == idSave) savePresetInteractive(false);
+        else if (r == idSaveAs) savePresetInteractive(true);
+        else if (r == idOpenFolder) presetio::presetFolder().revealToUser();
+        else if (r >= idLoadBase && r < idLoadBase + (int)presetFiles.size()) loadPresetFile(presetFiles[(size_t)(r - idLoadBase)]);
+        else if (r == idArrange) doArrangeWindows();
+        else if (r == idRestore) doRestoreWindows();
+        else if (r == idTop || r == idBottom || r == idStick || r == idPin || r == idReserve
+                 || (r >= idDisplayBase && r < idDisplayBase + numDisplays)) {
+            // Reposition actions defer until the popup has fully
+            // closed — the old dropdown's discipline (see
+            // buildRepositionSubMenu).
+            juce::MessageManager::callAsync([this, r]{
+                if (r == idTop) doTopBottom(true); else if (r == idBottom) doTopBottom(false);
+                else if (r == idStick) doStick();
+                else if (r == idPin) { engine.state.pinned = !engine.state.pinned;
+                    if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setAlwaysOnTop(engine.state.pinned); }
+                else if (r == idReserve) { engine.state.reserveScreenSpace = !engine.state.reserveScreenSpace; syncScreenSpace(); }
+                else if (r >= idDisplayBase) doMoveToDisplay(r - idDisplayBase);
+            });
+        }
+        else if (r == idMinimize) { if (auto* w = findParentComponentOfClass<juce::DocumentWindow>())
+                                        if (auto* peer = w->getPeer()) peer->setMinimised(true); }
         else if (r == idQuit) juce::JUCEApplication::getInstance()->systemRequestedQuit();
     });
 }
