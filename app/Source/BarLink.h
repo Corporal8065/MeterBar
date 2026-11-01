@@ -37,7 +37,7 @@
 
 class BarLinkClient : private juce::Timer {
 public:
-    struct Bg { int style = 0; float opacity = 1.0f; int effect = 0; }; // effect: BLK3 (v0.21.3) — MeterBar maps it to/from visualizerEnabled + visualizerStyle; BLK4 (v0.21.5) adds effect 3 = visualizer Lines
+    struct Bg { int style = 0; float opacity = 1.0f; int effect = 0; }; // effect: BLK3 (v0.21.3) — MeterBar maps it to/from visualizerEnabled + visualizerStyle; BLK4 (v0.21.5) adds effect 3 = visualizer Lines; BLK5 (v0.25.0) adds effect 4 = visualizer Field
     // Host callbacks (all message-thread).
     std::function<juce::Rectangle<int>()> getBounds;
     std::function<void(juce::Rectangle<int>)> setBounds;   // position apply (size preserved by the rect itself)
@@ -46,7 +46,7 @@ public:
     std::function<int()> getDockedEdge;                    // protocol ordinal or -1
     std::function<bool()> isLinked;
     std::function<bool()> bgLinkEnabled; // v0.21.3: the host's "Link background" toggle; empty = enabled
-    std::function<void(float out[4])> getAudio; // v0.3.0 item 17: band energies [low,mid,high] + level (MeterBar wires this; the others leave it empty)
+    std::function<void(float out[5])> getAudio; // v0.3.0 item 17: band energies [low,mid,high] + level; BLK5 (v0.25.0): + stereo balance at [4] (MeterBar wires this; the others leave it empty)
 
     explicit BarLinkClient(int appId) : appId_(appId) {}
     ~BarLinkClient() override { stop(); }
@@ -138,7 +138,7 @@ public:
     }
 
     // v0.3.0 item 17: a peer's audio broadcast (false = not live / never published).
-    bool peerAudio(int appId, float out[4]) {
+    bool peerAudio(int appId, float out[5]) {
         if (!shared_ || appId < 0 || appId > 2) return false;
         meterbar::LinkShared snap;
         if (!readShared(snap)) return false;
@@ -203,12 +203,14 @@ private:
         mine.dockedEdge = getDockedEdge ? getDockedEdge() : -1;
         // Item 17: audio broadcast — re-stamp only on material change.
         if (getAudio) {
-            float a[4] = { 0.f, 0.f, 0.f, 0.f };
+            float a[5] = { 0.f, 0.f, 0.f, 0.f, 0.f };
             getAudio(a);
             auto diff = [](float x, float y) { return x > y ? x - y : y - x; };
             if (diff(a[0], mine.audioLow) > 0.01f || diff(a[1], mine.audioMid) > 0.01f ||
-                diff(a[2], mine.audioHigh) > 0.01f || diff(a[3], mine.audioLevel) > 0.01f) {
+                diff(a[2], mine.audioHigh) > 0.01f || diff(a[3], mine.audioLevel) > 0.01f ||
+                diff(a[4], mine.audioBalance) > 0.02f) {
                 mine.audioLow = a[0]; mine.audioMid = a[1]; mine.audioHigh = a[2]; mine.audioLevel = a[3];
+                mine.audioBalance = a[4];
                 mine.audioSeq += 1;
             }
         }

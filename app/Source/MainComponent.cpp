@@ -66,9 +66,10 @@ MainComponent::MainComponent() {
     };
     linkClient_.getBg = [this]{
         // BLK4: the visualizer style rides the effect ordinal (1 Bubbles / 3 Lines).
+        // BLK5 (v0.25.0): style 2 (Field) rides ordinal 4.
         // Drag-lag fix (2026-10-31): effect 2 (a peer's glow) has NO
         // MeterBar-native emission — the visualizer mapping can only
-        // produce 0/1/3. Adopting a glow packet records
+        // produce 0/1/3/4. Adopting a glow packet records
         // publishedEffect=2 in the link bookkeeping while an unshadowed
         // getBg keeps emitting 1/3, so the publish gate misreads the
         // adoption as a NEW local change and MeterBar re-publishes its
@@ -78,7 +79,7 @@ MainComponent::MainComponent() {
         // change. While the shadow is set, pass the adopted ordinal
         // through; the display mapping in applyBg is unchanged.
         const int effect = linkBgEffectShadow_ >= 0 ? linkBgEffectShadow_
-            : (engine.state.visualizerEnabled ? (engine.state.visualizerStyle == 1 ? 3 : 1) : 0);
+            : (engine.state.visualizerEnabled ? (engine.state.visualizerStyle == 1 ? 3 : engine.state.visualizerStyle == 2 ? 4 : 1) : 0);
         return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, effect };
     };
     linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){
@@ -90,6 +91,7 @@ MainComponent::MainComponent() {
         // the current style (MeterBar has no glow to show).
         if (bg.effect == 1) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 0; }
         else if (bg.effect == 3) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 1; }
+        else if (bg.effect == 4) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 2; } // BLK5: Field
         else engine.state.visualizerEnabled = bg.effect != 0;
         linkBgEffectShadow_ = (bg.effect == 2) ? 2 : -1; // 2 (glow) is the only ordinal getBg cannot emit natively — see getBg
         repaint();
@@ -100,8 +102,9 @@ MainComponent::MainComponent() {
     // v0.20.1 (item 17): broadcast the band energies + level the
     // visualizer already computes, so linked siblings can render the
     // reactive glow from the same music.
-    linkClient_.getAudio = [this](float out[4]) {
+    linkClient_.getAudio = [this](float out[5]) {
         out[0] = latestBands_[0]; out[1] = latestBands_[1]; out[2] = latestBands_[2]; out[3] = latestLevel_;
+        out[4] = latestBalance_; // BLK5 (v0.25.0): stereo balance for the siblings' distributed emitters
     };
     linkClient_.start();
     // v0.22.0: Preset / Reposition / Arrange / Restore / Minimize /
@@ -626,6 +629,19 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
                     ig.fillPath(path);
                 }
             }
+        } else if (engine.state.visualizerStyle == 2) {
+            // v0.25.0 FIELD: the vortex dots, drawn through the
+            // exact same dot path (and the same half-res + blur
+            // envelope) as Bubbles.
+            for (auto& p : vizField.particles()) {
+                auto c = vizField.colorFor(p, vs);
+                ig.setColour(juce::Colour(c.r, c.g, c.b));
+                float px, py;
+                meterbar::fieldToLocal(fm, p.x, p.y, px, py);
+                const float r = p.size * 1.35f;
+                if (!meterbar::fieldDotVisible(px, py, r, iw, ih)) continue; // another bar's slice of the field
+                ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
+            }
         } else {
             for (auto& p : visualizer.particles()) {
                 auto c = visualizer.colorFor(p, vs);
@@ -837,6 +853,7 @@ void MainComponent::prepareFrame() {
     // same spectrum, whether or not the local visualizer is on.
     latestBands_ = meterbar::spectrumBandEnergies(frame.spectrumDb, st.fftSize, frame.sampleRate);
     latestLevel_ = juce::jlimit(0.f, 1.f, (float)((frame.loudShortTerm + 50.0) / 45.0));
+    latestBalance_ = juce::jlimit(-1.f, 1.f, frame.stereo.balance); // v0.25.0: distributed-emitter steering
     if (st.visualizerEnabled) {
         auto e = latestBands_;
         meterbar::VisualizerSettings vs;
@@ -848,8 +865,12 @@ void MainComponent::prepareFrame() {
         const float dt = (float)juce::jlimit(0.004, 0.1, 1.0 / std::max(1, st.fpsLimit));
         // v0.21.5: advance whichever style is selected — the
         // particle engine (Bubbles) or the ribbon model (Lines).
+        // v0.25.0: style 2 = Field (wandering vortices); Bubbles
+        // now also receives the stereo balance for its distributed
+        // emitters.
         if (st.visualizerStyle == 1) vizLines.update(dt, e.data());
-        else visualizer.update(dt, e.data(), vs);
+        else if (st.visualizerStyle == 2) vizField.update(dt, e.data(), vs, latestBalance_);
+        else visualizer.update(dt, e.data(), vs, latestBalance_);
     }
 }
 // ---------------- Menus ----------------

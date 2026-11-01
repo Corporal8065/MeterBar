@@ -810,6 +810,57 @@ int main() {
         auto wc = eng.colorFor(bp, wrap);
         CHECK(!(wc.r == wc.g && wc.g == wc.b));
     }
+    // ---------- v0.25.0: distributed emitters + Field style + BLK5 ----------
+    {
+        VisualizerSettings vs;
+        // burst birthplaces follow the band's field position: low
+        // left, mid centre, high right (the centre is a coordinate
+        // reference, not a spawn point — Jackson, 2026-11-01)
+        auto burstMeanX = [&](int band, float balance, int frames) {
+            VisualizerEngine e2;
+            float hot[3] = { 0, 0, 0 }; hot[(size_t)band] = 0.95f;
+            for (int i = 0; i < frames; ++i) e2.update(1.f / 30.f, hot, vs, balance);
+            double sx = 0; int n = 0;
+            for (auto& p : e2.particles()) if (p.burst) { sx += p.x; ++n; }
+            CHECK(n > 0);
+            return n ? sx / n : 0.5;
+        };
+        const double lowX = burstMeanX(0, 0.f, 3), midX = burstMeanX(1, 0.f, 3), highX = burstMeanX(2, 0.f, 3);
+        CHECK(lowX < 0.42);
+        CHECK(midX > 0.40 && midX < 0.60);
+        CHECK(highX > 0.58);
+        CHECK(lowX < midX && midX < highX);
+        // stereo balance shifts the same band's births sideways
+        CHECK(burstMeanX(1, 0.9f, 10) > burstMeanX(1, -0.9f, 10) + 0.05);
+        // the mapping itself: ordered bands, balance clamped in-field
+        CHECK(vizBandFieldX(0, 0.f) < vizBandFieldX(1, 0.f) && vizBandFieldX(1, 0.f) < vizBandFieldX(2, 0.f));
+        CHECK(vizBandFieldX(2, 1.f) <= 0.94f && vizBandFieldX(0, -1.f) >= 0.06f);
+        // Field style: population fills to its target and never
+        // exceeds it; the gate opens with music; vortices wander
+        VisualizerField fld;
+        const float loud[3] = { 0.8f, 0.6f, 0.4f };
+        for (int i = 0; i < 120; ++i) { fld.update(1.f / 30.f, loud, vs); CHECK((int)fld.particles().size() <= VisualizerField::kFieldTarget); }
+        CHECK((int)fld.particles().size() == VisualizerField::kFieldTarget);
+        CHECK(fld.visibility() == 1.f);
+        float wx0, wy0, wx1, wy1;
+        fld.vortexCentre(0, wx0, wy0);
+        for (int i = 0; i < 600; ++i) fld.update(1.f / 30.f, loud, vs); // +20 s
+        fld.vortexCentre(0, wx1, wy1);
+        CHECK(std::hypot(wx1 - wx0, wy1 - wy0) > 0.05);
+        // silence: the gate closes completely, like the other styles
+        VisualizerField quiet;
+        const float sil[3] = { 0, 0, 0 };
+        for (int i = 0; i < 600; ++i) quiet.update(1.f / 30.f, sil, vs);
+        CHECK(quiet.visibility() == 0.f);
+        // BLK5: the magic moved with the widened domain, and the
+        // stereo balance rides the audio packet at [4]
+        CHECK(kLinkMagic == 0x424C4B35u);
+        LinkSlot slot; slot.appId = 1; slot.heartbeatMs = 1000; slot.audioSeq = 3;
+        slot.audioLow = 0.1f; slot.audioMid = 0.2f; slot.audioHigh = 0.3f; slot.audioLevel = 0.4f; slot.audioBalance = 0.7f;
+        float pkt[5] = { 0, 0, 0, 0, 0 };
+        CHECK(audioPacket(slot, 1000, pkt));
+        CHECK(pkt[0] == 0.1f && pkt[3] == 0.4f && pkt[4] == 0.7f);
+    }
     // ---------- v0.21.5: calmed whites + Lines style ----------
     {
         VisualizerSettings vs;

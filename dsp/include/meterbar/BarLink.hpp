@@ -30,12 +30,13 @@ namespace meterbar {
 // A drag session is "live" while its stamp is fresher than
 // kLeaderStaleMs; staleness — never a stuck flag — ends it.
 
-inline constexpr unsigned kLinkMagic = 0x424C4B34; // "BLK4" — v0.21.5 widened the bgEffect value
-    // domain (3 = visualizer Lines; see LinkSlot::bgEffect). The slot
-    // layout is BLK3's, but the effect ordinal's MEANING grew, so the
-    // magic moves with it: mixed old/new binaries never link (magic
-    // mismatch = the whole block reads empty), the same failure
-    // shape as every earlier bump. BLK3 appended bgEffect to
+inline constexpr unsigned kLinkMagic = 0x424C4B35; // "BLK5" — v0.25.0 widened the bgEffect value
+    // domain again (4 = visualizer Field) and appended audioBalance
+    // to LinkSlot. Same rule as BLK4 (v0.21.5, which widened the
+    // domain for 3 = visualizer Lines): the ordinal's MEANING grew,
+    // so the magic moves with it — mixed old/new binaries never
+    // link (magic mismatch = the whole block reads empty), the same
+    // failure shape as every earlier bump. BLK3 appended bgEffect to
     // LinkSlot (the background packet carries the effect selection,
     // not just style + opacity); BLK2 appended the one-click-stack
     // request fields and MeterBar's audio broadcast.
@@ -70,16 +71,22 @@ struct LinkSlot {
     float audioLow = 0.f, audioMid = 0.f, audioHigh = 0.f, audioLevel = 0.f;
     unsigned audioSeq = 0;
     // Background effect (BLK3, v0.21.3; domain widened by BLK4,
-    // v0.21.5): the publisher's bgEffect ordinal — 0 styled,
-    // 1 visualizer Bubbles, 2 glow, 3 visualizer Lines. The
-    // visualizer STYLE rides this ordinal (rather than a new
-    // field) so the style propagates exactly the way the effect
-    // selection already does. MeterBar has no glow and no 3-way
-    // effect: it publishes 1 or 3 when its visualizer is on (by
-    // its style), else 0, and adopts 1/3 as visualizer-on with
+    // v0.21.5, and BLK5, v0.25.0): the publisher's bgEffect
+    // ordinal — 0 styled, 1 visualizer Bubbles, 2 glow,
+    // 3 visualizer Lines, 4 visualizer Field. The visualizer
+    // STYLE rides this ordinal (rather than a new field) so the
+    // style propagates exactly the way the effect selection
+    // already does. MeterBar has no glow and no 3-way effect: it
+    // publishes 1, 3 or 4 when its visualizer is on (by its
+    // style), else 0, and adopts 1/3/4 as visualizer-on with
     // that style (2 lands as visualizer-on, style untouched).
-    // Appended last, like every field since BLK1.
     int bgEffect = 0;
+    // Stereo balance (BLK5, v0.25.0): MeterBar publishes its
+    // StereoFrame balance here (positive = right-heavy) beside
+    // the band energies above, so linked siblings place their
+    // distributed emitters by the same stereo picture. Appended
+    // last, like every field since BLK1.
+    float audioBalance = 0.f;
 };
 struct LinkShared {
     unsigned magic = kLinkMagic;
@@ -183,7 +190,7 @@ inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge)
 struct BgPacket {
     int style = 0;      // family background-style ordinal (LinkSlot::bgStyle)
     int opacityPct = 100;
-    int effect = 0;     // bgEffect ordinal (LinkSlot::bgEffect) — BLK3; BLK4 adds ordinal 3 (Lines)
+    int effect = 0;     // bgEffect ordinal (LinkSlot::bgEffect) — BLK3; BLK4 adds ordinal 3 (Lines), BLK5 ordinal 4 (Field)
 };
 struct BgSyncState {
     int publishedStyle = -999, publishedPct = -999; // values this app last published OR adopted (-999 = none yet)
@@ -265,9 +272,10 @@ inline int planStackAll(const LinkShared& sh, long long nowMs, int initiatorApp,
 // published at least once (audioSeq != 0); freshness is slotLive's
 // heartbeat rule — exactly the "MeterBar is running and linked"
 // test the reactive background wants.
-inline bool audioPacket(const LinkSlot& s, long long nowMs, float out[4]) {
+inline bool audioPacket(const LinkSlot& s, long long nowMs, float out[5]) {
     if (!slotLive(s, nowMs) || s.audioSeq == 0) return false;
     out[0] = s.audioLow; out[1] = s.audioMid; out[2] = s.audioHigh; out[3] = s.audioLevel;
+    out[4] = s.audioBalance; // BLK5 (v0.25.0)
     return true;
 }
 

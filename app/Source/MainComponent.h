@@ -153,8 +153,10 @@ private:
     AnalysisData frame;
     meterbar::VisualizerEngine visualizer;   // v0.20.0: background-mode particle model (pure core)
     meterbar::VisualizerLines vizLines;      // v0.21.5: the Lines style's ribbon model (pure core)
+    meterbar::VisualizerField vizField;      // v0.25.0: the Field style's vortex model (pure core)
     std::array<float, 3> latestBands_{};     // v0.20.1: newest spectrum band energies (BarLink audio broadcast, item 17)
     float latestLevel_ = 0.f;                // v0.20.1: newest overall level 0..1 for the same broadcast
+    float latestBalance_ = 0.f;              // v0.25.0: newest stereo balance -1..1 for the same broadcast + local emitters
     juce::Image vizCache, vizBlur;           // v0.20.0: half-res particle layer + its Gaussian-blurred glow
     juce::Image vizBlurSrc;                  // v0.23.1: quarter-res downsample the blur convolves (lag fix, audit Finding 3)
     int vizBlurFrame_ = 0;                   // v0.23.1: blur recompute cadence — every 2nd frame, held between

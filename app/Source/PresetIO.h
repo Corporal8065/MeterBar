@@ -45,7 +45,7 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("vizEnabled", s.visualizerEnabled); set("vizHue", s.visualizerBaseHue); // v0.20.0
     set("vizSat", s.visualizerSaturation); set("vizSpread", s.visualizerSpread);
     set("vizCycle", s.visualizerCycleSec);
-    set("vizStyle", s.visualizerStyle); // v0.21.5: 0 Bubbles / 1 Lines
+    set("vizStyle", s.visualizerStyle); // v0.21.5: 0 Bubbles / 1 Lines; v0.25.0: 2 Field
     set("winX", s.windowX); set("winY", s.windowY); set("winW", s.windowW); set("winH", s.windowH);
     return juce::var(o);
 }
@@ -99,7 +99,7 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.visualizerSaturation = gf("vizSat", s.visualizerSaturation);
     s.visualizerSpread = gf("vizSpread", s.visualizerSpread);
     s.visualizerCycleSec = gf("vizCycle", s.visualizerCycleSec);
-    { int vs = gi("vizStyle", s.visualizerStyle); s.visualizerStyle = vs < 0 ? 0 : vs > 1 ? 1 : vs; } // v0.21.5 (absent -> Bubbles)
+    { int vs = gi("vizStyle", s.visualizerStyle); s.visualizerStyle = vs < 0 ? 0 : vs > 2 ? 2 : vs; } // v0.21.5 (absent -> Bubbles); v0.25.0: Field (2) admitted
     s.showToolbar = gb("showToolbar", s.showToolbar); s.showRepositionHint = gb("showHint", s.showRepositionHint);
     s.windowX = gi("winX", s.windowX); s.windowY = gi("winY", s.windowY); s.windowW = gi("winW", s.windowW); s.windowH = gi("winH", s.windowH);
     return s;

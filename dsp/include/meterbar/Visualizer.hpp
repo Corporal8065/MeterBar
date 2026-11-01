@@ -48,6 +48,19 @@ inline VizRgb vizHsvToRgb(float h, float s, float v) {
                    (std::uint8_t)std::lround((b + m) * 255.f) };
 }
 
+// DISTRIBUTED EMITTERS (v0.25.0, Jackson's critique 2026-11-01):
+// the field's centre is a coordinate reference, NOT a spawn point.
+// A band's activity lives at a horizontal position across the field
+// — low at the left, mid at the centre, high at the right — shifted
+// by the stereo balance (positive = right-heavy, the StereoFrame
+// convention). Bursts, brush heads and Field dots are all born near
+// their band's position instead of at the middle of the bar.
+inline float vizBandFieldX(int band, float balance) {
+    const float base = band == 0 ? 0.20f : band == 1 ? 0.50f : 0.80f;
+    float x = base + balance * 0.15f;
+    return x < 0.06f ? 0.06f : x > 0.94f ? 0.94f : x;
+}
+
 struct VisualizerSettings {
     bool enabled = false;          // the Settings toggle — default OFF
     float baseHue = 0.83f;         // 0..1, family pink
@@ -81,9 +94,17 @@ public:
     // Advance the model. bandEnergy = [low, mid, high], each 0..1
     // (see spectrumBandEnergies). timeSec = a free-running clock for
     // palette cycling (the engine also tracks it from dt if negative).
-    void update(float dt, const float bandEnergy[3], const VisualizerSettings& st) {
+    void update(float dt, const float bandEnergy[3], const VisualizerSettings& st,
+                float stereoBalance = 0.f) {
         if (dt <= 0) return;
         time_ += dt;
+        // v0.25.0: smoothed stereo balance steers where new
+        // particles are born (see vizBandFieldX).
+        {
+            float b = stereoBalance < -1.f ? -1.f : stereoBalance > 1.f ? 1.f : stereoBalance;
+            float a = 8.f * dt; if (a > 1.f) a = 1.f;
+            balance_ += (b - balance_) * a;
+        }
         // --- activity gate (v0.20.3, Jackson's ask; TickerBar
         // v0.4.0 sibling): the ambient WHITE convergers are only
         // visible while the bands carry real energy. In silence
@@ -108,8 +129,13 @@ public:
             refractory_[band] -= dt;
             if (bandEnergy[band] >= kTrigger && refractory_[band] <= 0) {
                 refractory_[band] = kRefractorySec;
-                spawnBurst(band, bandEnergy[band], cap);
+                // v0.25.0: a sharp rise is a TRANSIENT — its burst
+                // stays tight and local at the band's field position
+                // instead of stroking wide.
+                const bool transient = (bandEnergy[band] - prevBand_[band]) >= 0.30f;
+                spawnBurst(band, bandEnergy[band], cap, transient);
             }
+            prevBand_[band] = bandEnergy[band];
         }
         // --- integrate ---
         for (auto& p : ps_) {
@@ -130,6 +156,19 @@ public:
                 p.vx *= 0.985f; p.vy *= 0.985f;
             } else {
                 p.vx *= 0.985f; p.vy *= 0.985f; // expansion eases out
+                // v0.25.0: as a burst dot's expansion dies it picks
+                // up the ambient whites' inward swirl (Jackson
+                // likes that motion — the dots used to just stop
+                // wherever the stroke left them). Weaker than the
+                // ambients' own steering, so the stroke still reads
+                // as a stroke first.
+                const float dx = 0.5f - p.x, dy = 0.5f - p.y;
+                const float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > 0.02f) {
+                    const float pull = 0.035f, swirl = 0.018f;
+                    p.vx += (dx / dist * pull + (-dy / dist) * swirl) * dt;
+                    p.vy += (dy / dist * pull + (dx / dist) * swirl) * dt;
+                }
             }
             p.x += p.vx * dt; p.y += p.vy * dt;
         }
@@ -185,22 +224,29 @@ private:
     }
     VizParticle spawnAmbient() {
         VizParticle p;
-        const float ang = next01() * 6.2831853f;
-        const float rad = 0.55f + next01() * 0.25f;
-        p.x = 0.5f + std::cos(ang) * rad * 0.5f + (next01() - 0.5f) * 0.1f;
-        p.y = 0.5f + std::sin(ang) * rad * 0.35f + (next01() - 0.5f) * 0.1f;
+        // v0.25.0: born anywhere across the field, not on a ring
+        // around the centre — the inward convergence below is the
+        // motion Jackson likes; where a particle starts is the
+        // part that read as "everything in the middle".
+        p.x = 0.03f + next01() * 0.94f;
+        p.y = 0.04f + next01() * 0.92f;
         p.vx = 0; p.vy = 0;
         p.age = 0; p.life = 6.f + next01() * 8.f;
         p.size = 1.2f + next01() * 1.6f;
         p.burst = false;
         return p;
     }
-    void spawnBurst(int band, float energy, int cap) {
-        // Band anchors: low = lower centre, mid = centre, high = upper centre.
-        const float ax = 0.5f, ay = band == 0 ? 0.72f : band == 1 ? 0.5f : 0.28f;
+    void spawnBurst(int band, float energy, int cap, bool transient = false) {
+        // Band anchors: the band's FIELD position (v0.25.0 — low
+        // left, mid centre, high right, shifted by the stereo
+        // balance) at the band's row; a little jitter keeps repeat
+        // bursts from stacking on one exact spot.
+        const float ax = vizBandFieldX(band, balance_) + (next01() - 0.5f) * 0.10f;
+        const float ay = band == 0 ? 0.72f : band == 1 ? 0.5f : 0.28f;
         const float ang = next01() * 6.2831853f;
         const float dx = std::cos(ang), dy = std::sin(ang); // stroke direction
-        const float halfLen = 0.10f + 0.08f * energy;
+        float halfLen = 0.10f + 0.08f * energy;
+        if (transient) halfLen *= 0.55f; // a hit stays local (v0.25.0)
         int want = (int)std::lround(26.f + 34.f * energy);
         const int budget = cap - (int)ps_.size();
         if (want > budget) want = budget;
@@ -224,6 +270,8 @@ private:
     }
     std::vector<VizParticle> ps_;
     float refractory_[3] = { 0, 0, 0 };
+    float prevBand_[3] = { 0, 0, 0 }; // v0.25.0: transient detection
+    float balance_ = 0;               // v0.25.0: smoothed stereo balance
     int bursts_ = 0;
     float activity_ = 0; // v0.20.3: smoothed max band energy (the silence gate)
     double time_ = 0;
@@ -330,6 +378,147 @@ private:
     float phase_[3] = { 0, 0, 0 };
     float wob_[3][kPoints] = {};
     float activity_ = 0;
+    double time_ = 0;
+};
+
+// ------------------------------------------------------------------
+// FIELD STYLE (v0.25.0, Jackson's rollout word 2026-11-01) — the
+// third visualizer style, alongside Bubbles and Lines. Instead of
+// one global centre, FOUR vortex centres wander slowly around the
+// field on detuned Lissajous paths. A dot is born near its band's
+// field position (the distributed-emitter rule above), joins the
+// vortex nearest its birthplace, and orbits it; the vortex is FED
+// by its band — orbit speed follows the band energy, so the vortex
+// nearest the active frequency's position is the one that spins
+// up. A dot the vortex pulls into its core is consumed and
+// respawned. The SAME activity gate as the particle engine fades
+// the whole field out in silence. Pure model, deterministic
+// (splitmix stream), population hard-capped — the app layer draws
+// the dots through the same half-res + blur path as Bubbles, so
+// the render cost envelope is unchanged.
+struct VizFieldDot {
+    float x = 0.5f, y = 0.5f;
+    float vx = 0, vy = 0;
+    float age = 0, life = 1;
+    float size = 2;
+    int band = 1;    // the band that feeds this dot (palette + orbit speed)
+    int vortex = 0;  // the vortex it orbits
+};
+
+class VisualizerField {
+public:
+    static constexpr int kVortices = 4;
+    static constexpr int kFieldTarget = 150;
+    static constexpr int kFieldHardCap = 400;
+
+    void update(float dt, const float bandEnergy[3], const VisualizerSettings& st,
+                float stereoBalance = 0.f) {
+        if (dt <= 0) return;
+        time_ += dt;
+        {
+            float b = stereoBalance < -1.f ? -1.f : stereoBalance > 1.f ? 1.f : stereoBalance;
+            float a = 8.f * dt; if (a > 1.f) a = 1.f;
+            balance_ += (b - balance_) * a;
+        }
+        {   // the particle engine's activity gate, same constants
+            const float frame = std::max({ bandEnergy[0], bandEnergy[1], bandEnergy[2] });
+            const float rate = frame > activity_ ? 6.f : 0.8f;
+            float a = rate * dt; if (a > 1.f) a = 1.f;
+            activity_ += (frame - activity_) * a;
+        }
+        int cap = st.particleCap < 16 ? 16 : (st.particleCap > kFieldHardCap ? kFieldHardCap : st.particleCap);
+        if (cap > kFieldTarget) cap = kFieldTarget;
+        while ((int)dots_.size() < cap) dots_.push_back(spawnDot(bandEnergy));
+        for (auto& d : dots_) {
+            d.age += dt;
+            float cx, cy;
+            vortexCentre(d.vortex, cx, cy);
+            const float dx = cx - d.x, dy = cy - d.y;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist < 0.015f || d.age > d.life) { d = spawnDot(bandEnergy); continue; }
+            // Orbit: tangential flow around the vortex, weak
+            // inward pull; speed follows the feeding band's energy.
+            const float e = bandEnergy[d.band < 0 ? 0 : d.band > 2 ? 2 : d.band];
+            const float orbit = 0.10f + 0.30f * e;
+            d.vx += ((-dy / dist) * orbit + (dx / dist) * 0.03f) * dt;
+            d.vy += ((dx / dist) * orbit + (dy / dist) * 0.03f) * dt;
+            d.vx *= 0.97f; d.vy *= 0.97f;
+            d.x += d.vx * dt; d.y += d.vy * dt;
+        }
+    }
+
+    // Vortex i's centre right now: a slow Lissajous wander, each
+    // vortex on detuned periods/phases — deterministic, so every
+    // linked bar drawing the same model agrees on the field.
+    void vortexCentre(int i, float& x, float& y) const {
+        static constexpr float kPhase[kVortices] = { 0.0f, 1.7f, 3.4f, 5.1f };
+        static constexpr float kWx[kVortices] = { 0.21f, 0.16f, 0.26f, 0.13f };
+        static constexpr float kWy[kVortices] = { 0.17f, 0.23f, 0.14f, 0.19f };
+        const int k = i < 0 ? 0 : i >= kVortices ? kVortices - 1 : i;
+        const float t = (float)time_;
+        x = 0.5f + 0.30f * std::sin(t * kWx[k] + kPhase[k]);
+        y = 0.5f + 0.28f * std::sin(t * kWy[k] + kPhase[k] * 1.7f);
+    }
+
+    const std::vector<VizFieldDot>& particles() const { return dots_; }
+    double time() const { return time_; }
+    float visibility() const { // the family gate: full at 0.30, zero in silence
+        const float v = activity_ / 0.30f;
+        return v < 0.f ? 0.f : v > 1.f ? 1.f : v;
+    }
+    // Palette like the burst dots: the feeding band fans across
+    // the spread from the base hue; same age envelope.
+    VizRgb colorFor(const VizFieldDot& d, const VisualizerSettings& st) const {
+        float cycle = 0.f;
+        if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
+        const float h = st.baseHue + cycle + (float)(d.band) * 0.5f * st.paletteSpread;
+        const float fadeIn = d.age < 0.4f ? 0.4f + 0.6f * (d.age / 0.4f) : 1.f;
+        const float fadeOut = d.age > d.life * 0.7f ? 1.f - (d.age - d.life * 0.7f) / (d.life * 0.3f + 1e-6f) : 1.f;
+        return vizHsvToRgb(h, st.saturation, (0.30f + 0.70f * fadeOut) * fadeIn * visibility());
+    }
+
+private:
+    std::uint32_t rng_ = 0x27d4eb2fu;
+    float next01() { // splitmix32, own stream (deterministic)
+        rng_ += 0x9e3779b9u;
+        std::uint32_t z = rng_;
+        z = (z ^ (z >> 16)) * 0x85ebca6bu;
+        z = (z ^ (z >> 13)) * 0xc2b2ae35u;
+        return (float)((z ^ (z >> 16)) >> 8) / 16777216.f;
+    }
+    VizFieldDot spawnDot(const float bandEnergy[3]) {
+        // Band pick weighted by energy (uniform when all quiet —
+        // the gate hides the field in silence anyway).
+        const float total = bandEnergy[0] + bandEnergy[1] + bandEnergy[2];
+        int band = 1;
+        if (total > 0.001f) {
+            const float r = next01() * total;
+            band = r < bandEnergy[0] ? 0 : r < bandEnergy[0] + bandEnergy[1] ? 1 : 2;
+        } else {
+            band = (int)(next01() * 3.f); if (band > 2) band = 2;
+        }
+        VizFieldDot d;
+        d.band = band;
+        d.x = vizBandFieldX(band, balance_) + (next01() - 0.5f) * 0.16f;
+        d.y = 0.08f + next01() * 0.84f;
+        d.x = d.x < 0.02f ? 0.02f : d.x > 0.98f ? 0.98f : d.x;
+        d.vx = 0; d.vy = 0;
+        d.age = 0; d.life = 2.5f + next01() * 3.f;
+        d.size = 1.4f + next01() * 2.0f;
+        // Join the vortex nearest the birthplace (x-led: the
+        // field positions are horizontal by design).
+        int best = 0; float bestScore = 1e9f;
+        for (int i = 0; i < kVortices; ++i) {
+            float cx, cy; vortexCentre(i, cx, cy);
+            const float score = std::abs(cx - d.x) + 0.5f * std::abs(cy - d.y);
+            if (score < bestScore) { bestScore = score; best = i; }
+        }
+        d.vortex = best;
+        return d;
+    }
+    std::vector<VizFieldDot> dots_;
+    float activity_ = 0;
+    float balance_ = 0;
     double time_ = 0;
 };
 
