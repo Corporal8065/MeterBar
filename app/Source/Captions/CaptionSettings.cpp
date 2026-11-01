@@ -16,6 +16,8 @@ CaptionSettingsData CaptionSettings::load() {
     if (modeName == "transcribe") d.mode = meterbar::CaptionMode::Transcribe;
     else if (modeName == "translate") d.mode = meterbar::CaptionMode::Translate;
     d.alwaysOnTop = (bool)v.getProperty("alwaysOnTop", true);
+    if (v.getProperty("presentation", "overlay").toString() == "docked")
+        d.presentation = 1;
     if (v.hasProperty("x") && v.hasProperty("y") && v.hasProperty("w")) {
         d.hasPosition = true;
         d.x = (int)v.getProperty("x", 0);
@@ -32,6 +34,7 @@ void CaptionSettings::save(const CaptionSettingsData& d) {
     obj->setProperty("schema", 1);
     obj->setProperty("mode", juce::String(meterbar::captionModeName(d.mode)));
     obj->setProperty("alwaysOnTop", d.alwaysOnTop);
+    obj->setProperty("presentation", d.presentation == 1 ? "docked" : "overlay");
     if (d.hasPosition) {
         obj->setProperty("x", d.x);
         obj->setProperty("y", d.y);

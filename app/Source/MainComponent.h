@@ -16,6 +16,8 @@
 #include <meterbar/Glyphs.hpp> // v0.22.2: icon glyphs as explicit UTF-8 bytes
 #include "BarLink.h" // v0.20.0 (k): family link client
 #include "Captions/CaptionController.h" // v0.23.0: Live Captions (MeterBar only)
+#include "Captions/CaptionStrip.h"      // v0.24.0: docked caption strip
+#include <meterbar/WindowGeom.hpp>      // v0.24.0: caption homing / dock growth (pure core)
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
 // the pair's PresetState::moduleFlex weights (their sum is preserved, so
@@ -101,6 +103,8 @@ private:
     void adjustMascotFlex(int dxPx);                              // v0.16: mascot cell splitter drag
     void uiClick(ClickSounds::Which w);                           // v0.16: Anime-gated cute click
     void syncScreenSpace();                                       // v0.18.1: feed one geometry/toggle observation to the reserve machine; act only on its transitions
+    void syncCaptionDock();                                       // v0.24.0: reconcile the bar's height with the docked-caption state (grow/shrink on transitions only) + feed the strip
+    meterbar::ReserveEdge captionAnchorEdge();                    // v0.24.0: the edge dock growth anchors at (reserved edge, else nearest)
     void doArrangeWindows();                                      // v0.18: sweep other windows clear of the bar (v0.19.1: on its docked edge)
     void doRestoreWindows();                                      // v0.18: undo the sweep
     // v0.19 updater; v0.19.2: wired to the real repo + launch check:
@@ -172,6 +176,12 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     double uiFpsMeasured = 0; juce::int64 lastFrameMs = 0; int clipCounter = 1;
     juce::File recordingFile_; // v0.21.4: the take currently being written (the Recordings menu omits it)
+    // v0.24.0: the docked caption strip (child component; content is
+    // plain strings pulled from the controller each tick, so member
+    // order vs captions_ carries no lifetime constraint).
+    CaptionStrip captionStrip_;
+    bool captionStripInHeight_ = false; // our strip growth is currently in the window height
+    static constexpr int kCaptionStripHeight = 76;
     // v0.23.0 Live Captions: declared late so it destructs BEFORE
     // engine (reverse declaration order) — the controller stops the
     // tap/streamer first, then engine teardown cannot call into a

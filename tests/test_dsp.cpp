@@ -1382,6 +1382,100 @@ int main() {
         CHECK(p5.lines.empty() && !p5.overflowed);
     }
 
+    // ---------- v0.24.0: caption overlay homing (WindowGeom) ----------
+    // Two 1920x1040 work areas side by side; the bar sits bottom-
+    // docked on the SECOND display. The overlay must home to the
+    // bar's display, not the primary's and not a stale saved spot.
+    {
+        const std::vector<IntRect> two{ {0, 0, 1920, 1040}, {1920, 0, 1920, 1040} };
+        const IntRect barD2{ 2220, 870, 1100, 170 }; // bottom edge 1040 = D2 bottom
+        // Saved on the OTHER display -> relocate to bottom-centre of
+        // the bar's display, raised above the bar it would overlap.
+        auto p = captionHomeRect(IntRect{ 300, 800, 900, 132 }, true, barD2, two, 132);
+        const IntRect wantHome{ 2430, 726, 900, 132 }; // x centred on D2; y = bar.y - 12 - h
+        CHECK(p.relocate);
+        CHECK(p.rect == wantHome);
+        // Saved mainly on the bar's own display -> keep placement.
+        auto keep = captionHomeRect(IntRect{ 2500, 700, 900, 132 }, true, barD2, two, 132);
+        CHECK(!keep.relocate);
+        // Saved straddling, >= half on the bar's display -> keep.
+        auto strad = captionHomeRect(IntRect{ 1700, 800, 900, 132 }, true, barD2, two, 132);
+        CHECK(!strad.relocate);
+        // Bar on D1, saved mostly on D2 -> relocate onto D1.
+        const IntRect barD1{ 400, 870, 1100, 170 };
+        auto toD1 = captionHomeRect(IntRect{ 1700, 800, 900, 132 }, true, barD1, two, 132);
+        CHECK(toD1.relocate && toD1.rect.right() <= 1920 && toD1.rect.x >= 0);
+        // No saved position -> default 900 wide, centred on the bar's display.
+        auto fresh = captionHomeRect(IntRect{}, false, barD2, two, 132);
+        CHECK(fresh.relocate && fresh.rect.w == 900 && fresh.rect.x == 2430);
+        // Oversized saved width clamps to the 1200 ceiling.
+        auto wide = captionHomeRect(IntRect{ 300, 800, 2000, 132 }, true, barD2, two, 132);
+        CHECK(wide.relocate && wide.rect.w == 1200);
+        // No displays known -> no opinion, keep whatever exists.
+        auto none = captionHomeRect(IntRect{ 300, 800, 900, 132 }, true, barD2, {}, 132);
+        CHECK(!none.relocate);
+        // Home rect that clears the bar keeps the 24 px bottom margin.
+        const IntRect barHigh{ 2220, 100, 1100, 170 };
+        auto clear = captionHomeRect(IntRect{ 300, 800, 900, 132 }, true, barHigh, two, 132);
+        CHECK(clear.relocate && clear.rect.bottom() == 1040 - 24);
+    }
+
+    // ---------- v0.24.0: caption dock growth + reservation/link ----------
+    // The docked strip grows the bar by the strip height, anchored at
+    // its docked edge. The reservation (strip derived from the bar's
+    // REAL rect) and the link stack (plans derived from the anchor's
+    // CURRENT rect) must follow the grown bounds exactly.
+    {
+        const IntRect bar{ 2220, 910, 1100, 170 };
+        const int stripH = 76;
+        auto grownB = captionGrownBarRect(bar, stripH, ReserveEdge::Bottom);
+        const IntRect wantGrownB{ 2220, 910 - stripH, 1100, 170 + stripH };
+        CHECK(grownB == wantGrownB);
+        CHECK(grownB.bottom() == bar.bottom()); // docked edge never moves
+        auto grownT = captionGrownBarRect(IntRect{ 100, 0, 1100, 170 }, stripH, ReserveEdge::Top);
+        const IntRect wantGrownT{ 100, 0, 1100, 170 + stripH };
+        const IntRect wantShrunkT{ 100, 0, 1100, 170 };
+        CHECK(grownT == wantGrownT);
+        CHECK(captionShrunkBarRect(grownB, stripH, ReserveEdge::Bottom) == bar);
+        CHECK(captionShrunkBarRect(grownT, stripH, ReserveEdge::Top) == wantShrunkT);
+        // Shrink floor: a bar manually shrunk while docked keeps 48 px.
+        auto floored = captionShrunkBarRect(IntRect{ 0, 500, 800, 100 }, stripH, ReserveEdge::Bottom);
+        CHECK(floored.h == 48 && floored.bottom() == 600);
+        // Reservation: bottom-docked bar registers with its own height
+        // as the strip thickness; after growth the machine emits
+        // exactly one Update and the strip IS the grown thickness —
+        // the reservation matches the real (grown) bounds.
+        const IntRect mon{ 1920, 0, 1920, 1080 };
+        ReserveMachine rm;
+        const EdgeGaps g0{ 910, 0, 300, 500 };
+        const IntRect wantStrip0{ 1920, 910, 1920, 170 };
+        const IntRect wantStrip1{ 1920, 910 - stripH, 1920, 170 + stripH };
+        CHECK(rm.update(true, g0, bar, mon, 7) == ReserveAction::Register);
+        CHECK(rm.edge() == ReserveEdge::Bottom);
+        CHECK(rm.requestedRect() == wantStrip0);
+        const EdgeGaps g1{ 910 - stripH, 0, 300, 500 }; // bottom gap unchanged by growth
+        CHECK(rm.update(true, g1, grownB, mon, 7) == ReserveAction::Update);
+        CHECK(rm.requestedRect() == wantStrip1);
+        CHECK(rm.update(true, g1, grownB, mon, 7) == ReserveAction::None); // no flap
+        CHECK(ReserveMachine::stripRect(ReserveEdge::Bottom, grownB, mon).h == 170 + stripH);
+        // Link stack: a follower group-docks flush against the GROWN
+        // leader rect, and a one-click stack plan from the grown
+        // anchor puts the follower above the grown bar, not the old.
+        auto gd = groupDockRect(grownB, IntRect{ 0, 0, 900, 56 }, ReserveEdge::Bottom);
+        CHECK(gd.y == grownB.y - 56 && gd.x == grownB.x);
+        LinkShared sh;
+        const long long now = 100000;
+        sh.slots[0].appId = kLinkAppMeter; sh.slots[0].heartbeatMs = now; sh.slots[0].linked = 1;
+        sh.slots[0].rect = grownB; sh.slots[0].stackSeq = 1;
+        sh.slots[0].stackEdge = (int)ReserveEdge::Bottom; sh.slots[0].stackAnchor = grownB;
+        sh.slots[1].appId = kLinkAppTicker; sh.slots[1].heartbeatMs = now; sh.slots[1].linked = 1;
+        sh.slots[1].rect = IntRect{ 2220, 910 - 56, 900, 56 }; // stacked vs the UNgrown bar
+        IntRect targets[3];
+        const IntRect wantTarget{ 2220, grownB.y - 56, 900, 56 };
+        CHECK(planStackAll(sh, now, kLinkAppMeter, targets) == 2);
+        CHECK(targets[1] == wantTarget);
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -131,6 +131,10 @@ MainComponent::MainComponent() {
     // v0.16: one extra splitter for the mascot cell's leading edge.
     addAndMakeVisible(mascot); mascot.setVisible(false); // Anime theme only (applyTheme drives); added before the splitters so they paint on top
     for (int i = 0; i < 6; ++i) { auto s = std::make_unique<ModuleSplitter>(); addAndMakeVisible(s.get()); splitters.push_back(std::move(s)); }
+    // v0.24.0: the docked caption strip — added after the modules so
+    // it paints above them; hidden until docked captions turn on
+    // (syncCaptionDock drives its visibility + the bar's growth).
+    addAndMakeVisible(captionStrip_); captionStrip_.setVisible(false);
     spectro.prepare(256, 220); waveHist.prepare(512); scope.prepare(2048);
     settingsWin = std::make_unique<SettingsWindow>();
     settingsWin->content.st = &engine.state;
@@ -395,8 +399,69 @@ void MainComponent::resized() {
     }
     if (st.showToolbar) for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setVisible(true);
     logoLabel.setVisible(st.showToolbar); versionLabel.setVisible(st.showToolbar);
+    // v0.24.0: the docked caption strip owns the bottom band of the
+    // (grown) bar; layoutModules() leaves that band out of its area.
+    if (captionStripInHeight_)
+        captionStrip_.setBounds(0, getHeight() - kCaptionStripHeight, getWidth(), kCaptionStripHeight);
     layoutModules();
     syncScreenSpace(); // v0.18.1: a resize is a reserve-machine event (bar height / position may have changed)
+}
+// v0.24.0: which edge caption-dock growth anchors at — the edge the
+// reserve machine currently holds when the bar is reserved (growth
+// must not move the registered edge), else the nearest edge by the
+// native gaps (the bar's own dock test's inputs), else Bottom (the
+// family bars' home edge).
+meterbar::ReserveEdge MainComponent::captionAnchorEdge() {
+    if (reserveMachine.reserved()) return reserveMachine.edge();
+#if JUCE_WINDOWS
+    auto* w = findParentComponentOfClass<juce::DocumentWindow>();
+    HWND hwnd = (w && w->getPeer()) ? static_cast<HWND>(w->getPeer()->getNativeHandle()) : nullptr;
+    if (hwnd) {
+        RECT wr{}; GetWindowRect(hwnd, &wr);
+        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{}; mi.cbSize = sizeof mi;
+        if (GetMonitorInfoW(mon, &mi)) {
+            const int gapTop = std::abs(wr.top - mi.rcMonitor.top);
+            const int gapBottom = std::abs(mi.rcMonitor.bottom - wr.bottom);
+            return gapBottom <= gapTop ? meterbar::ReserveEdge::Bottom : meterbar::ReserveEdge::Top;
+        }
+    }
+#endif
+    return meterbar::ReserveEdge::Bottom;
+}
+// v0.24.0: the docked-caption reconciliation, run every UI tick
+// after captions_.poll(). Content flows to the strip continuously
+// (change-detected inside it); the WINDOW only moves on a state
+// transition — docked captions turning on grows the bar by the
+// strip height, turning off (menu Off, presentation flip, or the
+// controller's own error auto-off) shrinks it back. The growth is
+// applied through the top level's setBounds, so it rides the exact
+// feeds every other geometry change rides: MainWindow::resized ->
+// notifyWindowGeometryChanged -> the reserve machine (which reads
+// the grown rect and Updates the strip to the new real thickness)
+// and the link client (which leads the change to linked followers;
+// stack plans and group-dock read the new rect). No side channel,
+// no cached height anywhere.
+void MainComponent::syncCaptionDock() {
+    const bool want = captions_.dockedActive();
+    if (want) {
+        const auto c = captions_.dockedContent();
+        captionStrip_.setContent(c.previous, c.current, c.currentFinal, c.badge, c.pill);
+    }
+    if (want == captionStripInHeight_) {
+        captionStrip_.setVisible(want);
+        return;
+    }
+    auto* tl = getTopLevelComponent();
+    if (tl == nullptr) return; // window not up yet — the next tick retries
+    const auto b = tl->getBounds();
+    const meterbar::IntRect cur{ b.getX(), b.getY(), b.getWidth(), b.getHeight() };
+    const auto nb = want ? meterbar::captionGrownBarRect(cur, kCaptionStripHeight, captionAnchorEdge())
+                         : meterbar::captionShrunkBarRect(cur, kCaptionStripHeight, captionAnchorEdge());
+    captionStripInHeight_ = want;
+    tl->setBounds(nb.x, nb.y, nb.w, nb.h);
+    captionStrip_.setVisible(want);
+    captionStrip_.toFront(false);
 }
 // v0.8: the WHOLE top bar drags the window (buttons still click normally —
 // their events never reach here; labels let clicks fall through).
@@ -434,6 +499,7 @@ void MainComponent::adjustFlex(int leftFlexIdx, int rightFlexIdx, int dxPx) {
     auto& st = engine.state;
     float totalFlex = 0.f; for (auto& m : modules) if (m->isVisible()) totalFlex += st.moduleFlex[(size_t)m->flexIndex];
     auto area = getLocalBounds(); if (st.showToolbar) area.removeFromTop(30);
+    if (captionStripInHeight_) area.removeFromBottom(kCaptionStripHeight); // v0.24.0: same content area as layoutModules
     if (totalFlex <= 0.f || area.getWidth() <= 0) return;
     float dw = (float)dxPx * totalFlex / (float)area.getWidth();
     float pair = st.moduleFlex[(size_t)leftFlexIdx] + st.moduleFlex[(size_t)rightFlexIdx];
@@ -444,6 +510,7 @@ void MainComponent::adjustFlex(int leftFlexIdx, int rightFlexIdx, int dxPx) {
 }
 void MainComponent::layoutModules() {
     auto area = getLocalBounds(); if (engine.state.showToolbar) area.removeFromTop(30);
+    if (captionStripInHeight_) area.removeFromBottom(kCaptionStripHeight); // v0.24.0: the docked strip's band is not module space
     std::vector<ModuleView*> vis;
     auto& st = engine.state;
     for (auto& m : modules) {
@@ -614,6 +681,7 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
 void MainComponent::timerCallback() {
     pollUpdater(); // v0.19: surface a finished background update check / download on the message thread
     captions_.poll(); // v0.23.0: Live Captions — drain helper events, track pause/source/epoch edges, drive the overlay
+    syncCaptionDock(); // v0.24.0: docked presentation — feed the strip; grow/shrink the bar on state transitions
     auto now = juce::Time::getCurrentTime().toMilliseconds();
     // v0.18.1: NO screen-space work happens here any more. The v0.18
     // ~4x/sec timer poll of syncScreenSpace() was the flicker's engine;
@@ -792,7 +860,8 @@ enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
        idArrange=6001, idRestore, idMinimize, // v0.22.0: compressed toolbar items in the hamburger menu
        idInDevBase=3300, idOutDevBase=3400,
        idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101, // v0.21.4: Recordings submenu (idRecBase + up to 25 entries)
-       idLcOff=7001, idLcTranscribe, idLcTranslate, idLcTop, idLcMove, idLcResetPos, idLcSetup, idLcStatus }; // v0.23.0: Live Captions submenu
+       idLcOff=7001, idLcTranscribe, idLcTranslate, idLcTop, idLcMove, idLcResetPos, idLcSetup, idLcStatus,
+       idLcPresentOverlay, idLcPresentDocked }; // v0.23.0: Live Captions submenu; v0.24.0: presentation flip ids
 void MainComponent::savePresetInteractive(bool saveAs) {
     auto& st = engine.state;
     if (!saveAs && st.name != "Default" && !st.name.empty()) { presetio::save(st, juce::String(st.name)); return; }
@@ -818,6 +887,13 @@ void MainComponent::loadPresetFile(const juce::File& f) {
             }
             auto clamped = meterbar::clampRectToWorkAreas(
                 { engine.state.windowX, engine.state.windowY, engine.state.windowW, engine.state.windowH }, areas);
+            // v0.24.0: a preset's saved size is the USER's bar size —
+            // while the docked strip is in the height, the applied
+            // rect is the preset rect grown by the strip, anchored
+            // like any dock growth, so the strip never eats module
+            // space the preset promised.
+            if (captionStripInHeight_)
+                clamped = meterbar::captionGrownBarRect(clamped, kCaptionStripHeight, captionAnchorEdge());
             tl->setBounds(clamped.x, clamped.y, clamped.w, clamped.h);
         }
     }
@@ -981,8 +1057,15 @@ void MainComponent::showHamburgerMenu() {
         lc.addItem(idLcTranslate, "Translate to English", true, cmode == meterbar::CaptionMode::Translate);
         lc.addSeparator();
         lc.addItem(idLcTop, "Always on Top", true, captions_.overlayAlwaysOnTop());
-        lc.addItem(idLcMove, "Move Caption Window");
-        lc.addItem(idLcResetPos, "Reset Caption Position");
+        lc.addSeparator();
+        // v0.24.0: the presentation flip (Jackson's ask) — captions in
+        // their own window, or docked as a strip inside the bar. The
+        // overlay-only actions below disable while docked.
+        const bool docked = captions_.presentationDocked();
+        lc.addItem(idLcPresentOverlay, "Separate Caption Window", true, !docked);
+        lc.addItem(idLcPresentDocked, "Docked in MeterBar", true, docked);
+        lc.addItem(idLcMove, "Move Caption Window", !docked);
+        lc.addItem(idLcResetPos, "Reset Caption Position", !docked);
         lc.addSeparator();
         if (captions_.setupNeeded()) lc.addItem(idLcSetup, "Set Up Caption Runtime...");
         lc.addItem(idLcStatus, captions_.statusText(), false);
@@ -1045,6 +1128,8 @@ void MainComponent::showHamburgerMenu() {
         else if (r == idLcTranscribe) captions_.setMode(meterbar::CaptionMode::Transcribe);
         else if (r == idLcTranslate) captions_.setMode(meterbar::CaptionMode::Translate);
         else if (r == idLcTop) captions_.setOverlayAlwaysOnTop(!captions_.overlayAlwaysOnTop());
+        else if (r == idLcPresentOverlay) captions_.setPresentation(false);
+        else if (r == idLcPresentDocked) captions_.setPresentation(true);
         else if (r == idLcMove) captions_.moveCaptionWindow();
         else if (r == idLcResetPos) captions_.resetCaptionPosition();
         else if (r == idLcSetup) captions_.launchSetup();

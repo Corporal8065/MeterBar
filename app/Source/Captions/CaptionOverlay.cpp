@@ -259,11 +259,39 @@ void CaptionOverlay::restoreBounds(int x, int y, int w, bool hasPosition) {
 }
 
 void CaptionOverlay::resetPosition() {
-    hasPosition_ = false;
-    if (!window_) return;
-    const auto b = defaultBounds(window_->getHeight());
-    window_->setBounds(b);
-    if (onBoundsChanged) onBoundsChanged();
+    // v0.24.0: the default position is the home rect on the BAR'S
+    // display now (the v1 primary-display default could strand the
+    // reset overlay on the wrong monitor — the same defect the
+    // homing rule fixes for show time).
+    homeToBarDisplay(true);
+}
+
+bool CaptionOverlay::isVisible() const {
+    return window_ && window_->isVisible();
+}
+
+void CaptionOverlay::homeToBarDisplay(bool force) {
+    if (!window_ || !barBoundsProvider) return;
+    if (content_ && content_->moveMode) return; // the user is dragging it
+    std::vector<meterbar::IntRect> areas;
+    for (auto& d : juce::Desktop::getInstance().getDisplays().displays)
+        areas.push_back({ d.userArea.getX(), d.userArea.getY(),
+                          d.userArea.getWidth(), d.userArea.getHeight() });
+    const auto bar = barBoundsProvider();
+    if (areas.empty() || bar.isEmpty()) return;
+    const auto cur = window_->getBounds();
+    const auto plan = meterbar::captionHomeRect(
+        { cur.getX(), cur.getY(), cur.getWidth(), cur.getHeight() },
+        hasPosition_ && !force,
+        { bar.getX(), bar.getY(), bar.getWidth(), bar.getHeight() },
+        areas, cur.getHeight());
+    if (plan.relocate) {
+        window_->setBounds(plan.rect.x, plan.rect.y, plan.rect.w, plan.rect.h);
+        hasPosition_ = true;
+        if (onBoundsChanged) onBoundsChanged();
+    } else if (window_->isVisible()) {
+        window_->toFront(false); // already home: just raise it
+    }
 }
 
 juce::Rectangle<int> CaptionOverlay::bounds() const {

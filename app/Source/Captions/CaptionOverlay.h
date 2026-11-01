@@ -38,6 +38,15 @@ public:
     void resetPosition();
     juce::Rectangle<int> bounds() const;
     bool hasPosition() const { return hasPosition_; }
+    bool isVisible() const;
+
+    // v0.24.0: bring the overlay onto the display MeterBar is on.
+    // A saved placement already mainly on that display is kept (the
+    // window is only raised); anything else relocates to the home
+    // rect the pure core computes (meterbar::captionHomeRect).
+    // force = recompute the home rect ignoring the saved placement
+    // (Reset Caption Position). Never yanks a window in move mode.
+    void homeToBarDisplay(bool force);
 
     void enterMoveMode();
     void exitMoveMode();

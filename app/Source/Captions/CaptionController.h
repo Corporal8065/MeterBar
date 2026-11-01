@@ -28,6 +28,22 @@ public:
     meterbar::CaptionMode mode() const { return settings_.mode; }
     void setMode(meterbar::CaptionMode m);
 
+    // v0.24.0: presentation flip — the separate overlay window, or a
+    // strip docked inside MeterBar (MainComponent owns the strip and
+    // the bar's growth; this controller owns the choice + content).
+    bool presentationDocked() const { return settings_.presentation == 1; }
+    void setPresentation(bool docked);
+    bool dockedActive() const {
+        return settings_.mode != meterbar::CaptionMode::Off && presentationDocked();
+    }
+    // The strip's renderable content, same model + badge + pill the
+    // overlay would show (MainComponent polls this every UI tick).
+    struct DockedContent {
+        juce::String previous, current, badge, pill;
+        bool currentFinal = false;
+    };
+    DockedContent dockedContent() const;
+
     juce::String statusText() const; // the menu's disabled status item
     bool setupNeeded() const { return setupNeeded_; }
     void launchSetup();
@@ -48,6 +64,8 @@ private:
     juce::String sourceClass() const;  // "system" | "microphone"
     juce::String sourceLabel() const;  // "SYSTEM AUDIO" | "MICROPHONE"
     juce::String statusBadge() const;  // overlay status strip
+    juce::String statusPill() const;   // no-caption status line (may be empty)
+    void presentOverlay();             // v0.24.0: home the overlay to the bar's display + push
     void pushOverlay(bool force);
 
     AudioEngine* engine_ = nullptr;

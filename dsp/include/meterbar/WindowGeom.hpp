@@ -98,4 +98,115 @@ inline IntRect ensureRectVisible(IntRect r, const std::vector<IntRect>& areas) {
     if (r.h < a.h && r.y > a.bottom() - r.h) r.y = a.bottom() - r.h;
     return r;
 }
+
+// ------------------------------------------------------------------
+// CAPTION OVERLAY HOMING (v0.24.0) — Jackson's field report on
+// v0.23.2: he enabled captions and the overlay appeared on his
+// OTHER monitor, behind his game. Cause: when captions are shown,
+// the overlay's saved position (or the primary-display default) is
+// trusted blindly, wherever MeterBar itself currently lives. The
+// rule now: whenever captions are (re)shown, the overlay belongs
+// on the display the BAR is on. A saved rect that already sits
+// mainly (>= half its area) on the bar's display is kept verbatim
+// — the user's placement wins; anything else relocates to
+// bottom-centre of the bar's display work area, using the v1
+// default placement's sizing and margins (width clamped
+// 560..1200 and to at most 92% of the work area, bottom edge
+// 24 px above the work-area bottom, raised to sit 12 px above the
+// bar when the home rect would intersect it). Pure: the app feeds
+// the displays' user areas and the overlay's current height.
+struct CaptionHomePlan {
+    bool relocate = false;  // false: keep the saved rect, just raise
+    IntRect rect{};         // the rect to apply when relocate is true
+};
+
+namespace windowgeom_detail {
+// The work area a rect belongs to: largest overlap wins; when it
+// overlaps none, the nearest area centre (the clamp's pick rule).
+inline int dominantAreaIndex(const IntRect& r, const std::vector<IntRect>& areas) {
+    int best = 0;
+    long long bestOverlap = 0;
+    for (size_t i = 0; i < areas.size(); ++i) {
+        const long long ov = rectOverlapArea(r, areas[i]);
+        if (ov > bestOverlap) { bestOverlap = ov; best = (int)i; }
+    }
+    if (bestOverlap > 0) return best;
+    long long bestD2 = -1;
+    const long long cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    for (size_t i = 0; i < areas.size(); ++i) {
+        const long long ax = areas[i].x + areas[i].w / 2, ay = areas[i].y + areas[i].h / 2;
+        const long long d2 = (ax - cx) * (ax - cx) + (ay - cy) * (ay - cy);
+        if (bestD2 < 0 || d2 < bestD2) { bestD2 = d2; best = (int)i; }
+    }
+    return best;
+}
+} // namespace windowgeom_detail
+
+inline CaptionHomePlan captionHomeRect(IntRect saved, bool hasSaved, IntRect bar,
+                                       const std::vector<IntRect>& workAreas,
+                                       int overlayHeight) {
+    CaptionHomePlan plan;
+    if (workAreas.empty() || bar.w <= 0 || bar.h <= 0) return plan;
+    const int barArea = windowgeom_detail::dominantAreaIndex(bar, workAreas);
+    if (hasSaved && saved.w > 0 && saved.h > 0) {
+        const int savedArea = windowgeom_detail::dominantAreaIndex(saved, workAreas);
+        if (savedArea == barArea
+            && rectOverlapArea(saved, workAreas[(size_t)savedArea]) * 2
+                   >= (long long)saved.w * (long long)saved.h)
+            return plan; // already mainly on the bar's display: keep
+    }
+    const IntRect& a = workAreas[(size_t)barArea];
+    int w = (hasSaved && saved.w > 0) ? saved.w : 900;
+    w = w < 560 ? 560 : (w > 1200 ? 1200 : w);
+    const int maxW = (int)(a.w * 0.92);
+    if (w > maxW) w = maxW < 280 ? a.w : maxW;
+    if (w > a.w) w = a.w;
+    int h = overlayHeight > 0 ? overlayHeight : 132;
+    if (h < 40) h = 40;
+    if (h > a.h) h = a.h;
+    IntRect out{ a.x + (a.w - w) / 2, a.bottom() - 24 - h, w, h };
+    if (rectOverlapArea(out, bar) > 0) out.y = bar.y - 12 - h; // above the bar
+    if (out.y < a.y) out.y = a.y;
+    if (out.bottom() > a.bottom()) out.y = a.bottom() - h;
+    if (out.x < a.x) out.x = a.x;
+    if (out.right() > a.right()) out.x = a.right() - w;
+    plan.relocate = true;
+    plan.rect = out;
+    return plan;
+}
+
+// ------------------------------------------------------------------
+// CAPTION DOCK GROWTH (v0.24.0) — the docked caption presentation
+// renders a strip inside MeterBar along the bottom of the bar, so
+// the window grows by the strip height while docked captions are
+// on and shrinks back when they end. Growth is anchored at the
+// bar's docked (or nearest) edge: the docked edge's own coordinate
+// never moves, so the edge gap the reserve machine observes is
+// unchanged and a reserved bar stays reserved on the same edge —
+// the machine reads the grown rect on the next geometry event and
+// emits exactly one Update whose strip is derived from the NEW
+// rect (ReserveMachine::stripRect takes the bar's far edge as the
+// thickness). The BLK4 stack plans likewise read the anchor's
+// current rect, so followers re-stack flush against the grown
+// bar. Nothing in either system caches a height this could desync.
+// The shrink restores the pre-growth size exactly (height floor
+// 48 px: a bar manually shrunk below strip+floor while docked
+// keeps the floor, and only the applied delta is un-grown).
+inline IntRect captionGrownBarRect(IntRect bar, int stripH, ReserveEdge anchor) {
+    if (stripH <= 0 || bar.w <= 0 || bar.h <= 0) return bar;
+    if (anchor == ReserveEdge::Top) return IntRect{ bar.x, bar.y, bar.w, bar.h + stripH };
+    // Bottom (and Left/Right — the family bars are horizontal, so
+    // their dock axis is vertical): the bottom edge stays put.
+    return IntRect{ bar.x, bar.y - stripH, bar.w, bar.h + stripH };
+}
+
+inline IntRect captionShrunkBarRect(IntRect bar, int stripH, ReserveEdge anchor) {
+    if (stripH <= 0 || bar.w <= 0 || bar.h <= 0) return bar;
+    const int minH = 48;
+    int h = bar.h - stripH;
+    if (h < minH) h = minH;
+    const int delta = bar.h - h; // what was actually applied
+    if (anchor == ReserveEdge::Top) return IntRect{ bar.x, bar.y, bar.w, h };
+    return IntRect{ bar.x, bar.y + delta, bar.w, h };
+}
 } // namespace meterbar

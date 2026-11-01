@@ -12,6 +12,9 @@ struct CaptionSettingsData {
     bool alwaysOnTop = true;
     bool hasPosition = false;
     int x = 0, y = 0, w = 900;
+    // v0.24.0: presentation flip — 0 = separate overlay window
+    // (the v1 default), 1 = docked strip inside MeterBar.
+    int presentation = 0;
 };
 
 class CaptionSettings {

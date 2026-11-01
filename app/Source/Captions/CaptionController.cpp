@@ -53,7 +53,16 @@ juce::String CaptionController::sourceLabel() const {
 }
 
 void CaptionController::setMode(meterbar::CaptionMode m) {
-    if (m == settings_.mode) return;
+    if (m == settings_.mode) {
+        // v0.24.0: re-selecting the active mode is a "show me the
+        // captions" click — bring the surface to the bar's display
+        // (Jackson's field ask: captions must come to the window
+        // MeterBar is on). Docked needs nothing: the strip is in
+        // the bar by construction.
+        if (m != meterbar::CaptionMode::Off && !presentationDocked())
+            presentOverlay();
+        return;
+    }
     settings_.mode = m;
     persistSettings();
     if (m == meterbar::CaptionMode::Off) {
@@ -70,6 +79,56 @@ void CaptionController::setMode(meterbar::CaptionMode m) {
     helperWanted_ = true;
     restartCount_ = 0;
     startHelper();
+    if (!presentationDocked()) presentOverlay(); // home before the first show
+}
+
+void CaptionController::presentOverlay() {
+    overlay_.homeToBarDisplay(false);
+    pushOverlay(true);
+}
+
+void CaptionController::setPresentation(bool docked) {
+    const int want = docked ? 1 : 0;
+    if (settings_.presentation == want) {
+        if (!docked && settings_.mode != meterbar::CaptionMode::Off)
+            presentOverlay();
+        return;
+    }
+    settings_.presentation = want;
+    persistSettings();
+    lastPushedKey_.clear(); // the other surface must repaint in full
+    if (docked) { overlay_.hide(); return; }
+    if (settings_.mode != meterbar::CaptionMode::Off) presentOverlay();
+}
+
+juce::String CaptionController::statusPill() const {
+    if (!engine_) return {};
+    const auto t = nowMs();
+    if (lastSource_ == "Test Tone") return {}; // menu carries the explanation
+    if (helperState_ == "starting" || helperState_ == "loading_model")
+        return "Live captions: loading model…";
+    if (helperState_ == "game_hold") return "Live captions paused — game running";
+    if (helperState_ == "gpu_busy") return "Live captions paused — GPU busy";
+    if (helperState_ == "setup_needed") return "Live captions: setup needed — see the Menu";
+    if (helperState_ == "error") return "Live captions: error — see the Menu";
+    if (engine_->paused.load()) return "Live captions: paused";
+    if ((helperState_ == "listening" || helperState_ == "cpu_degraded")
+        && readyMs_ > 0 && t - readyMs_ < 3000)
+        return "Live captions: listening…";
+    return {};
+}
+
+CaptionController::DockedContent CaptionController::dockedContent() const {
+    DockedContent c;
+    const auto view = display_.view(nowMs());
+    if (view.hasPrevious) c.previous = juce::String(view.previous.text);
+    if (view.hasCurrent) {
+        c.current = juce::String(view.current.text);
+        c.currentFinal = view.current.final;
+    }
+    c.badge = statusBadge();
+    if (!view.hasCurrent && !view.hasPrevious) c.pill = statusPill();
+    return c;
 }
 
 void CaptionController::startHelper() {
@@ -95,7 +154,12 @@ void CaptionController::setOverlayAlwaysOnTop(bool on) {
     persistSettings();
 }
 
-void CaptionController::moveCaptionWindow() { overlay_.enterMoveMode(); }
+void CaptionController::moveCaptionWindow() {
+    // v0.24.0: the move starts from the bar's display, like every
+    // other show of the overlay.
+    if (!overlay_.isVisible()) overlay_.homeToBarDisplay(false);
+    overlay_.enterMoveMode();
+}
 void CaptionController::resetCaptionPosition() { overlay_.resetPosition(); }
 
 void CaptionController::launchSetup() {
@@ -270,6 +334,11 @@ void CaptionController::pushOverlay(bool force) {
     if (!force && t - lastOverlayPushMs_ < 250) return;
     lastOverlayPushMs_ = t;
     if (settings_.mode == CaptionMode::Off) { overlay_.hide(); return; }
+    if (presentationDocked()) { overlay_.hide(); return; }
+    // v0.24.0: a fresh appearance homes to the bar's display first.
+    // While the overlay stays visible its placement is untouched —
+    // homing is a show-time rule, not a tracking rule.
+    if (!overlay_.isVisible()) overlay_.homeToBarDisplay(false);
 
     const auto view = display_.view(t);
     juce::String key;
@@ -288,18 +357,7 @@ void CaptionController::pushOverlay(bool force) {
         return;
     }
     // No blocks: a status pill only when there is something to say.
-    juce::String pill;
-    if (lastSource_ == "Test Tone") pill = ""; // menu carries the explanation
-    else if (helperState_ == "starting" || helperState_ == "loading_model")
-        pill = "Live captions: loading model…";
-    else if (helperState_ == "game_hold") pill = "Live captions paused — game running";
-    else if (helperState_ == "gpu_busy") pill = "Live captions paused — GPU busy";
-    else if (helperState_ == "setup_needed") pill = "Live captions: setup needed — see the Menu";
-    else if (helperState_ == "error") pill = "Live captions: error — see the Menu";
-    else if (engine_->paused.load()) pill = "Live captions: paused";
-    else if ((helperState_ == "listening" || helperState_ == "cpu_degraded")
-             && readyMs_ > 0 && t - readyMs_ < 3000)
-        pill = "Live captions: listening…";
+    const juce::String pill = statusPill();
     key = "pill|" + pill;
     if (key != lastPushedKey_) {
         lastPushedKey_ = key;
