@@ -96,7 +96,7 @@ MainComponent::MainComponent() {
     // unchanged, so existing users keep it.
     burgerBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showHamburgerMenu(); };
     settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true); };
-    pauseBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); engine.paused = !engine.paused.load(); pauseBtn.setButtonText(engine.paused ? "▶" : "⏸"); }; // v0.22.0: glyph swap replaces the Pause/Resume text swap
+    pauseBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); engine.paused = !engine.paused.load(); pauseBtn.setButtonText(engine.paused ? juce::String::fromUTF8(meterbar::glyphPlayUtf8()) : juce::String::fromUTF8(meterbar::glyphPauseUtf8())); }; // v0.22.0: glyph swap replaces the Pause/Resume text swap; v0.22.2: explicit UTF-8 bytes (see meterbar/Glyphs.hpp)
     recBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleRecord(); };
     // v0.19.2: the update indicator lives in the toolbar but starts
     // hidden and stays hidden until a check actually finds a newer

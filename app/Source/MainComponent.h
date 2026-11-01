@@ -13,6 +13,7 @@
 #include "MeterBarVersion.h" // v0.19: generated — single-source version
 #include <meterbar/ReserveState.hpp>
 #include <meterbar/Visualizer.hpp> // v0.20.0
+#include <meterbar/Glyphs.hpp> // v0.22.2: icon glyphs as explicit UTF-8 bytes
 #include "BarLink.h" // v0.20.0 (k): family link client
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
@@ -114,9 +115,15 @@ private:
     // as glyph buttons with tooltips; Presets, Arrange, Restore,
     // Reposition, Minimize and Quit live in the hamburger menu now.
     // (v0.21.2 had already moved Reserve into the Reposition menu.)
-    juce::TextButton linkBtn{"🔗"};                               // v0.20.0 (k)
-    juce::TextButton recBtn{"🔴"}, pauseBtn{"⏸"},
-                     settingsBtn{"⚙"}, burgerBtn{"☰"};
+    // v0.22.2: glyph text is built from the core's explicit UTF-8
+    // byte escapes via fromUTF8 — the raw literals used up to
+    // v0.22.1 were decoded as Windows-1252 by MSVC and reached the
+    // buttons as mojibake (see meterbar/Glyphs.hpp).
+    juce::TextButton linkBtn{juce::String::fromUTF8(meterbar::glyphLinkUtf8())}; // v0.20.0 (k)
+    juce::TextButton recBtn{juce::String::fromUTF8(meterbar::glyphRecordUtf8())},
+                     pauseBtn{juce::String::fromUTF8(meterbar::glyphPauseUtf8())},
+                     settingsBtn{juce::String::fromUTF8(meterbar::glyphSettingsUtf8())},
+                     burgerBtn{juce::String::fromUTF8(meterbar::glyphMenuUtf8())};
     BarLinkClient linkClient_{ meterbar::kLinkAppMeter };        // v0.20.0 (k)
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
     meterbar::ReserveMachine reserveMachine;                      // v0.18.1: event-driven dock/reserve decisions (hysteresis) — replaces the v0.18 ~4x/sec timer poll

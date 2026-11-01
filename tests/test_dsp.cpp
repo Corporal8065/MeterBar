@@ -1,6 +1,7 @@
 // MeterBar DSP core tests — plain asserts, no framework.
 #define _USE_MATH_DEFINES // MSVC: expose M_PI from <cmath> (kit fix v0.6)
 #include <cstdio>
+#include <cstdint>
 #include <cmath>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -25,6 +26,7 @@
 #include "../dsp/include/meterbar/Recordings.hpp"
 #include "../dsp/include/meterbar/WindowGeom.hpp"
 #include "../dsp/include/meterbar/BoundedThread.hpp"
+#include "../dsp/include/meterbar/Glyphs.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -1240,6 +1242,48 @@ int main() {
         // full-brightness 255 this check was written against.
         CHECK(brightest > 100);
         CHECK(brightest <= (int)std::lround(255.f * meterbar::VisualizerEngine::kAmbientPeak) + 1);
+    }
+
+    // ---- Glyphs (v0.22.2): the toolbar icon glyphs must be
+    // EXACTLY the UTF-8 encoding of their codepoints. The field
+    // failure was mojibake — MSVC decoded the raw literals as
+    // Windows-1252, so each sequence's first byte surfaced as a
+    // Latin-1 char (0xF0, 0xE2; Jackson's v0.22.1
+    // screenshot). Pin every glyph two ways: against an
+    // independent codepoint->UTF-8 encoder written here, and
+    // against the byte sequences themselves.
+    {
+        auto encodeUtf8 = [](std::uint32_t cp) {
+            std::string out;
+            if (cp < 0x80) {
+                out += (char)cp;
+            } else if (cp < 0x800) {
+                out += (char)(0xC0 | (cp >> 6));
+                out += (char)(0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+                out += (char)(0xE0 | (cp >> 12));
+                out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                out += (char)(0x80 | (cp & 0x3F));
+            } else {
+                out += (char)(0xF0 | (cp >> 18));
+                out += (char)(0x80 | ((cp >> 12) & 0x3F));
+                out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                out += (char)(0x80 | (cp & 0x3F));
+            }
+            return out;
+        };
+        CHECK(std::string(meterbar::glyphLinkUtf8()) == encodeUtf8(0x1F517));
+        CHECK(std::string(meterbar::glyphLinkUtf8()) == std::string("\xF0\x9F\x94\x97", 4));
+        CHECK(std::string(meterbar::glyphRecordUtf8()) == encodeUtf8(0x1F534));
+        CHECK(std::string(meterbar::glyphRecordUtf8()) == std::string("\xF0\x9F\x94\xB4", 4));
+        CHECK(std::string(meterbar::glyphPauseUtf8()) == encodeUtf8(0x23F8));
+        CHECK(std::string(meterbar::glyphPauseUtf8()) == std::string("\xE2\x8F\xB8", 3));
+        CHECK(std::string(meterbar::glyphPlayUtf8()) == encodeUtf8(0x25B6));
+        CHECK(std::string(meterbar::glyphPlayUtf8()) == std::string("\xE2\x96\xB6", 3));
+        CHECK(std::string(meterbar::glyphSettingsUtf8()) == encodeUtf8(0x2699));
+        CHECK(std::string(meterbar::glyphSettingsUtf8()) == std::string("\xE2\x9A\x99", 3));
+        CHECK(std::string(meterbar::glyphMenuUtf8()) == encodeUtf8(0x2630));
+        CHECK(std::string(meterbar::glyphMenuUtf8()) == std::string("\xE2\x98\xB0", 3));
     }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);

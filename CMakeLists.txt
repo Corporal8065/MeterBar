@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.22)
 # installer. Before v0.19 the version was hard-coded in six places and
 # they were guaranteed to drift; do not add a seventh. Bump it here,
 # only here.
-project(MeterBar VERSION 0.22.1 LANGUAGES C CXX)
+project(MeterBar VERSION 0.22.2 LANGUAGES C CXX)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/app/MeterBarVersion.h.in
                ${CMAKE_BINARY_DIR}/generated/MeterBarVersion.h)
 # v0.15 distribution: link the MSVC runtime STATICALLY (/MT release,
@@ -18,6 +18,13 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/app/MeterBarVersion.h.in
 # linking + the vc_redist bundled by MeterBar.iss (see README_TEST).
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  # v0.22.2: /utf-8 — pin the source AND execution character sets
+  # to UTF-8, so no non-ASCII literal anywhere can ever again be
+  # decoded as Windows-1252 (the icon-glyph mojibake in Jackson's
+  # v0.22.1 screenshot; the glyphs themselves now also travel as
+  # explicit byte escapes — see dsp/include/meterbar/Glyphs.hpp).
+  # MSVC-only; inert elsewhere.
+  add_compile_options(/utf-8)
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
