@@ -41,6 +41,58 @@ private:
     int lastX = 0;
 };
 
+// v0.26.1: button text with the TEXT POP (TextPop.h). Stock V4
+// in every respect except drawButtonText, which mirrors
+// LookAndFeel_V2's geometry exactly and adds the hard offset
+// backing pass — the stock bare glyph/text washed out over the
+// bar's translucent toolbar, the same failure as the module text.
+class PoppedButtonLookAndFeel : public juce::LookAndFeel_V4 {
+public:
+    void drawButtonText(juce::Graphics& g, juce::TextButton& button,
+                        bool /*shouldDrawButtonAsHighlighted*/, bool /*shouldDrawButtonAsDown*/) override {
+        juce::Font font(getTextButtonFont(button, button.getHeight()));
+        g.setFont(font);
+        const auto colour = button.findColour(button.getToggleState() ? juce::TextButton::textColourOnId
+                                                                      : juce::TextButton::textColourOffId)
+                              .withMultipliedAlpha(button.isEnabled() ? 1.0f : 0.5f);
+        const int yIndent = juce::jmin(4, button.proportionOfHeight(0.3f));
+        const int cornerSize = juce::jmin(button.getHeight(), button.getWidth()) / 2;
+        const int fontHeight = juce::roundToInt(font.getHeight() * 0.6f);
+        const int leftIndent = juce::jmin(fontHeight, 2 + cornerSize / (button.isConnectedOnLeft() ? 4 : 2));
+        const int rightIndent = juce::jmin(fontHeight, 2 + cornerSize / (button.isConnectedOnRight() ? 4 : 2));
+        const int textWidth = button.getWidth() - leftIndent - rightIndent;
+        if (textWidth > 0)
+            textpop::drawFitted(g, button.getButtonText(),
+                                juce::Rectangle<int>(leftIndent, yIndent, textWidth, button.getHeight() - yIndent * 2),
+                                juce::Justification::centred, 2, 1.0f, colour);
+    }
+};
+
+// v0.26.1: the toolbar labels (logo / version / hint) with the
+// TEXT POP — mirrors LookAndFeel_V2::drawLabel, adding the
+// backing pass before the fitted text. The labels' background
+// and outline colours are transparent, so only the text changes.
+class PoppedLabelLookAndFeel : public juce::LookAndFeel_V4 {
+public:
+    void drawLabel(juce::Graphics& g, juce::Label& label) override {
+        g.fillAll(label.findColour(juce::Label::backgroundColourId));
+        if (!label.isBeingEdited()) {
+            const auto alpha = label.isEnabled() ? 1.0f : 0.5f;
+            const juce::Font font(getLabelFont(label));
+            g.setFont(font);
+            auto textArea = getLabelBorderSize(label).subtractedFrom(label.getLocalBounds());
+            textpop::drawFitted(g, label.getText(), textArea, label.getJustificationType(),
+                                juce::jmax(1, (int)((float)textArea.getHeight() / font.getHeight())),
+                                label.getMinimumHorizontalScale(),
+                                label.findColour(juce::Label::textColourId).withMultipliedAlpha(alpha));
+            g.setColour(label.findColour(juce::Label::outlineColourId).withMultipliedAlpha(alpha));
+        } else if (label.isEnabled()) {
+            g.setColour(label.findColour(juce::Label::outlineColourId));
+        }
+        g.drawRect(label.getLocalBounds());
+    }
+};
+
 // v0.22.1: the icon buttons' private LookAndFeel — stock V4 in
 // every respect EXCEPT the font. The v0.22.0 glyph buttons render
 // as tofu on real Windows (Jackson's TickerBar v0.6.0 field
@@ -49,7 +101,9 @@ private:
 // face); if neither exists at runtime the default sans is used,
 // which is the pre-fix behaviour. Applied per button, so every
 // other button (Update! included) keeps the existing font.
-class IconButtonLookAndFeel : public juce::LookAndFeel_V4 {
+// v0.26.1: now derives from PoppedButtonLookAndFeel, so the
+// glyphs get the text pop with the same draw.
+class IconButtonLookAndFeel : public PoppedButtonLookAndFeel {
 public:
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override {
         const float h = juce::jmin(16.0f, (float)buttonHeight * 0.62f);
@@ -119,12 +173,14 @@ private:
     bool updateCheckPending = false;
     bool updateCheckFromLaunch = false;                           // launch checks stay silent unless a newer release is found
     bool updateAvailable = false;                                 // a newer release is known: the toolbar indicator is lit
+    PoppedButtonLookAndFeel wordBtnLnf_;                          // v0.26.1: Update!'s text-pop look (stock font); declared before updateBtn so it outlives it
     juce::TextButton updateBtn { "Update!" };                     // v0.19.2: non-modal launch-check surface (opens showUpdatePanel)
     mbupdate::ReleaseInfo pendingRelease;                         // the release a download/Update action refers to
     std::unique_ptr<juce::URL::DownloadTask> updateDownload;
     bool updateDownloadPending = false;
     juce::File updateInstallerFile;
     IconButtonLookAndFeel iconLnf_; // v0.22.1: declared before the buttons so it outlives them
+    PoppedLabelLookAndFeel labelLnf_; // v0.26.1: toolbar labels' text-pop look; declared before the labels so it outlives them
     // toolbar — v0.22.0: ICON-ONLY (Jackson's ask: compress the top
     // row into the Menu). Link / Rec / Pause / Settings / Menu stay
     // as glyph buttons with tooltips; Presets, Arrange, Restore,

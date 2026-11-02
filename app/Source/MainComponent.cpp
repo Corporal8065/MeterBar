@@ -32,6 +32,11 @@ MainComponent::MainComponent() {
     // v0.22.1: the glyph buttons wear the emoji typeface (see
     // IconButtonLookAndFeel) — everything else keeps the stock font.
     for (auto* b : { &linkBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setLookAndFeel(&iconLnf_);
+    // v0.26.1: the Update! button and the toolbar labels wear the
+    // text-pop looks (TextPop.h) — same pictured backing as the
+    // module text, over the translucent toolbar strip.
+    updateBtn.setLookAndFeel(&wordBtnLnf_);
+    for (auto* l : { &logoLabel, &versionLabel, &hintLabel }) l->setLookAndFeel(&labelLnf_);
     // v0.20.0 (k): family LINK toggle + client wiring. Geometry leads
     // via notifyWindowGeometryChanged. v0.2.1: the settings feed is
     // wired too (see onChanged below) — MeterBar was the only bar not
@@ -848,14 +853,15 @@ void MainComponent::prepareFrame() {
     frame.beatLocked = engine.beatLocked();
     frame.beatBpm = (float)engine.beatBpmValue();
     frame.beatConfidence = engine.beatConfidence();
-    frame.beatCountInBar = engine.beatCountInBar();
     frame.beatSig = st.beatTimeSignature;
-    frame.beatDownbeatEnv = engine.beatDownbeatEnv();
+    // v0.26.1: no bar count crosses into the frame any more — the
+    // displays mark beats without asserting beat 1. The scope's
+    // dot takes the any-beat envelope instead of the downbeat one.
+    frame.beatPulseEnv = engine.beatGridEnv();
     {
         float ages[64]; int counts[64];
         const int nb = engine.collectBeats(30.f, ages, counts, 64);
         frame.beatAges.assign(ages, ages + nb);
-        frame.beatCounts.assign(counts, counts + nb);
     }
     frame.waveSecPerColumn = 1.0f / ((float)std::max(1, st.fpsLimit) * (float)std::max(1, (int)std::lround(1 + st.linkedSpeed)));
     frame.sgSecPerRow = 1.0f / ((float)std::max(1, st.fpsLimit) * std::max(0.1f, st.linkedSpeed) * 0.2f);

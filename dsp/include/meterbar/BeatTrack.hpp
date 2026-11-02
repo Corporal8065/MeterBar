@@ -20,6 +20,18 @@ namespace meterbar {
 // that median (within 9%, whole multiples allowed) at >= 60%
 // consistency. The locking kick is taken as count 1 of a bar.
 //
+// v0.26.1 onset gate: a low-band crossing only counts as a kick if
+// it is also a substantial fraction (>= 45%) of the band's recent
+// PEAK level (an 8 s decaying maximum). A real mix's kick band
+// carries more than the kick — bass lines, sub tails — and those
+// weaker crossings are not kicks. At slow song tempos (< ~107 BPM)
+// their spacings (eighth-note bass at 0.375 s under an 80 BPM song)
+// sit inside the fold window whole, so v0.26.0 locked those trains
+// at DOUBLE tempo — 160 read on Jackson's ~80 BPM field song, the
+// grid apparently unable to find the beat. The kick itself sets
+// the peak as it fires, so genuine kicks pass the gate at any
+// tempo; the bass under them does not.
+//
 // Through a breakdown (kick drops out) the grid keeps counting on
 // its own clock — Jackson: "keep the count even when it's not
 // there". Confidence sags slowly while nothing confirms it, and
@@ -40,7 +52,8 @@ public:
     void prepare(double sr) {
         sr_ = sr > 0 ? sr : 48000;
         lpCoef_ = 1.0 - std::exp(-2.0 * 3.141592653589793 * 140.0 / sr_);
-        lp_ = 0; baseLow_ = 0;
+        lp_ = 0; baseLow_ = 0; peakLow_ = 0;
+        winPow_.assign(kWinPow, 0.0); winHead_ = 0; winSum_ = 0; winCount_ = 0;
         samples_ = 0; elapsed_ = 0; sinceOnset_ = 1e9; lastOnsetT_ = -1;
         intervals_.clear();
         locked_ = false; period_ = 0; anchorT_ = 0; nextBeatT_ = 0;
@@ -59,26 +72,45 @@ public:
 
     // Push one block (the app feeds the same 256-sample sub-blocks
     // as BeatPulse). Returns true on the block where a kick onset
-    // fires.
+    // fires. The block statistic is the loudest 128-sample
+    // (~2.7 ms) moving average of the 140 Hz low band's power
+    // anywhere in the block (v0.26.1) — a plain block mean reads
+    // the SAME kick up to ~3x weaker when its peak straddles a
+    // block boundary, and the peak gate below needs a statistic
+    // that reads a kick the same however it lands.
     bool pushBlock(const float* L, const float* R, int n) {
         if (n <= 0 || sr_ <= 0) return false;
-        double sumLow = 0;
+        double blockMax = 0;
         for (int i = 0; i < n; ++i) {
             const double m = 0.5 * ((L ? (double)L[i] : 0.0) + (R ? (double)R[i] : 0.0));
             lp_ += lpCoef_ * (m - lp_);
-            sumLow += lp_ * lp_;
+            const double p = lp_ * lp_;
+            winSum_ += p - winPow_[(size_t)winHead_];
+            winPow_[(size_t)winHead_] = p;
+            winHead_ = (winHead_ + 1) % kWinPow;
+            if (winCount_ < kWinPow) ++winCount_;
+            const double w = winSum_ / (double)winCount_;
+            if (w > blockMax) blockMax = w;
         }
-        const double lowMs = sumLow / n;
+        const double lowMs = blockMax;
         const double blockSec = n / sr_;
         samples_ += n; elapsed_ += blockSec; sinceOnset_ += blockSec;
         const double now = (double)samples_ / sr_;
         const double aBase = 1.0 - std::exp(-blockSec / 0.7);
         bool fired = false;
+        // The recent peak updates BEFORE the fire test, with the
+        // current block included: a genuine kick's own loudest block
+        // trivially clears 45% of a peak it just set, while a bass
+        // pluck at a fraction of the kick's power — measured against
+        // a peak the kicks keep refreshing — never does.
+        peakLow_ = std::max(lowMs, peakLow_ * std::exp(-blockSec / 8.0));
         // Warm-up gate as in BeatPulse (baseline converging), an
-        // absolute floor so silence never fires, a 220 ms refractory
-        // (kicks closer than that are one hit's ring, not two hits).
+        // absolute floor so silence never fires, the v0.26.1 peak
+        // gate (see header), and a 220 ms refractory (kicks closer
+        // than that are one hit's ring, not two hits).
         if (elapsed_ > 0.6 && lowMs > 1e-8 && baseLow_ > 1e-10 &&
-            lowMs > baseLow_ * 2.0 && sinceOnset_ > 0.22) {
+            lowMs > baseLow_ * 2.0 && lowMs > peakLow_ * 0.45 &&
+            sinceOnset_ > 0.22) {
             fired = true; ++onsets_;
             onOnset(now);
         }
@@ -215,7 +247,10 @@ private:
         }
     }
 
-    double sr_ = 48000, lpCoef_ = 0, lp_ = 0, baseLow_ = 0;
+    double sr_ = 48000, lpCoef_ = 0, lp_ = 0, baseLow_ = 0, peakLow_ = 0;
+    // Sliding power window for the block statistic (see pushBlock).
+    static constexpr int kWinPow = 128;
+    std::vector<double> winPow_; int winHead_ = 0, winCount_ = 0; double winSum_ = 0;
     uint64_t samples_ = 0;
     double elapsed_ = 0, sinceOnset_ = 1e9, lastOnsetT_ = -1;
     std::deque<double> intervals_;

@@ -1796,6 +1796,90 @@ int main() {
             CHECK(seen1 && seen6);
         }
     }
+    // --- BeatTracker at slow tempos (v0.26.1 field fix): Jackson's
+    // ~80 BPM song would not lock. Bare kick trains at 80/60 always
+    // locked — the failure needs what a real slow song's kick band
+    // carries besides the kick: bass playing eighth notes in the
+    // same <=140 Hz band. Those weaker crossings became onsets, and
+    // at song tempos under ~107 BPM their spacing sits inside the
+    // fold window whole, so v0.26.0 read 160 BPM on an 80 BPM song
+    // (and ~89 on a soft 60). The peak-relative onset gate (>= 45%
+    // of the band's recent peak) admits the kick — which sets the
+    // peak — and refuses the bass under it.
+    {
+        const double sr = 48000; const int blk = 256;
+        std::vector<float> L(blk), R(blk);
+        // One feeder for every train below: kicks at `period`
+        // (envelope: raised-cosine attack, (1-u)^1.6 body), an
+        // optional sustained bass bed, and optional bass plucks on
+        // every eighth note in the kick band.
+        auto feedTrain = [&](BeatTracker& tr, double period, double secs,
+                             double kickFreq, double kickAmp, double attack, double dur,
+                             double bedFreq, double bedAmp, double pluckAmp) {
+            double tNow = 0, nextKick = 0.35, curK = -1, nextPluck = 0.35 + period / 2, curP = -1;
+            int blocks = (int)std::lround(secs * sr / blk);
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    double tt = tNow + (double)i / sr;
+                    while (tt >= nextKick) { curK = nextKick; nextKick += period; }
+                    while (tt >= nextPluck) { curP = nextPluck; nextPluck += period / 2; }
+                    double v = 0.01 * std::sin(2 * M_PI * 440.0 * tt);
+                    if (bedAmp > 0) v += bedAmp * std::sin(2 * M_PI * bedFreq * tt);
+                    if (curK >= 0) { double lt = tt - curK;
+                        if (lt >= 0 && lt < dur) {
+                            double env = lt < attack ? 0.5 - 0.5 * std::cos(M_PI * lt / attack)
+                                                     : std::pow(1.0 - (lt - attack) / (dur - attack), 1.6);
+                            v += kickAmp * std::sin(2 * M_PI * kickFreq * lt) * env;
+                        } }
+                    if (pluckAmp > 0 && curP >= 0) { double lt = tt - curP;
+                        if (lt >= 0 && lt < 0.12) v += pluckAmp * std::sin(2 * M_PI * 98.0 * lt) * (1.0 - lt / 0.12); }
+                    L[(size_t)i] = (float)v; R[(size_t)i] = (float)v;
+                }
+                tr.pushBlock(L.data(), R.data(), blk);
+                tNow += blk / sr;
+            }
+        };
+        {   // 80 BPM bare kicks — the slow control
+            BeatTracker tr; tr.prepare(sr);
+            feedTrain(tr, 60.0 / 80.0, 16.0, 60, 0.85, 0.004, 0.30, 0, 0, 0);
+            std::printf("beattrack slow bare 80: locked=%d bpm=%.1f\n", (int)tr.locked(), tr.bpm());
+            CHECK(tr.locked());
+            CHECK(tr.bpm() > 74.0 && tr.bpm() < 86.0);
+        }
+        {   // 60 BPM bare kicks — the slow control
+            BeatTracker tr; tr.prepare(sr);
+            feedTrain(tr, 1.0, 16.0, 60, 0.85, 0.004, 0.30, 0, 0, 0);
+            std::printf("beattrack slow bare 60: locked=%d bpm=%.1f\n", (int)tr.locked(), tr.bpm());
+            CHECK(tr.locked());
+            CHECK(tr.bpm() > 55.0 && tr.bpm() < 65.0);
+        }
+        {   // 80 BPM + bass eighth plucks: v0.26.0 read ~160 here
+            BeatTracker tr; tr.prepare(sr);
+            feedTrain(tr, 60.0 / 80.0, 16.0, 60, 0.85, 0.004, 0.30, 0, 0, 0.45);
+            std::printf("beattrack slow bass8 80: locked=%d bpm=%.1f onsets=%llu\n",
+                        (int)tr.locked(), tr.bpm(), (unsigned long long)tr.onsetCount());
+            CHECK(tr.locked());
+            CHECK(tr.bpm() > 74.0 && tr.bpm() < 86.0);
+        }
+        {   // 60 BPM + bass eighth plucks: must read ~60, not ~120
+            BeatTracker tr; tr.prepare(sr);
+            feedTrain(tr, 1.0, 20.0, 60, 0.85, 0.004, 0.30, 0, 0, 0.45);
+            std::printf("beattrack slow bass8 60: locked=%d bpm=%.1f onsets=%llu\n",
+                        (int)tr.locked(), tr.bpm(), (unsigned long long)tr.onsetCount());
+            CHECK(tr.locked());
+            CHECK(tr.bpm() > 55.0 && tr.bpm() < 65.0);
+        }
+        {   // 60 BPM soft-attack kicks over a sustained bass bed:
+            // v0.26.0 read ~89 here (bed/kick crossings polluted the
+            // intervals); the gate keeps only the kicks.
+            BeatTracker tr; tr.prepare(sr);
+            feedTrain(tr, 1.0, 20.0, 55, 0.80, 0.16, 0.55, 52, 0.35, 0);
+            std::printf("beattrack slow softbed 60: locked=%d bpm=%.1f onsets=%llu\n",
+                        (int)tr.locked(), tr.bpm(), (unsigned long long)tr.onsetCount());
+            CHECK(tr.locked());
+            CHECK(tr.bpm() > 55.0 && tr.bpm() < 65.0);
+        }
+    }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

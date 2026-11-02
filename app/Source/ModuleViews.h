@@ -5,6 +5,7 @@
 #include <meterbar/ColorMap.hpp>
 #include <BinaryData.h>
 #include "Theme.h"
+#include "TextPop.h"
 // Data prepared once per frame by MainComponent, drawn by every module view.
 struct AnalysisData {
     const meterbar::PresetState* st = nullptr;
@@ -19,12 +20,17 @@ struct AnalysisData {
     double loudIntegrated = -120, loudShortTerm = -120, loudTruePeakDb = -120; // v0.16 loudness pack
     float beatGlow = 0;                      // v0.16: onset envelope 0..1 (Beat Pulse + mascot)
     // v0.26.0: auto-BPM grid (core BeatTracker, fed in AudioEngine,
-    // copied here per frame by MainComponent). beatAges/beatCounts
-    // are the recent grid beats, most recent first, ages ascending.
+    // copied here per frame by MainComponent). beatAges are the
+    // recent grid beats, most recent first, ages ascending.
+    // v0.26.1: the grid carries NO bar count — Jackson's field call:
+    // the tracker cannot reliably know which beat is beat 1, so
+    // the displays mark every beat alike and assert nothing about
+    // beat 1. (The core still counts internally; nothing here
+    // reads a count any more.)
     bool beatLocked = false; float beatBpm = 0; float beatConfidence = 0;
-    int beatCountInBar = 0; int beatSig = 0; // beatSig: 0 = 4/4, 1 = 3/4, 2 = 6/8 (mirrors PresetState::beatTimeSignature)
-    float beatDownbeatEnv = 0;
-    std::vector<float> beatAges; std::vector<int> beatCounts;
+    int beatSig = 0; // beatSig: 0 = 4/4, 1 = 3/4, 2 = 6/8 (mirrors PresetState::beatTimeSignature)
+    float beatPulseEnv = 0; // tracker envelope on ANY grid beat (scope dot)
+    std::vector<float> beatAges;
     float waveSecPerColumn = 0;              // waveform overlay timebase (seconds per history column)
     float sgSecPerRow = 0;                   // spectrogram overlay timebase (seconds per history row)
     std::vector<float> scopeBuf; float scopeFreq = 0;
@@ -52,21 +58,18 @@ public:
     static juce::Rectangle<float> sigChipRect(juce::Rectangle<float> plot) {
         return { plot.getRight() - 66.f, plot.getBottom() - 15.f, 62.f, 13.f };
     }
-    // v0.26.0 TEXT POP (Jackson, 2026-11-01/02): when transparency
-    // is in play (textPop_, set in paint from backgroundOpacity),
-    // every text first draws a black copy offset 1 px down-right
-    // behind itself, so it pops and stays readable over whatever
-    // the desktop shows through the bar. The caller sets the font
-    // before calling, exactly as with drawText.
-    bool textPop_ = false;
+    // TEXT POP (v0.26.0; rebuilt v0.26.1): every text in the module
+    // draws through textpop::draw (TextPop.h) — a hard offset
+    // duplicate in the contrasting colour behind the letters, the
+    // effect in Jackson's reference picture. v0.26.0's version (a
+    // 1 px black copy at 85% alpha, armed only when
+    // backgroundOpacity < 1) read as "not implemented" in his
+    // field test; the shared helper fixes the offset, the alpha,
+    // the colour and the coverage, and draws unconditionally.
+    // The caller sets the font before calling, as with drawText.
     void drawPoppedText(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
                         juce::Justification j, juce::Colour colour) {
-        if (textPop_) {
-            g.setColour(juce::Colours::black.withAlpha(0.85f));
-            g.drawText(text, r.translated(1.f, 1.f), j);
-        }
-        g.setColour(colour);
-        g.drawText(text, r, j);
+        textpop::draw(g, text, r, j, colour);
     }
     juce::Image sgCache; // spectrogram render cache (v0.11)
     // v0.20.2: what the cache was last rendered FROM — drawSpectrogram
@@ -108,10 +111,6 @@ public:
         auto hdr = r.reduced(4).removeFromTop(13);
         g.setColour(acc); g.fillEllipse(hdr.getX() + 1, hdr.getCentreY() - 2.5f, 5.f, 5.f);
         g.setFont(juce::Font(10.f, juce::Font::bold));
-        // v0.26.0: text pop arms whenever the panel behind the text
-        // is translucent — the section title is the case Jackson
-        // named first (Spectrogram / Waveform / Loudness labels).
-        textPop_ = st.backgroundOpacity < 0.999f;
         drawPoppedText(g, title.toUpperCase(), hdr.withTrimmedLeft(10), juce::Justification::topLeft, acc);
         auto plot = r.reduced(4).withTrimmedTop(14);
         switch (kind) {
@@ -335,14 +334,15 @@ private:
         // cached image and its skip logic are untouched.
         if (data->beatLocked && data->sgSecPerRow > 0.f && !data->beatAges.empty()) {
             const float confA = 0.30f + 0.70f * juce::jlimit(0.f, 1.f, data->beatConfidence);
-            for (size_t i = 0; i < data->beatAges.size() && i < data->beatCounts.size(); ++i) {
+            for (size_t i = 0; i < data->beatAges.size(); ++i) {
                 const float rowsAgo = data->beatAges[i] / data->sgSecPerRow;
                 if (rowsAgo > (float)sg->rows()) break;
                 const float frac = rowsAgo / (float)sg->rows();
-                const bool down = data->beatCounts[i] == 1;
-                g.setColour((down ? data->theme.accent : data->theme.dim).withAlpha((down ? 0.65f : 0.35f) * confA));
-                if (vert) { const float y = p.getY() + frac * p.getHeight(); g.drawLine(p.getX(), y, p.getRight(), y, down ? 1.3f : 1.0f); }
-                else { const float x = p.getX() + frac * p.getWidth(); g.drawLine(x, p.getY(), x, p.getBottom(), down ? 1.3f : 1.0f); }
+                // v0.26.1: every beat the same line — no beat is
+                // singled out as beat 1 (see FrameData note).
+                g.setColour(data->theme.dim.withAlpha(0.45f * confA));
+                if (vert) { const float y = p.getY() + frac * p.getHeight(); g.drawLine(p.getX(), y, p.getRight(), y, 1.0f); }
+                else { const float x = p.getX() + frac * p.getWidth(); g.drawLine(x, p.getY(), x, p.getBottom(), 1.0f); }
             }
         }
     }
@@ -373,24 +373,21 @@ private:
         // from the same cadence), the newest column is the right
         // edge, and the tracker hands over each recent beat's age —
         // so a beat line sits exactly over the kick that made it.
-        // Downbeats (count 1) draw full height in the accent; other
-        // beats are shorter and dimmer; every beat carries its
-        // count at the top. Line alpha rides the grid's confidence.
+        // v0.26.1: every beat draws the SAME tick — no count numbers,
+        // no full-height "downbeat". Jackson's field call: the
+        // tracker cannot reliably tell which beat is beat 1, so the
+        // grid marks beats in general and asserts nothing about 1.
+        // Line alpha still rides the grid's confidence.
         if (data->beatLocked && data->waveSecPerColumn > 0.f && !data->beatAges.empty()) {
             const float cols = (float)n;
             const float confA = 0.30f + 0.70f * juce::jlimit(0.f, 1.f, data->beatConfidence);
-            g.setFont(9.f);
-            for (size_t i = 0; i < data->beatAges.size() && i < data->beatCounts.size(); ++i) {
+            g.setColour(th.accent.withAlpha(0.55f * confA));
+            const float top = p.getY() + p.getHeight() * 0.12f;
+            for (size_t i = 0; i < data->beatAges.size(); ++i) {
                 const float colsAgo = data->beatAges[i] / data->waveSecPerColumn;
                 if (colsAgo > cols) break; // ages ascend — the rest are off-screen
                 const float x = p.getRight() - (colsAgo / cols) * p.getWidth();
-                const bool down = data->beatCounts[i] == 1;
-                g.setColour((down ? th.accent : th.dim).withAlpha((down ? 0.80f : 0.45f) * confA));
-                const float top = down ? p.getY() : p.getY() + p.getHeight() * 0.30f;
-                g.drawLine(x, top, x, p.getBottom(), down ? 1.4f : 1.0f);
-                drawPoppedText(g, juce::String(data->beatCounts[i]),
-                               juce::Rectangle<float>(x - 6.f, p.getY(), 12.f, 10.f),
-                               juce::Justification::centred, down ? th.text : th.dim);
+                g.drawLine(x, top, x, p.getBottom(), 1.1f);
             }
         }
         // v0.26.0: the time-signature chip, bottom-right — shows
@@ -521,18 +518,20 @@ private:
     // v0.26.0: the beat grid's readout for the scope. Its window
     // (10..200 ms) is shorter than one beat, so grid LINES cannot
     // live here the way they do on the waveform/spectrogram; what
-    // fits honestly is the detected tempo + the live bar count,
-    // with a downbeat dot that lights as count 1 lands.
+    // fits honestly is the detected tempo, plus a dot that pulses
+    // on each beat. v0.26.1: the v0.26.0 "count/bpb" text and the
+    // beat-1 dot are gone — the tracker cannot reliably tell which
+    // beat is beat 1 (Jackson's field call), so the dot is a plain
+    // beat dot and the readout is the tempo alone.
     void drawScopeBeatReadout(juce::Graphics& g, juce::Rectangle<float> p, const Theme& th) {
         if (!data->beatLocked || data->beatBpm <= 0.f) return;
-        const int bpb = data->beatSig == 1 ? 3 : data->beatSig == 2 ? 6 : 4;
         auto row = p.removeFromBottom(11.f);
-        if (data->beatDownbeatEnv > 0.35f) {
+        if (data->beatPulseEnv > 0.35f) {
             g.setColour(th.accent);
             g.fillEllipse(row.getX() + 1.f, row.getCentreY() - 2.5f, 5.f, 5.f);
         }
         g.setFont(9.f);
-        drawPoppedText(g, juce::String((int)std::lround(data->beatBpm)) + " BPM  " + juce::String(data->beatCountInBar) + "/" + juce::String(bpb),
+        drawPoppedText(g, juce::String((int)std::lround(data->beatBpm)) + " BPM",
                        row.withTrimmedLeft(9), juce::Justification::bottomLeft, th.dim);
     }
     void drawScope(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {

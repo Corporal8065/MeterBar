@@ -113,6 +113,7 @@ public:
     float beatConfidence() { return beatTracker.confidence(); }
     int beatCountInBar() { return beatTracker.countInBar(); }
     float beatDownbeatEnv() { return beatTracker.downbeatEnv(); }
+    float beatGridEnv() { return beatTracker.beatEnv(); } // v0.26.1: any grid beat (the scope's plain beat dot)
     int collectBeats(float maxAge, float* ages, int* counts, int maxOut) {
         return beatTracker.collectRecentBeats(maxAge, ages, counts, maxOut);
     }

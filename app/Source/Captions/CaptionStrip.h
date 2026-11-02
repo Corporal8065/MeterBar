@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <meterbar/Captions.hpp>
+#include "../TextPop.h"
 
 // LIVE CAPTIONS — DOCKED STRIP (v0.24.0, MeterBar ONLY).
 //
@@ -50,11 +51,10 @@ public:
             // Status only: the pill text when there is one, else the
             // badge (e.g. "LIVE — SYSTEM AUDIO") so the strip never
             // sits blank while captions are on.
-            g.setColour(juce::Colours::white.withAlpha(0.85f));
             g.setFont(juce::Font(juce::FontOptions(14.5f)));
-            g.drawText(pill_.isNotEmpty() ? pill_ : badge_,
-                       getLocalBounds().reduced(14, 0),
-                       juce::Justification::centred, false);
+            textpop::draw(g, pill_.isNotEmpty() ? pill_ : badge_,
+                          getLocalBounds().reduced(14, 0),
+                          juce::Justification::centred, juce::Colours::white.withAlpha(0.85f));
             return;
         }
         const auto font = juce::Font(
@@ -66,27 +66,28 @@ public:
             auto plan = meterbar::planCaptionLines(prev_.toStdString(), cpl);
             g.setFont(juce::Font(
                 juce::FontOptions("Segoe UI Semibold", 15.0f, juce::Font::plain)));
-            g.setColour(juce::Colours::white.withAlpha(0.55f));
             if (!plan.lines.empty())
-                g.drawText(juce::String(plan.lines.back()), 14, y, usable, 20,
-                           juce::Justification::centredLeft, false);
+                textpop::draw(g, juce::String(plan.lines.back()),
+                              juce::Rectangle<int>(14, y, usable, 20),
+                              juce::Justification::centredLeft, juce::Colours::white.withAlpha(0.55f));
             y += 22;
         }
         // status badge: small, top-right, muted (the overlay's strip)
         g.setFont(juce::Font(juce::FontOptions(10.5f)));
-        g.setColour(juce::Colours::white.withAlpha(0.55f));
-        g.drawText(badge_, 14, 4, usable, 14, juce::Justification::centredRight, false);
+        textpop::draw(g, badge_, juce::Rectangle<int>(14, 4, usable, 14),
+                      juce::Justification::centredRight, juce::Colours::white.withAlpha(0.55f));
         auto plan = meterbar::planCaptionLines(cur_.toStdString(), cpl);
         g.setFont(font);
-        g.setColour(juce::Colours::white.withAlpha(curFinal_ ? 1.0f : 0.92f));
         const int linesH = (int)plan.lines.size() * 24;
         int ty = y + juce::jmax(0, (h - y - linesH) / 2);
         for (auto& line : plan.lines) {
-            const auto ls = juce::String(line);
-            g.setColour(juce::Colours::black.withAlpha(0.7f));
-            g.drawText(ls, 15, ty + 1, usable, 24, juce::Justification::centredLeft, false);
-            g.setColour(juce::Colours::white.withAlpha(curFinal_ ? 1.0f : 0.92f));
-            g.drawText(ls, 14, ty, usable, 24, juce::Justification::centredLeft, false);
+            // v0.26.1: the pictured text pop (TextPop.h) replaces
+            // the old hand-rolled 1 px shadow — chunky offset, full
+            // strength, the same helper as the rest of the bar.
+            textpop::draw(g, juce::String(line),
+                          juce::Rectangle<int>(14, ty, usable, 24),
+                          juce::Justification::centredLeft,
+                          juce::Colours::white.withAlpha(curFinal_ ? 1.0f : 0.92f));
             ty += 24;
         }
     }
