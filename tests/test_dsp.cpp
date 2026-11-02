@@ -852,9 +852,10 @@ int main() {
         const float sil[3] = { 0, 0, 0 };
         for (int i = 0; i < 600; ++i) quiet.update(1.f / 30.f, sil, vs);
         CHECK(quiet.visibility() == 0.f);
-        // BLK5: the magic moved with the widened domain, and the
-        // stereo balance rides the audio packet at [4]
-        CHECK(kLinkMagic == 0x424C4B35u);
+        // BLK5 widened the domain (BLK6, below in the file, moved
+        // the magic again for the linkSeq field); the stereo
+        // balance rides the audio packet at [4]
+        CHECK(kLinkMagic == 0x424C4B36u);
         LinkSlot slot; slot.appId = 1; slot.heartbeatMs = 1000; slot.audioSeq = 3;
         slot.audioLow = 0.1f; slot.audioMid = 0.2f; slot.audioHigh = 0.3f; slot.audioLevel = 0.4f; slot.audioBalance = 0.7f;
         float pkt[5] = { 0, 0, 0, 0, 0 };
@@ -1077,6 +1078,99 @@ int main() {
     CHECK(sync3.seenSeq[0] == 5 && sync3.seenSeq[2] == 0);
     CHECK(sync3.adoptedFrom == 0);
     CHECK(!bgAdoption(sh2, 1, sync3, now, out));
+}
+// ---- BLK6: first-clicked-wins parentage + member-drag leadership ----
+{
+    using namespace meterbar;
+    const long long now = 300000;
+    BgPacket out;
+    // FIRST-CLICKED WINS: appId 2 claimed linkSeq 1 (clicked first),
+    // appId 0 claimed 3 — the parent is 2, NOT the lowest appId (the
+    // v0.25.1 fixed-slot rule Jackson's 2026-11-01 field test rejected).
+    LinkShared sh;
+    auto& s0 = sh.slots[0]; s0.appId = 0; s0.linked = 1; s0.heartbeatMs = now; s0.linkSeq = 3; s0.bgSeq = 4; s0.bgStyle = 1; s0.bgOpacityPct = 70;
+    auto& s1 = sh.slots[1]; s1.appId = 1; s1.linked = 1; s1.heartbeatMs = now; s1.linkSeq = 2; s1.bgSeq = 5; s1.bgStyle = 0; s1.bgOpacityPct = 90;
+    auto& s2 = sh.slots[2]; s2.appId = 2; s2.linked = 1; s2.heartbeatMs = now; s2.linkSeq = 1; s2.bgSeq = 6; s2.bgStyle = 2; s2.bgOpacityPct = 30;
+    CHECK(bgParentApp(sh, 1, 2, now) == 2);
+    BgSyncState sy1;
+    CHECK(bgAdoption(sh, 1, sy1, now, out));
+    CHECK(out.style == 2 && out.opacityPct == 30 && sy1.adoptedFrom == 2);
+    CHECK(sy1.seenSeq[0] == 0); // the lowest-appId non-parent packet is never consumed
+    // the first-clicked bar itself adopts from nobody
+    BgSyncState sy2;
+    CHECK(!bgAdoption(sh, 2, sy2, now, out));
+    // the parent's SLOT is resolved by appId after selection: with
+    // self's own slot sitting between the parent's and a follower's,
+    // adoption must still read the PARENT's packet (a first draft of
+    // bgParentApp returned self's slot index here and adopted self).
+    {
+        LinkShared shS; BgSyncState syS;
+        auto& q0 = shS.slots[0]; q0.appId = 0; q0.linked = 1; q0.heartbeatMs = now; q0.linkSeq = 1; q0.bgSeq = 21; q0.bgStyle = 3; q0.bgOpacityPct = 25;
+        auto& q1 = shS.slots[1]; q1.appId = 1; q1.linked = 1; q1.heartbeatMs = now; q1.linkSeq = 0; q1.bgSeq = 22; // self unclaimed: the geometry that exposed the slot bug q1.bgStyle = 0; q1.bgOpacityPct = 99;
+        auto& q2 = shS.slots[2]; q2.appId = 2; q2.linked = 1; q2.heartbeatMs = now; q2.linkSeq = 3; q2.bgSeq = 23; q2.bgStyle = 1; q2.bgOpacityPct = 55;
+        CHECK(bgAdoption(shS, 1, syS, now, out));
+        CHECK(out.style == 3 && out.opacityPct == 25 && syS.adoptedFrom == 0);
+        CHECK(syS.seenSeq[0] == 21 && syS.seenSeq[1] == 0 && syS.seenSeq[2] == 0);
+    }
+    // LATE JOINER NEVER PARENT: appId 0 re-claims with the largest
+    // linkSeq and a fresh packet — the group still follows appId 2,
+    // and the joiner adopts the parent's packet from its own seat.
+    LinkShared shJ = sh; shJ.slots[0].linkSeq = 9; shJ.slots[0].bgSeq = 40;
+    BgSyncState syJ;
+    CHECK(bgAdoption(shJ, 0, syJ, now, out));
+    CHECK(syJ.adoptedFrom == 2 && out.opacityPct == 30);
+    // PARENT PACKET ARRIVES AFTER THE FOLLOWER'S FIRST SCAN: the
+    // follower scanned while the first-clicked bar's slot was not yet
+    // in the block (its app started later); when the parent's packet
+    // appears, adoption fires on that tick.
+    LinkShared shL; BgSyncState syL;
+    auto& l1 = shL.slots[1]; l1.appId = 1; l1.linked = 1; l1.heartbeatMs = now; l1.linkSeq = 2; l1.bgSeq = 3; l1.bgStyle = 0; l1.bgOpacityPct = 90;
+    CHECK(!bgAdoption(shL, 1, syL, now, out)); // alone in the block: self is parent
+    auto& l0 = shL.slots[0]; l0.appId = 0; l0.linked = 1; l0.heartbeatMs = now; l0.linkSeq = 1; l0.bgSeq = 2; l0.bgStyle = 3; l0.bgOpacityPct = 15;
+    CHECK(bgAdoption(shL, 1, syL, now, out));
+    CHECK(out.style == 3 && out.opacityPct == 15 && syL.adoptedFrom == 0);
+    // HANDOFF: the parent unlinks — the earliest-linked REMAINING
+    // member becomes parent, and its standing packet is adopted even
+    // though that bgSeq was already seen (identity change re-fires).
+    LinkShared shH; BgSyncState syH;
+    auto& h0 = shH.slots[0]; h0.appId = 0; h0.linked = 1; h0.heartbeatMs = now; h0.linkSeq = 1; h0.bgSeq = 7; h0.bgStyle = 1; h0.bgOpacityPct = 60;
+    auto& h1 = shH.slots[1]; h1.appId = 1; h1.linked = 1; h1.heartbeatMs = now; h1.linkSeq = 2; h1.bgSeq = 8; h1.bgStyle = 2; h1.bgOpacityPct = 45;
+    auto& h2 = shH.slots[2]; h2.appId = 2; h2.linked = 1; h2.heartbeatMs = now; h2.linkSeq = 3; h2.bgSeq = 9; h2.bgStyle = 0; h2.bgOpacityPct = 95;
+    CHECK(bgAdoption(shH, 2, syH, now, out)); CHECK(syH.adoptedFrom == 0);
+    syH.seenSeq[1] = 8; // h1's packet was consumed under the old regime
+    h0.linked = 0;
+    CHECK(bgParentApp(shH, 2, 3, now) == 1);
+    CHECK(bgAdoption(shH, 2, syH, now, out));
+    CHECK(out.style == 2 && out.opacityPct == 45 && syH.adoptedFrom == 1);
+    // A RELINKED PARENT RETURNS AS A LATE JOINER: it claims a fresh
+    // (largest) linkSeq, so it now ADOPTS from the standing parent.
+    h0.linked = 1; h0.linkSeq = 10;
+    BgSyncState syH0;
+    CHECK(bgAdoption(shH, 0, syH0, now, out));
+    CHECK(syH0.adoptedFrom == 1 && out.opacityPct == 45);
+    // MEMBER-DRAG LEADERSHIP: whichever member leads a drag session,
+    // every other member's follow rect translates by the leader's
+    // delta with size preserved — the pure half of Jackson's rule
+    // "dragging ANY linked bar moves the whole stack" (the client
+    // half — every bar's geometry feed stamps a session — is pinned
+    // by the TickerBar v0.6.7 wiring fix; it was the missing half).
+    for (int leader = 0; leader < 3; ++leader) {
+        LinkShared shD;
+        for (int a = 0; a < 3; ++a) {
+            auto& sl = shD.slots[a]; sl.appId = a; sl.linked = 1; sl.heartbeatMs = now;
+            sl.rect = IntRect{ 100 + a * 700, 200, 600, 40 };
+        }
+        auto& ld = shD.slots[leader];
+        ld.dragSeq = 5; ld.dragStart = ld.rect; ld.dragStampMs = now;
+        ld.rect = IntRect{ ld.rect.x + 30, ld.rect.y - 12, ld.rect.w, ld.rect.h };
+        CHECK(dragLive(ld, now));
+        for (int a = 0; a < 3; ++a) {
+            if (a == leader) continue;
+            auto fr = followRect(shD.slots[a].rect, ld.dragStart, ld.rect);
+            CHECK(fr.x == shD.slots[a].rect.x + 30 && fr.y == shD.slots[a].rect.y - 12);
+            CHECK(fr.w == 600 && fr.h == 40);
+        }
+    }
 }
 
 

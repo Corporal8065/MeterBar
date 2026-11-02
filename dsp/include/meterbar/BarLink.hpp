@@ -24,14 +24,25 @@ namespace meterbar {
 //    docking treats the linked group as one bar.
 //  - SHARED BACKGROUND: each slot carries a bgSeq-stamped background
 //    (family style ordinal + opacity); the group PARENT's background
-//    (lowest appId among live linked members) is adopted by the
-//    others — link-parent ownership, v0.25.1 (the client publishes
-//    only on change, so adoption cannot ping-pong).
+//    is adopted by the others. Since BLK6 the parent is the FIRST
+//    bar to turn its Link on in the group (first-clicked-wins,
+//    Jackson's stated semantics 2026-11-01): every slot carries the
+//    linkSeq it claimed from the shared counter when its link
+//    turned on, and the parent is the live linked member with the
+//    smallest linkSeq (ties — an unclaimed 0 or a counter reset —
+//    break by lowest appId, so every member computes the same
+//    parent from the same block). The client publishes only on
+//    change, so adoption cannot ping-pong.
 //
 // A drag session is "live" while its stamp is fresher than
 // kLeaderStaleMs; staleness — never a stuck flag — ends it.
 
-inline constexpr unsigned kLinkMagic = 0x424C4B35; // "BLK5" — v0.25.0 widened the bgEffect value
+inline constexpr unsigned kLinkMagic = 0x424C4B36; // "BLK6" — appended linkSeq to
+    // LinkSlot and nextLinkSeq to LinkShared (the first-clicked-wins
+    // join-order stamp). Same rule as every earlier bump: the layout
+    // grew, so the magic moves with it — mixed BLK5/BLK6 binaries
+    // never link (magic mismatch = the whole block reads empty).
+    // BLK5 widened the bgEffect value
     // domain again (4 = visualizer Field) and appended audioBalance
     // to LinkSlot. Same rule as BLK4 (v0.21.5, which widened the
     // domain for 3 = visualizer Lines): the ordinal's MEANING grew,
@@ -88,10 +99,18 @@ struct LinkSlot {
     // distributed emitters by the same stereo picture. Appended
     // last, like every field since BLK1.
     float audioBalance = 0.f;
+    // Join order (BLK6): the value this app claimed from the shared
+    // block's nextLinkSeq counter at the moment its Link turned on
+    // (0 = not linked / never claimed). The group background parent
+    // is the live linked member with the SMALLEST linkSeq — the
+    // first bar that clicked Link (see bgParentApp). Appended last,
+    // like every field since BLK1.
+    unsigned linkSeq = 0;
 };
 struct LinkShared {
     unsigned magic = kLinkMagic;
     LinkSlot slots[3];
+    unsigned nextLinkSeq = 0; // BLK6: join-order counter; a client claims ++nextLinkSeq under the block mutex when its Link turns on
 };
 
 inline bool slotLive(const LinkSlot& s, long long nowMs) {
@@ -199,13 +218,30 @@ inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge)
 //     on never became the authority. His standing rule is
 //     link-PARENT ownership: when bars are linked, the parent
 //     applies the visual settings to the others. Rule: adoption
-//     flows DOWNHILL ONLY. The group parent is the lowest appId
-//     among the live, linked members (canonical family order —
-//     the same order planStackAll stacks in). A bar adopts ONLY
-//     from its parent; the parent adopts from nobody. A follower's
-//     own local change still publishes (its packet becomes the
+//     flows DOWNHILL ONLY from the group parent. A follower's own
+//     local change still publishes (its packet becomes the
 //     authority if it ever becomes the parent), but no follower
 //     packet is ever adopted while a parent is live.
+//
+//  5. WRONG PARENT + NO PARENT-LINK TRIGGER (BLK6, the 2026-11-01
+//     evening field test): v0.25.1 picked the parent by FIXED slot
+//     order (lowest appId), so the parent was whoever owned the
+//     lowest slot — not the bar Jackson linked first, which is the
+//     semantics he stated live: "click the button for the link
+//     first would be ideally what you would want the background to
+//     change to." Adoption was also purely bgSeq-gated: nothing
+//     re-triggered it when the PARENT's link event was the one
+//     that completed the group. Rule: the parent is the live
+//     linked member with the smallest linkSeq (first-clicked
+//     wins); adoption re-fires whenever the parent's identity OR
+//     its linkSeq changes (adoptedFrom / adoptedLinkSeq), not only
+//     when its bgSeq advances — so a follower adopts the standing
+//     packet when the parent's packet first appears in the block,
+//     when parenthood hands off after the parent unlinks (the
+//     earliest-linked remaining member takes over), and never
+//     from a late joiner (largest linkSeq, never the parent while
+//     an earlier member is live). A parent that unlinks and
+//     relinks claims a NEW linkSeq and returns as a late joiner.
 struct BgPacket {
     int style = 0;      // family background-style ordinal (LinkSlot::bgStyle)
     int opacityPct = 100;
@@ -216,6 +252,7 @@ struct BgSyncState {
     int publishedEffect = -999;                     // same, for the effect ordinal
     unsigned seenSeq[3] = { 0, 0, 0 };              // newest bgSeq consumed per app slot
     int adoptedFrom = -1;                           // v0.25.1: appId of the parent the current values came from (-1 = own / none)
+    unsigned adoptedLinkSeq = 0;                    // BLK6: linkSeq of that parent when the values were adopted (a parent relink / handoff re-fires adoption)
 };
 // True when (style, pct, effect) differ from what this app last
 // published or adopted — the ONLY condition under which bgSeq may
@@ -233,31 +270,72 @@ inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct, int effect
 // parent already publishes does NOT re-stamp: it adopts the
 // parent's standing packet instead (parent ownership, defect 4).
 inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publishedPct = -999; s.publishedEffect = -999; }
-// Scan the shared block for the group PARENT's background (v0.25.1
-// parent ownership — see defect 4 above). The parent is the lowest
-// appId among this app and its live, linked peers. When this app IS
-// the parent there is nothing to adopt (and adoptedFrom resets, so
-// a later parent is never mistaken for the source of the current
-// values). Otherwise the parent's packet is adopted when it is
-// non-zero and either unseen OR the parent changed since the last
-// adoption (parent turnover: the new parent's standing packet is
-// authoritative even if its seq was consumed under an old regime).
-// Adopted values are recorded as this app's published values (the
-// echo rule). Peers that are unlinked, stale, empty, or not the
-// parent never supply values.
-inline bool bgAdoption(const LinkShared& sh, int selfApp, BgSyncState& s, long long nowMs, BgPacket& out) {
-    int parentApp = selfApp, parentSlot = -1;
+// The group background PARENT (BLK6 first-clicked-wins — defect 5
+// above): the live, linked member with the smallest linkSeq; ties
+// (linkSeq 0 = unclaimed, or a counter reset after the shared
+// block was recreated) break by lowest appId, so every member
+// reading the same block computes the same parent. selfApp is
+// always a candidate (the caller is linked by construction);
+// selfLinkSeq, when nonzero, is self's claim even if self's slot
+// in the block has not been re-stamped with it yet (the link-join
+// path runs before the tick that republishes self's slot).
+// parentSlotOut, when given, receives the parent's slot index
+// (-1 when the parent is self and self has no slot in the block).
+inline int bgParentApp(const LinkShared& sh, int selfApp, unsigned selfLinkSeq, long long nowMs, int* parentSlotOut = nullptr) {
+    auto effSeq = [](unsigned s) { return s == 0 ? 0xFFFFFFFFu : s; };
+    // Self's effective claim: the explicit claim when given, else
+    // self's slot in the block. Computed BEFORE the peer scan — an
+    // earlier draft re-read it mid-scan and clobbered the incumbent
+    // whenever self's slot sat after the parent's in slot order.
+    unsigned selfEff = effSeq(selfLinkSeq);
+    if (selfLinkSeq == 0)
+        for (int i = 0; i < 3; ++i)
+            if (sh.slots[i].appId == selfApp && sh.slots[i].linked && slotLive(sh.slots[i], nowMs))
+                selfEff = effSeq(sh.slots[i].linkSeq);
+    unsigned bestSeq = selfEff;
+    int parent = selfApp;
     for (int i = 0; i < 3; ++i) {
         const LinkSlot& p = sh.slots[i];
-        if (p.appId < 0 || p.appId == selfApp || !p.linked || !slotLive(p, nowMs)) continue;
-        if (p.appId < parentApp) { parentApp = p.appId; parentSlot = i; }
+        if (p.appId < 0) continue;
+        if (p.appId == selfApp) continue; // self already counted above
+        if (!p.linked || !slotLive(p, nowMs)) continue;
+        const unsigned e = effSeq(p.linkSeq);
+        if (e < bestSeq || (e == bestSeq && p.appId < parent)) { bestSeq = e; parent = p.appId; }
     }
-    if (parentSlot < 0) { s.adoptedFrom = -1; return false; } // self is the parent
+    if (parentSlotOut) {
+        *parentSlotOut = -1;
+        for (int i = 0; i < 3; ++i)
+            if (sh.slots[i].appId == parent) { *parentSlotOut = i; break; }
+    }
+    return parent;
+}
+// Scan the shared block for the group PARENT's background (parent
+// ownership — defects 4 and 5 above). When this app IS the parent
+// there is nothing to adopt (and adoptedFrom resets, so a later
+// parent is never mistaken for the source of the current values).
+// Otherwise the parent's packet is adopted when it is non-zero and
+// any of these moved since the last adoption: its bgSeq (a real
+// background change), the parent's identity (handoff — the new
+// parent's standing packet is authoritative even if its seq was
+// consumed under an old regime), or the parent's linkSeq (the
+// parent relinked, or its packet first appeared in the block
+// after this app's earlier scans). Adopted values are recorded
+// as this app's published values (the echo rule). Peers that are
+// unlinked, stale, empty, or not the parent never supply values.
+inline bool bgAdoption(const LinkShared& sh, int selfApp, BgSyncState& s, long long nowMs, BgPacket& out) {
+    unsigned selfSeq = 0;
+    for (int i = 0; i < 3; ++i)
+        if (sh.slots[i].appId == selfApp) selfSeq = sh.slots[i].linkSeq;
+    int parentSlot = -1;
+    const int parentApp = bgParentApp(sh, selfApp, selfSeq, nowMs, &parentSlot);
+    if (parentApp == selfApp) { s.adoptedFrom = -1; s.adoptedLinkSeq = 0; return false; }
+    if (parentSlot < 0) return false;
     const LinkSlot& p = sh.slots[parentSlot];
     if (p.bgSeq == 0) return false;
-    if (p.bgSeq == s.seenSeq[parentSlot] && s.adoptedFrom == parentApp) return false;
+    if (p.bgSeq == s.seenSeq[parentSlot] && s.adoptedFrom == parentApp && s.adoptedLinkSeq == p.linkSeq) return false;
     s.seenSeq[parentSlot] = p.bgSeq;
     s.adoptedFrom = parentApp;
+    s.adoptedLinkSeq = p.linkSeq;
     out = BgPacket{ p.bgStyle, p.bgOpacityPct, p.bgEffect };
     s.publishedStyle = out.style; s.publishedPct = out.opacityPct; s.publishedEffect = out.effect;
     return true;
