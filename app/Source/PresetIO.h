@@ -32,6 +32,7 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("theme", juce::String(s.themeName)); set("colorMap", (int)s.colorMap);
     set("bgOpacity", s.backgroundOpacity); // v0.13
     set("bgStyle", (int)s.backgroundStyle); set("beatPulse", s.beatPulseEnabled); // v0.16
+    set("timeSig", s.beatTimeSignature); // v0.26.0: 0 = 4/4, 1 = 3/4, 2 = 6/8
     set("animeClicks", s.animeClickSounds); set("mascotFlex", s.mascotFlex); set("sixthOct", s.spectrumSixthOctave); // v0.16
     set("audioSource", juce::String(s.audioSource)); set("audioDevice", juce::String(s.audioDeviceName));
     set("outputDevice", juce::String(s.outputDeviceName));
@@ -83,6 +84,7 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.backgroundOpacity = gf("bgOpacity", s.backgroundOpacity); // v0.13
     s.backgroundStyle = (meterbar::BackgroundStyle)gi("bgStyle", (int)s.backgroundStyle); // v0.16 (absent -> recipe default)
     s.beatPulseEnabled = gb("beatPulse", s.beatPulseEnabled); s.animeClickSounds = gb("animeClicks", s.animeClickSounds); // v0.16
+    s.beatTimeSignature = gi("timeSig", s.beatTimeSignature); // v0.26.0 (absent in old presets -> recipe default 4/4)
     s.mascotFlex = gf("mascotFlex", s.mascotFlex); s.spectrumSixthOctave = gb("sixthOct", s.spectrumSixthOctave); // v0.16
     s.audioSource = g("audioSource").toString().toStdString(); s.audioDeviceName = g("audioDevice").toString().toStdString();
     s.outputDeviceName = g("outputDevice").toString().toStdString();

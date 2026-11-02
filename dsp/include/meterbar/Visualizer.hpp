@@ -125,22 +125,53 @@ public:
         for (auto& p : ps_) if (!p.burst) ++ambient;
         while (ambient < ambientWanted && (int)ps_.size() < cap) { ps_.push_back(spawnAmbient()); ++ambient; }
         // --- band triggers ---
+        // v0.26.0 (Bubbles rework, Jackson 2026-11-02: bubbles/lines
+        // "need more impact on the song"): a burst now scales with
+        // the IMPACT of the hit — the size of the energy jump, not
+        // just the level it lands at. impact_ is a fast-decaying
+        // envelope of the strongest recent jump; spawnBurst spends
+        // it on particle count, expansion speed and dot size, and
+        // colorFor spends it on brightness. The low band's trigger
+        // sits a touch lower (0.50): the kick is the heartbeat and
+        // it should not need to shout to be seen.
+        impact_ *= std::exp(-dt * 4.5f);
+        float shockDelta = 0; // this frame's strongest jump (shockwave below)
         for (int band = 0; band < 3; ++band) {
             refractory_[band] -= dt;
-            if (bandEnergy[band] >= kTrigger && refractory_[band] <= 0) {
-                refractory_[band] = kRefractorySec;
+            const float trig = band == 0 ? 0.50f : kTrigger;
+            const float delta = bandEnergy[band] - prevBand_[band];
+            if (delta > shockDelta) shockDelta = delta;
+            if (bandEnergy[band] >= trig && refractory_[band] <= 0) {
                 // v0.25.0: a sharp rise is a TRANSIENT — its burst
                 // stays tight and local at the band's field position
                 // instead of stroking wide.
-                const bool transient = (bandEnergy[band] - prevBand_[band]) >= 0.30f;
+                const bool transient = delta >= 0.30f;
+                if (transient) {
+                    const float imp = delta * 2.4f;
+                    if (imp > impact_) impact_ = imp > 1.f ? 1.f : imp;
+                }
+                refractory_[band] = transient ? 0.09f : kRefractorySec;
                 spawnBurst(band, bandEnergy[band], cap, transient);
             }
             prevBand_[band] = bandEnergy[band];
         }
         // --- integrate ---
+        // v0.26.0: SHOCKWAVE — a strong hit (any band jumping >=
+        // 0.45 in a frame) kicks the AMBIENT convergers radially
+        // outward from the centre, so the whole field ripples on
+        // the hit instead of only the burst noticing it.
+        const bool shock = shockDelta >= 0.45f;
         for (auto& p : ps_) {
             p.age += dt;
             if (!p.burst) {
+                if (shock) {
+                    const float dx = p.x - 0.5f, dy = p.y - 0.5f;
+                    const float dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist > 0.02f) {
+                        const float kick = 0.10f * shockDelta / dist;
+                        p.vx += dx * kick; p.vy += dy * kick;
+                    }
+                }
                 // converge: velocity steers toward the centre + a
                 // gentle tangential swirl; near the centre, respawn.
                 const float dx = 0.5f - p.x, dy = 0.5f - p.y;
@@ -181,6 +212,7 @@ public:
     int burstCount() const { return bursts_; } // total bursts fired (test/diagnostic)
     double time() const { return time_; }
     float activity() const { return activity_; } // smoothed band activity 0..1 (v0.20.3)
+    float impact() const { return impact_; }     // v0.26.0: strongest recent energy jump, 0..1 (decaying)
     // How visible the ambient whites are: full once activity
     // reaches 0.30, zero in silence (see the gate in update()).
     float ambientVisibility() const {
@@ -210,7 +242,9 @@ public:
         if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
         const float h = st.baseHue + cycle + p.hueT * st.paletteSpread;
         const float fadeOut = p.age > p.life * 0.7f ? 1.f - (p.age - p.life * 0.7f) / (p.life * 0.3f + 1e-6f) : 1.f;
-        return vizHsvToRgb(h, st.saturation, 0.35f + 0.65f * fadeOut);
+        // v0.26.0: burst dots burn brighter while the impact
+        // envelope is up (vizHsvToRgb clamps the value at 1).
+        return vizHsvToRgb(h, st.saturation, (0.35f + 0.65f * fadeOut) * (0.82f + 0.5f * impact_));
     }
 
 private:
@@ -247,7 +281,11 @@ private:
         const float dx = std::cos(ang), dy = std::sin(ang); // stroke direction
         float halfLen = 0.10f + 0.08f * energy;
         if (transient) halfLen *= 0.55f; // a hit stays local (v0.25.0)
-        int want = (int)std::lround(26.f + 34.f * energy);
+        // v0.26.0: the impact envelope buys MORE dots, thrown
+        // HARDER and drawn BIGGER — a hard hit reads as a bigger
+        // event than a soft threshold crossing, which is the whole
+        // complaint this rework answers.
+        int want = (int)std::lround((26.f + 34.f * energy) * (1.f + 0.6f * impact_));
         const int budget = cap - (int)ps_.size();
         if (want > budget) want = budget;
         if (want <= 0) return;
@@ -258,11 +296,11 @@ private:
             p.x = ax + dx * (t - 0.5f) * 2.f * halfLen + (next01() - 0.5f) * 0.012f;
             p.y = ay + dy * (t - 0.5f) * 2.f * halfLen + (next01() - 0.5f) * 0.012f;
             // expansion: outward from the anchor, stronger mid-stroke
-            const float out = 0.10f + 0.25f * energy * (1.f - std::abs(t - 0.5f));
+            const float out = (0.10f + 0.25f * energy * (1.f - std::abs(t - 0.5f))) * (1.f + 0.7f * impact_);
             p.vx = (p.x - ax) * out * 8.f + (next01() - 0.5f) * 0.05f;
             p.vy = (p.y - ay) * out * 8.f + (next01() - 0.5f) * 0.05f;
             p.age = 0; p.life = 0.9f + next01() * 0.8f;
-            p.size = 1.6f + next01() * 2.2f;
+            p.size = 1.6f + next01() * 2.2f + impact_ * 1.1f;
             p.hueT = t;
             p.burst = true;
             ps_.push_back(p);
@@ -274,6 +312,7 @@ private:
     float balance_ = 0;               // v0.25.0: smoothed stereo balance
     int bursts_ = 0;
     float activity_ = 0; // v0.20.3: smoothed max band energy (the silence gate)
+    float impact_ = 0;   // v0.26.0: transient-impact envelope (see the trigger block)
     double time_ = 0;
 };
 
@@ -325,6 +364,21 @@ public:
         for (int b = 0; b < 3; ++b) {
             float target = bandEnergy[b];
             target = target < 0.f ? 0.f : target > 1.f ? 1.f : target;
+            // v0.26.0 (Lines rework, same ask as Bubbles): a rising
+            // edge FEED-FORWARDS into the spring — the ribbon lunges
+            // on a hit instead of only swelling toward it — and an
+            // impact envelope (fast decay) fattens the stroke,
+            // brightens the colour and speeds the flow while the
+            // hit is fresh. The spring itself is unchanged, so the
+            // settle Jackson approved stays the settle.
+            const float delta = target - prevTarget_[b];
+            prevTarget_[b] = target;
+            impact_[b] *= std::exp(-dt * 5.f);
+            if (delta > 0.04f) {
+                const float imp = delta * 1.9f;
+                if (imp > impact_[b]) impact_[b] = imp > 1.f ? 1.f : imp;
+                vel_[b] += delta * 2.2f;
+            }
             // Damped spring: stiff enough to answer a hit, soft
             // enough to settle like ink — never a raw copy of the
             // frame energy (that jitter is what this style avoids).
@@ -334,11 +388,12 @@ public:
             if (level_[b] > 1.15f) { level_[b] = 1.15f; if (vel_[b] > 0.f) vel_[b] = 0.f; }
             // Near-still when quiet: the creep floor is 0.15 rad/s
             // and the amplitude (centreY) collapses with the level.
-            phase_[b] += dt * (0.15f + 1.35f * level_[b]) * kSpeed[b];
+            phase_[b] += dt * (0.15f + 1.35f * level_[b]) * kSpeed[b] * (1.f + 0.6f * impact_[b]);
         }
     }
 
     float level(int band) const { return level_[band]; }
+    float impact(int band) const { return impact_[band]; } // v0.26.0: this band's fresh-hit envelope 0..1
     double time() const { return time_; }
     // The particle field's gate curve: full at activity 0.30,
     // zero in silence.
@@ -358,24 +413,31 @@ public:
     }
     // Ribbon half-thickness (unit space): swells with the level,
     // breathes along the line so the stroke feels hand-inked.
+    // v0.26.0: a fresh hit fattens the stroke on top of the level.
     float halfThick(int band, int i) const {
         const float u = kPoints > 1 ? (float)i / (float)(kPoints - 1) : 0.f;
         const float breathe = 0.75f + 0.25f * std::sin(phase_[band] * 0.9f + u * 3.1f + (float)band * 1.7f);
-        return (0.004f + 0.030f * level_[band]) * breathe;
+        return (0.004f + 0.030f * level_[band] + 0.012f * impact_[band]) * breathe;
     }
     // Band colour from the same palette as the burst dots: the
     // three bands fan across the palette spread from the base hue.
+    // v0.26.0: brightness follows the level and the impact envelope
+    // instead of sitting at a constant 0.9 — hits visibly flare.
     VizRgb colorFor(int band, const VisualizerSettings& st) const {
         float cycle = 0.f;
         if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
         const float h = st.baseHue + cycle + (float)band * st.paletteSpread * 0.33f;
-        return vizHsvToRgb(h, st.saturation, 0.9f);
+        float v = 0.5f + 0.5f * level_[band] + 0.35f * impact_[band];
+        v = v < 0.f ? 0.f : v > 1.f ? 1.f : v;
+        return vizHsvToRgb(h, st.saturation, v);
     }
 
 private:
     float level_[3] = { 0, 0, 0 };
     float vel_[3] = { 0, 0, 0 };
     float phase_[3] = { 0, 0, 0 };
+    float impact_[3] = { 0, 0, 0 };    // v0.26.0: per-band fresh-hit envelope
+    float prevTarget_[3] = { 0, 0, 0 }; // v0.26.0: last frame's target per band (edge detection)
     float wob_[3][kPoints] = {};
     float activity_ = 0;
     double time_ = 0;
@@ -403,6 +465,13 @@ struct VizFieldDot {
     float size = 2;
     int band = 1;    // the band that feeds this dot (palette + orbit speed)
     int vortex = 0;  // the vortex it orbits
+    // v0.26.0: the TAIL — the dot's positions ~45 ms and ~90 ms
+    // ago, rendered behind it as fading ghosts that brighten with
+    // the field's pulse envelope (Jackson: "a tail coming from it
+    // that also pulses with the transients"). trailSet is false
+    // until the first trail shift stamps them.
+    float trailX[2] = { 0, 0 }, trailY[2] = { 0, 0 };
+    bool trailSet = false;
 };
 
 class VisualizerField {
@@ -411,8 +480,13 @@ public:
     static constexpr int kFieldTarget = 150;
     static constexpr int kFieldHardCap = 400;
 
+    // beatEnv (v0.26.0): the beat grid's downbeat envelope 0..1
+    // from the app (BeatTracker's downbeatEnv; the caller falls
+    // back to BeatPulse's level until the grid locks). Defaulted
+    // so existing callers — and the whole pre-v0.26 behaviour —
+    // are untouched when no beat is fed.
     void update(float dt, const float bandEnergy[3], const VisualizerSettings& st,
-                float stereoBalance = 0.f) {
+                float stereoBalance = 0.f, float beatEnv = 0.f) {
         if (dt <= 0) return;
         time_ += dt;
         {
@@ -426,9 +500,43 @@ public:
             float a = rate * dt; if (a > 1.f) a = 1.f;
             activity_ += (frame - activity_) * a;
         }
+        // --- v0.26.0 TRANSIENTS + PULSE (Jackson, 2026-11-02:
+        // the field "needs to be more reactive to transient
+        // differences and pulse more maybe in transparency, and
+        // have a tail that also pulses with the transients") ---
+        // Per band, the jump above a slow (~0.7 s) smoothed level
+        // is the transient; pulse_ is the field-wide envelope of
+        // the strongest one, with the downbeat folded in. Orbit
+        // speed, dot brightness (the render path reads brightness
+        // as opacity against the black base) and the tail ghosts
+        // all spend pulse_.
+        pulse_ = 0;
+        for (int b = 0; b < 3; ++b) {
+            const float jump = bandEnergy[b] - smoothE_[b];
+            float a = 1.5f * dt; if (a > 1.f) a = 1.f;
+            smoothE_[b] += (bandEnergy[b] - smoothE_[b]) * a;
+            trans_[b] *= std::exp(-dt * 4.f);
+            if (jump > 0.f) {
+                const float t = jump * 1.7f;
+                if (t > trans_[b]) trans_[b] = t > 1.f ? 1.f : t;
+            }
+            if (trans_[b] > pulse_) pulse_ = trans_[b];
+        }
+        const float beat = beatEnv < 0.f ? 0.f : beatEnv > 1.f ? 1.f : beatEnv;
+        if (beat * 0.9f > pulse_) pulse_ = beat * 0.9f;
+        // Downbeat IMPULSE (deliverable: field objects "speed up
+        // or slow down and impulse with the downbeats"): on the
+        // envelope's rising edge through 0.65, every dot takes a
+        // radial kick away from its own vortex centre.
+        const bool downbeatKick = beat >= 0.65f && prevBeatEnv_ < 0.65f;
+        prevBeatEnv_ = beat;
         int cap = st.particleCap < 16 ? 16 : (st.particleCap > kFieldHardCap ? kFieldHardCap : st.particleCap);
         if (cap > kFieldTarget) cap = kFieldTarget;
         while ((int)dots_.size() < cap) dots_.push_back(spawnDot(bandEnergy));
+        // tail history: shift every ~45 ms of model time
+        trailTimer_ += dt;
+        const bool shiftTrail = trailTimer_ >= 0.045f;
+        if (shiftTrail) trailTimer_ = 0;
         for (auto& d : dots_) {
             d.age += dt;
             float cx, cy;
@@ -436,10 +544,21 @@ public:
             const float dx = cx - d.x, dy = cy - d.y;
             const float dist = std::sqrt(dx * dx + dy * dy);
             if (dist < 0.015f || d.age > d.life) { d = spawnDot(bandEnergy); continue; }
+            if (shiftTrail) {
+                d.trailX[1] = d.trailX[0]; d.trailY[1] = d.trailY[0];
+                d.trailX[0] = d.x; d.trailY[0] = d.y;
+                d.trailSet = true;
+            }
+            if (downbeatKick && dist > 0.02f) {
+                const float kick = (0.22f + 0.30f * pulse_) / dist;
+                d.vx += -dx * kick; d.vy += -dy * kick; // away from the centre
+            }
             // Orbit: tangential flow around the vortex, weak
-            // inward pull; speed follows the feeding band's energy.
-            const float e = bandEnergy[d.band < 0 ? 0 : d.band > 2 ? 2 : d.band];
-            const float orbit = 0.10f + 0.30f * e;
+            // inward pull; speed follows the feeding band's energy
+            // — and, v0.26.0, that band's transients and the beat.
+            const int bi = d.band < 0 ? 0 : d.band > 2 ? 2 : d.band;
+            const float e = bandEnergy[bi];
+            const float orbit = (0.10f + 0.30f * e) * (1.f + 1.3f * trans_[bi]) * (1.f + 0.8f * beat);
             d.vx += ((-dy / dist) * orbit + (dx / dist) * 0.03f) * dt;
             d.vy += ((dx / dist) * orbit + (dy / dist) * 0.03f) * dt;
             d.vx *= 0.97f; d.vy *= 0.97f;
@@ -466,18 +585,37 @@ public:
         const float v = activity_ / 0.30f;
         return v < 0.f ? 0.f : v > 1.f ? 1.f : v;
     }
+    float pulse() const { return pulse_; } // v0.26.0: transient/downbeat envelope 0..1 from the last update
     // Palette like the burst dots: the feeding band fans across
-    // the spread from the base hue; same age envelope.
+    // the spread from the base hue; same age envelope. v0.26.0:
+    // the value also rides pulse_ — against the black render base
+    // that brightness IS the field's opacity, so this is the
+    // "pulse more in transparency" Jackson asked for.
     VizRgb colorFor(const VizFieldDot& d, const VisualizerSettings& st) const {
         float cycle = 0.f;
         if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
         const float h = st.baseHue + cycle + (float)(d.band) * 0.5f * st.paletteSpread;
-        const float fadeIn = d.age < 0.4f ? 0.4f + 0.6f * (d.age / 0.4f) : 1.f;
-        const float fadeOut = d.age > d.life * 0.7f ? 1.f - (d.age - d.life * 0.7f) / (d.life * 0.3f + 1e-6f) : 1.f;
-        return vizHsvToRgb(h, st.saturation, (0.30f + 0.70f * fadeOut) * fadeIn * visibility());
+        return vizHsvToRgb(h, st.saturation, valueFor(d) * (0.70f + 0.55f * pulse_));
+    }
+    // A tail ghost's colour: same hue as its dot, dimmer the older
+    // the ghost, and brightened by pulse_ so the tail itself
+    // pulses with the transients.
+    VizRgb trailColorFor(const VizFieldDot& d, const VisualizerSettings& st, int k) const {
+        float cycle = 0.f;
+        if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
+        const float h = st.baseHue + cycle + (float)(d.band) * 0.5f * st.paletteSpread;
+        const float ghost = 0.50f - 0.18f * (float)(k < 0 ? 0 : k > 1 ? 1 : k);
+        return vizHsvToRgb(h, st.saturation, valueFor(d) * ghost * (0.55f + 0.65f * pulse_));
     }
 
 private:
+    // The dot's own brightness envelope (age fades x the silence
+    // gate), shared by colorFor and trailColorFor.
+    float valueFor(const VizFieldDot& d) const {
+        const float fadeIn = d.age < 0.4f ? 0.4f + 0.6f * (d.age / 0.4f) : 1.f;
+        const float fadeOut = d.age > d.life * 0.7f ? 1.f - (d.age - d.life * 0.7f) / (d.life * 0.3f + 1e-6f) : 1.f;
+        return (0.30f + 0.70f * fadeOut) * fadeIn * visibility();
+    }
     std::uint32_t rng_ = 0x27d4eb2fu;
     float next01() { // splitmix32, own stream (deterministic)
         rng_ += 0x9e3779b9u;
@@ -505,6 +643,7 @@ private:
         d.vx = 0; d.vy = 0;
         d.age = 0; d.life = 2.5f + next01() * 3.f;
         d.size = 1.4f + next01() * 2.0f;
+        d.trailSet = false; d.trailX[0] = d.trailX[1] = d.x; d.trailY[0] = d.trailY[1] = d.y;
         // Join the vortex nearest the birthplace (x-led: the
         // field positions are horizontal by design).
         int best = 0; float bestScore = 1e9f;
@@ -519,6 +658,11 @@ private:
     std::vector<VizFieldDot> dots_;
     float activity_ = 0;
     float balance_ = 0;
+    float smoothE_[3] = { 0, 0, 0 }; // v0.26.0: slow per-band level (transient reference)
+    float trans_[3] = { 0, 0, 0 };   // v0.26.0: per-band transient envelopes
+    float pulse_ = 0;                // v0.26.0: field-wide pulse envelope
+    float prevBeatEnv_ = 0;          // v0.26.0: downbeat edge detection
+    float trailTimer_ = 0;           // v0.26.0: tail shift cadence
     double time_ = 0;
 };
 

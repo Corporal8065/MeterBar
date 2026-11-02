@@ -127,6 +127,14 @@ MainComponent::MainComponent() {
     // modules in display order
     auto add = [&](ModuleView::Kind k){ auto m = std::make_unique<ModuleView>(k); m->data = &frame; m->flexIndex = (int)modules.size(); addAndMakeVisible(m.get()); modules.push_back(std::move(m)); };
     add(ModuleView::Kind::Spectrogram); add(ModuleView::Kind::Waveform); add(ModuleView::Kind::Loudness);
+    // v0.26.0: the waveform's time-signature chip click cycles the
+    // meter (4/4 -> 3/4 -> 6/8) and re-meters the beat tracker.
+    for (auto& m : modules) if (m->kind == ModuleView::Kind::Waveform)
+        m->onSigCycle = [this] {
+            engine.state.beatTimeSignature = (engine.state.beatTimeSignature + 1) % 3;
+            engine.applyBeatMeter();
+            uiClick(ClickSounds::Which::Pop);
+        };
     add(ModuleView::Kind::Stereometer); add(ModuleView::Kind::Oscilloscope); add(ModuleView::Kind::Spectrum);
     // v0.15: splitters between modules (drag to resize a module). Created
     // after the modules so they sit on top; layoutModules() positions and
@@ -650,7 +658,22 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
             // v0.25.0 FIELD: the vortex dots, drawn through the
             // exact same dot path (and the same half-res + blur
             // envelope) as Bubbles.
+            // v0.26.0: each dot's TAIL ghosts draw first (oldest
+            // ghost first), smaller and dimmer, brightening with
+            // the field's pulse — the tail pulses with the
+            // transients, per Jackson's ask.
             for (auto& p : vizField.particles()) {
+                if (p.trailSet) {
+                    for (int k = 1; k >= 0; --k) {
+                        auto tc = vizField.trailColorFor(p, vs, k);
+                        ig.setColour(juce::Colour(tc.r, tc.g, tc.b));
+                        float tx, ty;
+                        meterbar::fieldToLocal(fm, p.trailX[k], p.trailY[k], tx, ty);
+                        const float tr = p.size * 1.35f * (0.82f - 0.20f * (float)k);
+                        if (!meterbar::fieldDotVisible(tx, ty, tr, iw, ih)) continue;
+                        ig.fillEllipse(tx - tr, ty - tr, tr * 2.f, tr * 2.f);
+                    }
+                }
                 auto c = vizField.colorFor(p, vs);
                 ig.setColour(juce::Colour(c.r, c.g, c.b));
                 float px, py;
@@ -814,6 +837,28 @@ void MainComponent::prepareFrame() {
     waveHist.pushBlock(bufL.data() + std::max(0, need - 512), bufR.data() + std::max(0, need - 512), 512,
                        st.waveCh1, st.waveCh2, st.waveHistory, st.linkedSpeed);
     frame.waveCh1 = waveHist.ch1(); frame.waveCh2 = waveHist.ch2();
+    // v0.26.0: the auto-BPM grid, copied out of the engine for the
+    // waveform / spectrogram / scope overlays. The overlay
+    // timebases mirror the histories' own advance rules: the
+    // waveform advances round(1 + linkedSpeed) columns per frame,
+    // the spectrogram max(0.1, linkedSpeed) * 0.2 rows per frame
+    // (SpectrogramHistory::pushRow's accumulator), frames run at
+    // fpsLimit — so a beat's age maps to the same pixels the
+    // histories themselves scroll by.
+    frame.beatLocked = engine.beatLocked();
+    frame.beatBpm = (float)engine.beatBpmValue();
+    frame.beatConfidence = engine.beatConfidence();
+    frame.beatCountInBar = engine.beatCountInBar();
+    frame.beatSig = st.beatTimeSignature;
+    frame.beatDownbeatEnv = engine.beatDownbeatEnv();
+    {
+        float ages[64]; int counts[64];
+        const int nb = engine.collectBeats(30.f, ages, counts, 64);
+        frame.beatAges.assign(ages, ages + nb);
+        frame.beatCounts.assign(counts, counts + nb);
+    }
+    frame.waveSecPerColumn = 1.0f / ((float)std::max(1, st.fpsLimit) * (float)std::max(1, (int)std::lround(1 + st.linkedSpeed)));
+    frame.sgSecPerRow = 1.0f / ((float)std::max(1, st.fpsLimit) * std::max(0.1f, st.linkedSpeed) * 0.2f);
     // Loudness + stereo + scope
     frame.loudDb = engine.loudnessValue(); frame.peakLin = engine.peakValue();
     // v0.16 loudness pack readouts (integrated is gated BS.1770; true peak
@@ -892,7 +937,12 @@ void MainComponent::prepareFrame() {
         // now also receives the stereo balance for its distributed
         // emitters.
         if (st.visualizerStyle == 1) vizLines.update(dt, e.data());
-        else if (st.visualizerStyle == 2) vizField.update(dt, e.data(), vs, latestBalance_);
+        // v0.26.0: the Field also hears the beat — the grid's
+        // downbeat envelope once it locks, the Beat Pulse envelope
+        // until then — so its objects impulse on the downbeats.
+        else if (st.visualizerStyle == 2) vizField.update(dt, e.data(), vs, latestBalance_,
+                                                          engine.beatLocked() ? engine.beatDownbeatEnv()
+                                                                              : engine.beatLevel() * 0.8f);
         else visualizer.update(dt, e.data(), vs, latestBalance_);
     }
 }
@@ -917,7 +967,7 @@ void MainComponent::savePresetInteractive(bool saveAs) {
 }
 void MainComponent::loadPresetFile(const juce::File& f) {
     if (presetio::load(f, engine.state)) {
-        engine.applySource(); applyTheme(); applyFps(); layoutModules(); repaint(); syncScreenSpace(); uiClick(ClickSounds::Which::Sparkle);
+        engine.applySource(); engine.applyBeatMeter(); applyTheme(); applyFps(); layoutModules(); repaint(); syncScreenSpace(); uiClick(ClickSounds::Which::Sparkle);
         // v0.20.1 (item 2 audit): presets always SAVED the window
         // position (winX/winY/winW/winH ride in PresetState) but
         // loading one never MOVED the window — Jackson's requirement

@@ -18,6 +18,15 @@ struct AnalysisData {
     double loudPeakDbL = -120, loudPeakDbR = -120; // v0.15: per-channel peak holds (dBFS)
     double loudIntegrated = -120, loudShortTerm = -120, loudTruePeakDb = -120; // v0.16 loudness pack
     float beatGlow = 0;                      // v0.16: onset envelope 0..1 (Beat Pulse + mascot)
+    // v0.26.0: auto-BPM grid (core BeatTracker, fed in AudioEngine,
+    // copied here per frame by MainComponent). beatAges/beatCounts
+    // are the recent grid beats, most recent first, ages ascending.
+    bool beatLocked = false; float beatBpm = 0; float beatConfidence = 0;
+    int beatCountInBar = 0; int beatSig = 0; // beatSig: 0 = 4/4, 1 = 3/4, 2 = 6/8 (mirrors PresetState::beatTimeSignature)
+    float beatDownbeatEnv = 0;
+    std::vector<float> beatAges; std::vector<int> beatCounts;
+    float waveSecPerColumn = 0;              // waveform overlay timebase (seconds per history column)
+    float sgSecPerRow = 0;                   // spectrogram overlay timebase (seconds per history row)
     std::vector<float> scopeBuf; float scopeFreq = 0;
     std::vector<float> scopeLow, scopeMid, scopeHigh; // v0.20.0: true 3-band split of scopeBuf (core splitScopeBands) for Multi
     double sampleRate = 48000;
@@ -27,7 +36,38 @@ public:
     enum class Kind { Spectrum, Spectrogram, Waveform, Loudness, Stereometer, Oscilloscope };
     Kind kind; const AnalysisData* data = nullptr;
     int flexIndex = 0; // v0.15: index into PresetState::moduleFlex (display order)
-    explicit ModuleView(Kind k) : kind(k) { setInterceptsMouseClicks(false, false); setOpaque(false); }
+    // v0.26.0: the Waveform view alone intercepts clicks — the
+    // time-signature chip at its bottom-right is clickable (every
+    // other view keeps the family's fall-through behaviour).
+    explicit ModuleView(Kind k) : kind(k) { setInterceptsMouseClicks(k == Kind::Waveform, false); setOpaque(false); }
+    std::function<void()> onSigCycle; // v0.26.0: MainComponent wires the chip click (cycle 4/4 -> 3/4 -> 6/8)
+    void mouseDown(const juce::MouseEvent& e) override {
+        if (kind == Kind::Waveform && onSigCycle) {
+            auto plot = getLocalBounds().toFloat().reduced(4).withTrimmedTop(14);
+            if (sigChipRect(plot).contains(e.position)) onSigCycle();
+        }
+    }
+    // The chip's rect inside a plot area — shared by the waveform's
+    // paint and its click test so the two can never drift apart.
+    static juce::Rectangle<float> sigChipRect(juce::Rectangle<float> plot) {
+        return { plot.getRight() - 66.f, plot.getBottom() - 15.f, 62.f, 13.f };
+    }
+    // v0.26.0 TEXT POP (Jackson, 2026-11-01/02): when transparency
+    // is in play (textPop_, set in paint from backgroundOpacity),
+    // every text first draws a black copy offset 1 px down-right
+    // behind itself, so it pops and stays readable over whatever
+    // the desktop shows through the bar. The caller sets the font
+    // before calling, exactly as with drawText.
+    bool textPop_ = false;
+    void drawPoppedText(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
+                        juce::Justification j, juce::Colour colour) {
+        if (textPop_) {
+            g.setColour(juce::Colours::black.withAlpha(0.85f));
+            g.drawText(text, r.translated(1.f, 1.f), j);
+        }
+        g.setColour(colour);
+        g.drawText(text, r, j);
+    }
     juce::Image sgCache; // spectrogram render cache (v0.11)
     // v0.20.2: what the cache was last rendered FROM — drawSpectrogram
     // skips its re-render while every input in this signature is
@@ -68,7 +108,11 @@ public:
         auto hdr = r.reduced(4).removeFromTop(13);
         g.setColour(acc); g.fillEllipse(hdr.getX() + 1, hdr.getCentreY() - 2.5f, 5.f, 5.f);
         g.setFont(juce::Font(10.f, juce::Font::bold));
-        g.drawText(title.toUpperCase(), hdr.withTrimmedLeft(10), juce::Justification::topLeft);
+        // v0.26.0: text pop arms whenever the panel behind the text
+        // is translucent — the section title is the case Jackson
+        // named first (Spectrogram / Waveform / Loudness labels).
+        textPop_ = st.backgroundOpacity < 0.999f;
+        drawPoppedText(g, title.toUpperCase(), hdr.withTrimmedLeft(10), juce::Justification::topLeft, acc);
         auto plot = r.reduced(4).withTrimmedTop(14);
         switch (kind) {
         case Kind::Spectrum: drawSpectrum(g, plot, st); break;
@@ -151,7 +195,31 @@ private:
         };
         for (int px = 0; px < W; ++px) {
             int bin = binAt[(size_t)px];
-            float db = drawnDb(bin); float y = dbToY(db, p); float x = p.getX() + px;
+            float db = drawnDb(bin);
+            // v0.26.0 (Jackson: the subs "look like a block of
+            // sound" even though songs have little below 40 Hz):
+            // on the log axis the whole 20-40 Hz span covers ~10%
+            // of the width but holds only bins 1-3, so the stepped
+            // bin LUT painted those few values as one flat block.
+            // Below 40 Hz the pixel now samples the spectrum at
+            // its TRUE frequency — linear interpolation between
+            // the neighbouring bins in log-frequency — so real
+            // sub content shows its actual shape (a 30 Hz tone is
+            // a hill, silence is the floor) while the rest of the
+            // axis keeps the exact stepped look it always had.
+            if (W > 0) {
+                const float fx = (float)px / (float)W;
+                const float freq = meterbar::SpectrumAnalyser::xToFreq(fx, 20.0, maxF, st.fftScale);
+                if (freq < 40.f && nb > 3) {
+                    const float fb = juce::jlimit(1.f, (float)nb - 1.001f, freq * (float)fftSz / (float)sr);
+                    const int b0 = (int)std::floor(fb);
+                    const float t = fb - (float)b0;
+                    db = (*drawSrc)[(size_t)b0] * (1.f - t) + (*drawSrc)[(size_t)b0 + 1] * t
+                         + meterbar::spectrumDisplayTiltCompDb(freq, st.spectrumDisplayTiltDb);
+                    bin = b0;
+                }
+            }
+            float y = dbToY(db, p); float x = p.getX() + px;
             if (style == meterbar::PresetState::SpectrumStyle::Bars || style == meterbar::PresetState::SpectrumStyle::Both) {
                 int bw = std::max(1, (int)p.getWidth() / bars);
                 if (px % bw == 0) { g.setColour(specColour(db, px, bin)); g.fillRect(x, y, (float)bw - 1, p.getBottom() - y); }
@@ -165,9 +233,9 @@ private:
         if (style == meterbar::PresetState::SpectrumStyle::Fft || style == meterbar::PresetState::SpectrumStyle::Both) {
             g.setColour(th.moduleAccent((int)Kind::Spectrum)); g.strokePath(path, juce::PathStrokeType(1.2f));
         }
-        g.setColour(th.dim); g.setFont(9.f);
-        g.drawText("20", p.removeFromBottom(10), juce::Justification::bottomLeft);
-        g.drawText("20k", p, juce::Justification::bottomRight);
+        g.setFont(9.f);
+        drawPoppedText(g, "20", p.removeFromBottom(10), juce::Justification::bottomLeft, th.dim);
+        drawPoppedText(g, "20k", p, juce::Justification::bottomRight, th.dim);
     }
     // Level heat adapter (v0.14): the DSP spectrumHeat ramp — the full
     // palette (violet -> teal -> green -> yellow -> orange -> hot red) —
@@ -258,8 +326,27 @@ private:
             sgRenderedVert = vert; sgRenderedSr = srSg; sgRenderedColorMap = (int)st.colorMap;
         }
         g.drawImage(sgCache, p);
+        // v0.26.0: the same beat grid over the spectrogram. Age in
+        // the render maps x (horizontal) or y (vertical) linearly
+        // across the plot — the overlay follows that exact mapping
+        // (sgSecPerRow is MainComponent's estimate of the history's
+        // row cadence), so a beat line tracks the spectrogram's own
+        // scrolling. Drawn over the blit, live each paint — the
+        // cached image and its skip logic are untouched.
+        if (data->beatLocked && data->sgSecPerRow > 0.f && !data->beatAges.empty()) {
+            const float confA = 0.30f + 0.70f * juce::jlimit(0.f, 1.f, data->beatConfidence);
+            for (size_t i = 0; i < data->beatAges.size() && i < data->beatCounts.size(); ++i) {
+                const float rowsAgo = data->beatAges[i] / data->sgSecPerRow;
+                if (rowsAgo > (float)sg->rows()) break;
+                const float frac = rowsAgo / (float)sg->rows();
+                const bool down = data->beatCounts[i] == 1;
+                g.setColour((down ? data->theme.accent : data->theme.dim).withAlpha((down ? 0.65f : 0.35f) * confA));
+                if (vert) { const float y = p.getY() + frac * p.getHeight(); g.drawLine(p.getX(), y, p.getRight(), y, down ? 1.3f : 1.0f); }
+                else { const float x = p.getX() + frac * p.getWidth(); g.drawLine(x, p.getY(), x, p.getBottom(), down ? 1.3f : 1.0f); }
+            }
+        }
     }
-    void drawWaveform(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState&) {
+    void drawWaveform(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
         auto& th = data->theme; int n = (int)data->waveCh1.size(); if (n == 0) return;
         float midY = p.getCentreY();
         for (int x = 0; x < (int)p.getWidth(); ++x) {
@@ -280,6 +367,48 @@ private:
             if (!data->waveCh2.empty()) { float v2 = data->waveCh2[i]; g.setColour(th.moduleAccent((int)Kind::Waveform).withAlpha(0.85f));
                 float h2 = juce::jmax(1.f, std::sqrt(juce::jlimit(0.f, 1.f, v2)) * p.getHeight() * 0.5f); g.fillRect(p.getX() + x, midY - h2, 1.f, 2.f); }
         }
+        // v0.26.0: the auto-BPM beat grid over the waveform (Jackson,
+        // 2026-11-02). The history's timebase is columns advancing
+        // per UI frame (waveSecPerColumn, computed by MainComponent
+        // from the same cadence), the newest column is the right
+        // edge, and the tracker hands over each recent beat's age —
+        // so a beat line sits exactly over the kick that made it.
+        // Downbeats (count 1) draw full height in the accent; other
+        // beats are shorter and dimmer; every beat carries its
+        // count at the top. Line alpha rides the grid's confidence.
+        if (data->beatLocked && data->waveSecPerColumn > 0.f && !data->beatAges.empty()) {
+            const float cols = (float)n;
+            const float confA = 0.30f + 0.70f * juce::jlimit(0.f, 1.f, data->beatConfidence);
+            g.setFont(9.f);
+            for (size_t i = 0; i < data->beatAges.size() && i < data->beatCounts.size(); ++i) {
+                const float colsAgo = data->beatAges[i] / data->waveSecPerColumn;
+                if (colsAgo > cols) break; // ages ascend — the rest are off-screen
+                const float x = p.getRight() - (colsAgo / cols) * p.getWidth();
+                const bool down = data->beatCounts[i] == 1;
+                g.setColour((down ? th.accent : th.dim).withAlpha((down ? 0.80f : 0.45f) * confA));
+                const float top = down ? p.getY() : p.getY() + p.getHeight() * 0.30f;
+                g.drawLine(x, top, x, p.getBottom(), down ? 1.4f : 1.0f);
+                drawPoppedText(g, juce::String(data->beatCounts[i]),
+                               juce::Rectangle<float>(x - 6.f, p.getY(), 12.f, 10.f),
+                               juce::Justification::centred, down ? th.text : th.dim);
+            }
+        }
+        // v0.26.0: the time-signature chip, bottom-right — shows
+        // the meter and, once the grid locks, the detected BPM.
+        // Clicking it cycles 4/4 -> 3/4 -> 6/8 (see mouseDown).
+        {
+            auto chip = sigChipRect(p);
+            g.setColour(th.deepest.withAlpha(0.65f));
+            g.fillRoundedRectangle(chip, 3.f);
+            g.setColour(th.border.withAlpha(0.8f));
+            g.drawRoundedRectangle(chip, 3.f, 0.75f);
+            const char* sig = data->beatSig == 1 ? "3/4" : data->beatSig == 2 ? "6/8" : "4/4";
+            juce::String label = sig;
+            if (data->beatLocked && data->beatBpm > 0.f) label += " " + juce::String((int)std::lround(data->beatBpm));
+            g.setFont(juce::Font(9.f, juce::Font::bold));
+            drawPoppedText(g, label, chip, juce::Justification::centred, th.text);
+        }
+        (void)st;
     }
     void drawLoudness(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
         // v0.15: VERTICAL meter (Jackson's ask) — L and R as up-down columns
@@ -316,26 +445,25 @@ private:
         auto mkBar = [&](juce::Rectangle<float> b) { return b.withTop(plotTop).withBottom(b.getBottom() - 11.f); };
         chanBar(mkBar(barL), data->loudDbL, data->loudPeakDbL);
         chanBar(mkBar(barR), data->loudDbR, data->loudPeakDbR);
-        g.setColour(th.dim); g.setFont(9.f);
-        g.drawText("L", juce::Rectangle<float>(barL.getX(), barL.getBottom() - 11.f, barW, 10.f), juce::Justification::centred);
-        g.drawText("R", juce::Rectangle<float>(barR.getX(), barR.getBottom() - 11.f, barW, 10.f), juce::Justification::centred);
+        g.setFont(9.f);
+        drawPoppedText(g, "L", juce::Rectangle<float>(barL.getX(), barL.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
+        drawPoppedText(g, "R", juce::Rectangle<float>(barR.getX(), barR.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
         // numeric readout immediately right of the bars, level-live
         auto num = plot.withTrimmedLeft(6);
-        g.setColour(th.text); g.setFont(juce::Font(22.f, juce::Font::bold));
-        g.drawText(v <= -119 ? juce::String("--") : juce::String(v, 1), num.removeFromTop(28), juce::Justification::centredLeft);
-        g.setColour(th.dim); g.setFont(10.f);
-        g.drawText(juce::String(meterbar::loudnessModeName(st.loudnessMode)), num.removeFromTop(13), juce::Justification::topLeft);
-        g.drawText("Peak " + (data->peakLin > 0 ? juce::String(20 * std::log10(data->peakLin), 1) + " dBFS" : juce::String("-inf")),
-                   num.removeFromTop(13), juce::Justification::topLeft);
+        g.setFont(juce::Font(22.f, juce::Font::bold));
+        drawPoppedText(g, v <= -119 ? juce::String("--") : juce::String(v, 1), num.removeFromTop(28), juce::Justification::centredLeft, th.text);
+        g.setFont(10.f);
+        drawPoppedText(g, juce::String(meterbar::loudnessModeName(st.loudnessMode)), num.removeFromTop(13), juce::Justification::topLeft, th.dim);
+        drawPoppedText(g, "Peak " + (data->peakLin > 0 ? juce::String(20 * std::log10(data->peakLin), 1) + " dBFS" : juce::String("-inf")),
+                       num.removeFromTop(13), juce::Justification::topLeft, th.dim);
         // v0.16 loudness pack: Integrated + Short-Term LUFS, True Peak,
         // and the streaming-target read against the integrated value.
         num.removeFromTop(2);
         g.setFont(9.5f);
         auto fmtDb = [](double x) { return x <= -119 ? juce::String("--") : juce::String(x, 1); };
-        g.setColour(th.text);
-        g.drawText("Integrated " + fmtDb(data->loudIntegrated) + " LUFS", num.removeFromTop(12), juce::Justification::topLeft);
-        g.drawText("Short-Term " + fmtDb(data->loudShortTerm) + " LUFS", num.removeFromTop(12), juce::Justification::topLeft);
-        g.drawText("True Peak " + fmtDb(data->loudTruePeakDb) + " dBTP", num.removeFromTop(12), juce::Justification::topLeft);
+        drawPoppedText(g, "Integrated " + fmtDb(data->loudIntegrated) + " LUFS", num.removeFromTop(12), juce::Justification::topLeft, th.text);
+        drawPoppedText(g, "Short-Term " + fmtDb(data->loudShortTerm) + " LUFS", num.removeFromTop(12), juce::Justification::topLeft, th.text);
+        drawPoppedText(g, "True Peak " + fmtDb(data->loudTruePeakDb) + " dBTP", num.removeFromTop(12), juce::Justification::topLeft, th.text);
         // v0.17: the two streaming-target lines are a SECTION, off in the
         // Default recipe (Settings -> Loudness -> "Streaming target
         // lines"). The Integrated/Short-Term/True Peak lines above always
@@ -346,9 +474,8 @@ private:
                 if (std::abs(d) <= 0.5) return juce::String("at target");
                 return d > 0 ? "over by " + juce::String(d, 1) : "under by " + juce::String(-d, 1);
             };
-            g.setColour(th.dim);
-            g.drawText("Spotify/YT -14: " + vs(data->loudIntegrated, -14.0), num.removeFromTop(12), juce::Justification::topLeft);
-            g.drawText("Apple Music -16: " + vs(data->loudIntegrated, -16.0), num.removeFromTop(12), juce::Justification::topLeft);
+            drawPoppedText(g, "Spotify/YT -14: " + vs(data->loudIntegrated, -14.0), num.removeFromTop(12), juce::Justification::topLeft, th.dim);
+            drawPoppedText(g, "Apple Music -16: " + vs(data->loudIntegrated, -16.0), num.removeFromTop(12), juce::Justification::topLeft, th.dim);
         }
     }
     void drawStereo(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
@@ -382,14 +509,31 @@ private:
             else if (st.stereoColor == meterbar::StereoColor::MultiBand) c = (i < n / 3 ? lowC : i < 2 * n / 3 ? midC : highC);
             g.setColour(c.withAlpha(0.7f)); g.fillRect(x, y, ps, ps);
         }
-        g.setColour(th.dim); g.setFont(9.f);
-        g.drawText("L", sq.withTrimmedLeft(3).withTrimmedTop(1), juce::Justification::topLeft);
-        g.drawText("R", sq.withTrimmedRight(3), juce::Justification::centredRight);
-        g.setColour(th.text); g.setFont(10.f);
+        g.setFont(9.f);
+        drawPoppedText(g, "L", sq.withTrimmedLeft(3).withTrimmedTop(1), juce::Justification::topLeft, th.dim);
+        drawPoppedText(g, "R", sq.withTrimmedRight(3), juce::Justification::centredRight, th.dim);
+        g.setFont(10.f);
         // v0.16: width % joins the correlation readout under the vectorscope
         // (correlation itself landed in v0.15; both update live per frame).
-        g.drawText("corr " + juce::String(f.correlation, 2) + "   width " + juce::String((int)std::lround(f.widthPct)) + "%   bal " + juce::String(f.balance, 2),
-                   getLocalBounds().toFloat().removeFromBottom(12).withTrimmedLeft(4), juce::Justification::bottomLeft);
+        drawPoppedText(g, "corr " + juce::String(f.correlation, 2) + "   width " + juce::String((int)std::lround(f.widthPct)) + "%   bal " + juce::String(f.balance, 2),
+                       getLocalBounds().toFloat().removeFromBottom(12).withTrimmedLeft(4), juce::Justification::bottomLeft, th.text);
+    }
+    // v0.26.0: the beat grid's readout for the scope. Its window
+    // (10..200 ms) is shorter than one beat, so grid LINES cannot
+    // live here the way they do on the waveform/spectrogram; what
+    // fits honestly is the detected tempo + the live bar count,
+    // with a downbeat dot that lights as count 1 lands.
+    void drawScopeBeatReadout(juce::Graphics& g, juce::Rectangle<float> p, const Theme& th) {
+        if (!data->beatLocked || data->beatBpm <= 0.f) return;
+        const int bpb = data->beatSig == 1 ? 3 : data->beatSig == 2 ? 6 : 4;
+        auto row = p.removeFromBottom(11.f);
+        if (data->beatDownbeatEnv > 0.35f) {
+            g.setColour(th.accent);
+            g.fillEllipse(row.getX() + 1.f, row.getCentreY() - 2.5f, 5.f, 5.f);
+        }
+        g.setFont(9.f);
+        drawPoppedText(g, juce::String((int)std::lround(data->beatBpm)) + " BPM  " + juce::String(data->beatCountInBar) + "/" + juce::String(bpb),
+                       row.withTrimmedLeft(9), juce::Justification::bottomLeft, th.dim);
     }
     void drawScope(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
         auto& th = data->theme; int n = (int)data->scopeBuf.size(); if (n == 0) return;
@@ -414,11 +558,12 @@ private:
                     if (x == 0) path.startNewSubPath(lane.getX(), y); else path.lineTo(lane.getX() + x, y);
                 }
                 g.setColour(cols[li]); g.strokePath(path, juce::PathStrokeType(1.1f));
-                g.setColour(th.dim); g.setFont(8.5f);
-                g.drawText(names[li], lane.reduced(3.f, 1.f), juce::Justification::topLeft);
+                g.setFont(8.5f);
+                drawPoppedText(g, names[li], lane.reduced(3.f, 1.f), juce::Justification::topLeft, th.dim);
             }
-            if (data->scopeFreq > 0) { g.setColour(th.dim); g.setFont(9.f);
-                g.drawText(juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight); }
+            drawScopeBeatReadout(g, p, th);
+            if (data->scopeFreq > 0) { g.setFont(9.f);
+                drawPoppedText(g, juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight, th.dim); }
             return;
         }
         float midY = p.getCentreY(); g.setColour(th.dim.withAlpha(0.5f)); g.drawLine(p.getX(), midY, p.getRight(), midY, 0.5f);
@@ -441,8 +586,9 @@ private:
                 }
             }
         }
-        if (data->scopeFreq > 0) { g.setColour(th.dim); g.setFont(9.f);
-            g.drawText(juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight); }
+        drawScopeBeatReadout(g, p, th);
+        if (data->scopeFreq > 0) { g.setFont(9.f);
+            drawPoppedText(g, juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight, th.dim); }
     }
 };
 

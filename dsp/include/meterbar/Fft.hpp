@@ -73,6 +73,22 @@ public:
         return (float)std::clamp((v - a) / std::max(b - a, 1e-9), 0.0, 1.0);
     }
     static float binFreq(int bin, int fftSize, double sr) { return (float)(bin * sr / fftSize); }
+    // The exact inverse of freqToX (v0.26.0): the frequency a
+    // normalised display position represents, under the same warp.
+    // The spectrum view uses it to give the sub-40 Hz region its
+    // true per-frequency values instead of stepped bin blocks.
+    static float xToFreq(float frac, double minF, double maxF, FreqScale s) {
+        auto warp = [](double f, FreqScale sc) {
+            if (sc == FreqScale::Mel) return 2595.0 * std::log10(1.0 + f / 700.0);
+            if (sc == FreqScale::Linear) return f;
+            return std::log(std::max(f, 1.0));
+        };
+        const double a = warp(minF, s), b = warp(maxF, s);
+        const double w = a + std::clamp((double)frac, 0.0, 1.0) * (b - a);
+        if (s == FreqScale::Mel) return (float)(700.0 * (std::pow(10.0, w / 2595.0) - 1.0));
+        if (s == FreqScale::Linear) return (float)w;
+        return (float)std::exp(w);
+    }
     // The inverse walk (v0.20.0): the bin a normalised display position
     // falls in, under the SAME freqToX scale. freqToX is monotonic in
     // bin frequency, so the spectrum view's walking LUT and this

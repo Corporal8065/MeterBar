@@ -65,6 +65,7 @@ struct PresetState {
     // Pastel is appended (value 3) as the Anime theme's paired background.
     BackgroundStyle backgroundStyle = BackgroundStyle::CleanDark;
     bool beatPulseEnabled = true;          // v0.16: onset-reactive border glow, default ON in the Default recipe (subtle)
+    int beatTimeSignature = 0;             // v0.26.0: auto-BPM downbeat marking meter — 0 = 4/4, 1 = 3/4, 2 = 6/8; switched from the chip at the waveform's bottom-right, drives the core BeatTracker's meter
     // v0.20.0 (item l): visualizer background mode — the pure model is
     // meterbar::Visualizer (Visualizer.hpp); these are its palette
     // controls, mirrored here like every other preset field. OFF by

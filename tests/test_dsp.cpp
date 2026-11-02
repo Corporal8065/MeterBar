@@ -28,6 +28,7 @@
 #include "../dsp/include/meterbar/BoundedThread.hpp"
 #include "../dsp/include/meterbar/Glyphs.hpp"
 #include "../dsp/include/meterbar/Captions.hpp"
+#include "../dsp/include/meterbar/BeatTrack.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -1632,6 +1633,168 @@ int main() {
         const IntRect wantTarget{ 2220, grownB.y - 56, 900, 56 };
         CHECK(planStackAll(sh, now, kLinkAppMeter, targets) == 2);
         CHECK(targets[1] == wantTarget);
+    }
+
+    // === v0.26.0 ===
+    // --- xToFreq is freqToX's exact inverse (all three scales)
+    {
+        for (auto sc : { FreqScale::Log, FreqScale::Mel, FreqScale::Linear })
+            for (double f : { 20.0, 55.0, 440.0, 1000.0, 5000.0, 19999.0 }) {
+                float frac = SpectrumAnalyser::freqToX(f, 20.0, 20000.0, sc);
+                float back = SpectrumAnalyser::xToFreq(frac, 20.0, 20000.0, sc);
+                CHECK(std::abs(back - f) / f < 0.01);
+            }
+    }
+    // --- BeatPulse v0.26.0 flux path: a moderate hit inside LOUD
+    // steady material (level ratio under the old 2.4 bar, and under
+    // the new 1.95 bar too) still fires on its sharp attack.
+    {
+        const double sr = 48000; const int blk = 256;
+        std::vector<float> L(blk), R(blk);
+        BeatPulse bp; bp.prepare(sr);
+        auto pushAmp = [&](float amp, int blocks) {
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) { double ph = 2 * M_PI * 440.0 * (b * blk + i) / sr; L[i] = (float)(amp * std::sin(ph)); R[i] = L[i]; }
+                bp.pushBlock(L.data(), R.data(), blk);
+            }
+        };
+        pushAmp(0.5f, (int)(2.0 * sr / blk));            // loud bed, baseline settles high
+        uint64_t before = bp.onsetCount();
+        for (int h = 0; h < 4; ++h) {                    // 4 hits: ms ratio ~1.85 (no ratio hit), flux ~1.85 (flux hit)
+            pushAmp(0.68f, 1);
+            pushAmp(0.5f, (int)(0.45 * sr / blk));
+        }
+        std::printf("beatpulse flux: onsets in loud bed = %llu (need >= 3)\n", (unsigned long long)(bp.onsetCount() - before));
+        CHECK(bp.onsetCount() - before >= 3);
+    }
+    // --- Bubbles/Lines impact envelopes (v0.26.0 rework)
+    {
+        VisualizerSettings vs;
+        VisualizerEngine eng;
+        const float sil[3] = { 0, 0, 0 };
+        for (int i = 0; i < 10; ++i) eng.update(1.f / 30.f, sil, vs);
+        CHECK(eng.impact() == 0.f);
+        const float hit[3] = { 0.95f, 0, 0 };
+        eng.update(1.f / 30.f, hit, vs);
+        CHECK(eng.impact() > 0.5f);                      // a hard jump registers as impact
+        CHECK(eng.burstCount() >= 1);
+        VisualizerLines lines;
+        lines.update(1.f / 30.f, hit);
+        CHECK(lines.impact(0) > 0.5f);
+        CHECK(lines.impact(1) == 0.f);                   // other bands untouched
+        for (int i = 0; i < 60; ++i) lines.update(1.f / 30.f, sil);
+        CHECK(lines.impact(0) < 0.05f);                  // and it decays away
+    }
+    // --- Field: transient pulse, downbeat fold-in, trails stamp
+    {
+        VisualizerSettings vs;
+        VisualizerField fld;
+        const float sil[3] = { 0, 0, 0 };
+        for (int i = 0; i < 30; ++i) fld.update(1.f / 30.f, sil, vs);
+        CHECK(fld.pulse() == 0.f);
+        const float hit[3] = { 0.95f, 0.2f, 0.1f };
+        fld.update(1.f / 30.f, hit, vs);
+        CHECK(fld.pulse() > 0.3f);                       // a transient pulses the field
+        for (int i = 0; i < 60; ++i) fld.update(1.f / 30.f, hit, vs);
+        int trailed = 0, moved = 0;
+        for (auto& d : fld.particles()) if (d.trailSet) { ++trailed; if (d.trailX[0] != d.x || d.trailY[0] != d.y) ++moved; }
+        CHECK(trailed > (int)fld.particles().size() / 2);
+        CHECK(moved > (int)fld.particles().size() / 2);  // the tail lags the dot
+        VisualizerField beat;
+        for (int i = 0; i < 30; ++i) beat.update(1.f / 30.f, hit, vs, 0.f, 0.f);
+        beat.update(1.f / 30.f, hit, vs, 0.f, 1.0f);     // a downbeat lands
+        CHECK(beat.pulse() >= 0.85f);                    // and folds into the pulse
+    }
+    // --- BeatTracker: locks to a kick train, counts the bar, holds
+    // the count through a breakdown, re-locks on a real tempo
+    // change; silence never locks; 6/8 subdivides the kick period.
+    {
+        const double sr = 48000; const int blk = 256;
+        std::vector<float> L(blk), R(blk);
+        BeatTracker tr; tr.prepare(sr);
+        double tNow = 0, nextKick = 0.35, kickPeriod = 0.5; bool kicksOn = true;
+        auto feed = [&](double secs) {
+            int blocks = (int)std::lround(secs * sr / blk);
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    double tt = tNow + (double)i / sr;
+                    double v = 0.01 * std::sin(2 * M_PI * 440.0 * tt); // bed the kick band can't hear
+                    if (kicksOn && tt >= nextKick && tt < nextKick + 0.09)
+                        v += 0.85 * std::sin(2 * M_PI * 60.0 * (tt - nextKick)) * (1.0 - (tt - nextKick) / 0.09);
+                    L[(size_t)i] = (float)v; R[(size_t)i] = (float)v;
+                }
+                tr.pushBlock(L.data(), R.data(), blk);
+                tNow += blk / sr;
+                while (nextKick < tNow) nextKick += kickPeriod;
+            }
+        };
+        feed(6.0);                                       // 120 BPM kicks
+        std::printf("beattrack: locked=%d bpm=%.1f conf=%.2f onsets=%llu\n",
+                    (int)tr.locked(), tr.bpm(), (double)tr.confidence(), (unsigned long long)tr.onsetCount());
+        CHECK(tr.locked());
+        CHECK(tr.bpm() > 114.0 && tr.bpm() < 126.0);
+        CHECK(tr.confidence() > 0.5f);
+        {   // the count cycles the whole bar
+            bool seen[5] = { false, false, false, false, false };
+            uint64_t g0 = tr.gridBeatCount();
+            for (int i = 0; i < 400; ++i) { feed(blk / sr); int c = tr.countInBar(); if (c >= 1 && c <= 4) seen[c] = true; }
+            CHECK(seen[1] && seen[2] && seen[3] && seen[4]);
+            CHECK(tr.gridBeatCount() > g0);
+            // recent-beats overlay data: ages ascend, counts step back
+            float ages[16]; int counts[16];
+            int nR = tr.collectRecentBeats(1.6f, ages, counts, 16);
+            CHECK(nR >= 3);
+            CHECK(ages[0] < 0.55f && ages[1] > ages[0] && ages[2] > ages[1]);
+            CHECK(counts[0] == tr.countInBar());
+        }
+        {   // breakdown: kicks stop, the count must NOT
+            kicksOn = false;
+            uint64_t g0 = tr.gridBeatCount();
+            feed(5.0);
+            CHECK(tr.locked());
+            CHECK(tr.gridBeatCount() >= g0 + 8);
+            kicksOn = true; nextKick = tNow + 0.2;
+        }
+        kickPeriod = 60.0 / 90.0;                        // the song slows to 90 BPM
+        feed(7.0);
+        std::printf("beattrack after tempo change: bpm=%.1f locked=%d\n", tr.bpm(), (int)tr.locked());
+        CHECK(tr.locked());
+        CHECK(tr.bpm() > 85.0 && tr.bpm() < 95.0);
+        // silence: no lock, no onsets
+        BeatTracker quiet; quiet.prepare(sr);
+        std::vector<float> Z(blk, 0.f);
+        for (int b = 0; b < (int)(2.0 * sr / blk); ++b) quiet.pushBlock(Z.data(), Z.data(), blk);
+        CHECK(!quiet.locked());
+        CHECK(quiet.onsetCount() == 0);
+        // 6/8: kicks on the dotted quarter (0.6 s) -> grid pulses
+        // every 0.2 s, counts run 1..6, bpm reads the KICK tempo
+        BeatTracker six; six.prepare(sr); six.setMeter(6, 3);
+        {
+            double t2 = 0, nk = 0.35;
+            int blocks = (int)std::lround(10.0 * sr / blk);
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    double tt = t2 + (double)i / sr;
+                    double v = 0.01 * std::sin(2 * M_PI * 440.0 * tt);
+                    if (tt >= nk && tt < nk + 0.09)
+                        v += 0.85 * std::sin(2 * M_PI * 60.0 * (tt - nk)) * (1.0 - (tt - nk) / 0.09);
+                    L[(size_t)i] = (float)v; R[(size_t)i] = (float)v;
+                }
+                six.pushBlock(L.data(), R.data(), blk);
+                t2 += blk / sr;
+                while (nk < t2) nk += 0.6;
+            }
+            CHECK(six.locked());
+            CHECK(six.bpm() > 95.0 && six.bpm() < 105.0);
+            bool seen1 = false, seen6 = false;
+            for (int i = 0; i < 400; ++i) {
+                for (int j = 0; j < blk; ++j) { L[(size_t)j] = 0.f; R[(size_t)j] = 0.f; }
+                six.pushBlock(L.data(), R.data(), blk);
+                if (six.countInBar() == 1) seen1 = true;
+                if (six.countInBar() == 6) seen6 = true;
+            }
+            CHECK(seen1 && seen6);
+        }
     }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);

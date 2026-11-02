@@ -177,14 +177,22 @@ inline ScopeBands splitScopeBands(const std::vector<float>& x, double sampleRate
 // A deliberately simple energy-flux onset detector for the Beat Pulse
 // glow and the Anime mascot's bob: each pushed block's mean-square is
 // compared against a slow trailing baseline (~0.7 s). A block whose
-// energy exceeds the baseline by the fire ratio, after a 180 ms
-// refractory, fires an onset whose strength drives a glow envelope that
-// decays with a ~120 ms time constant (subtle by design — the view caps
-// the visible intensity). Steady material settles into the baseline and
+// energy exceeds the baseline by the fire ratio, after a refractory,
+// fires an onset whose strength drives a glow envelope that decays
+// with a ~120 ms time constant (subtle by design — the view caps the
+// visible intensity). Steady material settles into the baseline and
 // stops firing; silence never fires (absolute floor gate).
+// v0.26.0 (Jackson, 2026-11-02: "it couldn't tell for a couple of
+// songs where the transients were"): MORE SENSITIVE to changes in
+// volume transients, two ways — the level ratio drops 2.4 -> 1.95,
+// and a FLUX path joins it: a block that jumps to 1.7x the previous
+// block's energy while sitting at least 1.45x over the baseline
+// fires even when the slow baseline has already chased a loud,
+// dense passage up (exactly the case that used to swallow hits).
+// The refractory tightens 180 -> 150 ms so fast doubles read.
 class BeatPulse {
 public:
-    void prepare(double sr) { sr_ = sr; baseline_ = 0; pulse_ = 0; sinceOnset_ = 1e9; onsetCount_ = 0; elapsed_ = 0; }
+    void prepare(double sr) { sr_ = sr; baseline_ = 0; pulse_ = 0; sinceOnset_ = 1e9; onsetCount_ = 0; elapsed_ = 0; prevMs_ = 0; }
     // Push one block; returns true on the block where an onset fires.
     bool pushBlock(const float* L, const float* R, int n) {
         if (n <= 0 || sr_ <= 0) return false;
@@ -198,20 +206,24 @@ public:
         bool fired = false;
         // Warm-up: no firing in the first 0.6 s — the baseline is still
         // converging toward steady material and would false-fire on it.
-        if (elapsed_ > 0.6 && ms > 1e-6 && baseline_ > 1e-9 && ms > baseline_ * 2.4 && sinceOnset_ > 0.180) {
-            double strength = std::clamp((ms / baseline_ - 2.4) / 6.0 + 0.45, 0.0, 1.0);
+        const bool ratioHit = ms > baseline_ * 1.95;
+        const bool fluxHit = ms > baseline_ * 1.45 && prevMs_ > 0 && ms > prevMs_ * 1.7;
+        if (elapsed_ > 0.6 && ms > 1e-6 && baseline_ > 1e-9 && (ratioHit || fluxHit) && sinceOnset_ > 0.150) {
+            double strength = std::clamp((ms / baseline_ - 1.95) / 5.0 + 0.45, 0.0, 1.0);
+            if (fluxHit && strength < 0.4) strength = 0.4; // a sharp attack reads even inside loud material
             pulse_ = std::max(pulse_, (float)strength);
             sinceOnset_ = 0; fired = true; ++onsetCount_;
         }
         baseline_ += aBase * (ms - baseline_);
         if (baseline_ < 1e-9 && ms > 0) baseline_ = ms; // cold start: adopt first energy
+        prevMs_ = ms;
         pulse_ *= (float)std::exp(-blockSec / 0.120);   // ~120 ms decay
         return fired;
     }
     float level() const { return pulse_; }              // glow envelope 0..1
     uint64_t onsetCount() const { return onsetCount_; } // monotonic — the UI watches for changes
 private:
-    double sr_ = 48000, baseline_ = 0, sinceOnset_ = 1e9, elapsed_ = 0;
+    double sr_ = 48000, baseline_ = 0, sinceOnset_ = 1e9, elapsed_ = 0, prevMs_ = 0;
     float pulse_ = 0; uint64_t onsetCount_ = 0;
 };
 } // namespace meterbar

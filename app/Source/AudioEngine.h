@@ -8,6 +8,7 @@
 #include <meterbar/RingBuffer.hpp>
 #include <meterbar/Loudness.hpp>
 #include <meterbar/Modules.hpp>
+#include <meterbar/BeatTrack.hpp>
 #include <meterbar/State.hpp>
 #include "WindowsLoopback.h"
 #include "Captions/CaptionTap.h"
@@ -90,10 +91,13 @@ public:
         // v0.16: beat/onset detection on the same ingest (drives the Beat
         // Pulse glow and the mascot's bob). Fed in 256-sample sub-blocks —
         // the detector's time constants are expressed per block duration.
+        // v0.26.0: the auto-BPM beat grid rides the same sub-blocks.
         if (sr > 0) {
-            if (std::abs(sr - beatSr_) > 1.0) { beatPulse.prepare(sr); beatSr_ = sr; }
-            for (int off = 0; off < n; off += 256)
+            if (std::abs(sr - beatSr_) > 1.0) { beatPulse.prepare(sr); beatTracker.prepare(sr); applyBeatMeter(); beatSr_ = sr; }
+            for (int off = 0; off < n; off += 256) {
                 beatPulse.pushBlock(scratchL.data() + off, scratchR.data() + off, std::min(256, n - off));
+                beatTracker.pushBlock(scratchL.data() + off, scratchR.data() + off, std::min(256, n - off));
+            }
         }
         feedRecorder(scratchL.data(), scratchR.data(), n);
         buffersReceived.fetch_add(1);
@@ -101,6 +105,26 @@ public:
     // v0.16 accessors
     float beatLevel() { return beatPulse.level(); }
     uint64_t beatOnsets() { return beatPulse.onsetCount(); }
+    // v0.26.0: auto-BPM grid accessors (the tracker runs on the
+    // audio ingest; the UI reads scalars per frame, the same
+    // unsynchronised pattern as beatLevel above).
+    bool beatLocked() { return beatTracker.locked(); }
+    double beatBpmValue() { return beatTracker.bpm(); }
+    float beatConfidence() { return beatTracker.confidence(); }
+    int beatCountInBar() { return beatTracker.countInBar(); }
+    float beatDownbeatEnv() { return beatTracker.downbeatEnv(); }
+    int collectBeats(float maxAge, float* ages, int* counts, int maxOut) {
+        return beatTracker.collectRecentBeats(maxAge, ages, counts, maxOut);
+    }
+    // The meter behind state.beatTimeSignature: 0 = 4/4, 1 = 3/4,
+    // 2 = 6/8 (subdivided: the kick period splits into 3 pulses).
+    void applyBeatMeter() {
+        switch (state.beatTimeSignature) {
+            case 1: beatTracker.setMeter(3, 1); break;
+            case 2: beatTracker.setMeter(6, 3); break;
+            default: beatTracker.setMeter(4, 1); break;
+        }
+    }
     double loudnessIntegrated() { const juce::ScopedLock sl(loudLock); return loudness.integratedLufs(); }
     double loudnessShortTerm() { const juce::ScopedLock sl(loudLock); return loudness.shortTermLufs(); }
     double loudnessTruePeakDb() { const juce::ScopedLock sl(loudLock); return loudness.truePeakDb(); }
@@ -256,6 +280,7 @@ private:
     WindowsLoopback loopback;
     std::atomic<uint32_t> captionEpoch_{1}; // v0.23.0: caption stream epoch
     meterbar::BeatPulse beatPulse; double beatSr_ = 0; // v0.16
+    meterbar::BeatTracker beatTracker; // v0.26.0: auto-BPM grid, fed beside beatPulse
     juce::AudioFormatManager formatManager;
     std::unique_ptr<RecorderThread> recorder_;
     juce::CriticalSection recPtrLock; // guards recorder_ hand-off between feeder threads and the UI thread
