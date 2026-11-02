@@ -569,8 +569,25 @@ void MainComponent::layoutModules() {
 // image work only.
 void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
     auto bounds = getLocalBounds();
-    g.fillAll(juce::Colours::black);
     if (bounds.isEmpty()) return;
+    // v0.25.1: LINKED, the base under the visualizer is the SHARED
+    // styled background at the shared opacity, and the blurred wash
+    // is drawn at that opacity too — so the parent's translucency
+    // continues into the linked siblings instead of every bar
+    // sitting on its own opaque black base. Unlinked/alone the base
+    // is the historical opaque black and the composite is v0.21.5's,
+    // unchanged. (group/own are computed again below for the field
+    // map; the values are the same.)
+    {
+        auto grp = linkClient_.groupRect();
+        auto ownR = getScreenBounds();
+        if (grp.isEmpty() || ownR.isEmpty()) grp = ownR;
+        if (grp != ownR)
+            fillStyledBackground(g, bounds.toFloat(), engine.state.backgroundStyle, theme,
+                                 juce::jlimit(0.15f, 1.0f, engine.state.backgroundOpacity));
+        else
+            g.fillAll(juce::Colours::black);
+    }
     const int iw = juce::jlimit(1, 480, bounds.getWidth() / 2);
     const int ih = juce::jlimit(1, 270, bounds.getHeight() / 2);
     if (!vizCache.isValid() || vizCache.getWidth() != iw || vizCache.getHeight() != ih) {
@@ -687,8 +704,14 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
             kernel.applyToImage(vizBlur, vizBlurSrc, vizBlur.getBounds());
         }
     }
+    // v0.25.1: grouped, the wash + crisp passes ride the shared
+    // opacity (the twins' composite); ungrouped this is v0.21.5's
+    // exact composite (wash at full, crisp at 0.30).
+    const bool grouped = group != own;
+    const float bgOp = juce::jlimit(0.15f, 1.0f, engine.state.backgroundOpacity);
+    if (grouped) g.setOpacity(bgOp);
     g.drawImage(vizBlur, bounds.toFloat());
-    g.setOpacity(0.30f); // v0.21.5: crisp pass backed off further (was 0.45) so the wash, not the dots, is what reads
+    g.setOpacity(grouped ? 0.30f * bgOp : 0.30f); // v0.21.5: crisp pass backed off further (was 0.45) so the wash, not the dots, is what reads
     g.drawImage(vizCache, bounds.toFloat());
     g.setOpacity(1.0f);
     g.setColour(juce::Colours::black.withAlpha(0.18f)); // v0.20.3: dark scrim — the moodier tone

@@ -113,8 +113,38 @@ public:
     // peers adopt it immediately (the link-join repair, reused). OFF
     // needs no call: publishBg and the adoption scan both consult
     // bgLinkEnabled.
+    // v0.25.1: the re-stamp now runs through refreshBgOnLinkJoin —
+    // a follower joining a group with a live parent adopts the
+    // parent's background instead of stamping its own over it.
     void notifyBgLinkChanged() {
-        if (bgLinkEnabled && bgLinkEnabled()) { meterbar::bgForceRepublish(bgSync_); publishBg(); }
+        if (bgLinkEnabled && bgLinkEnabled()) refreshBgOnLinkJoin();
+    }
+
+    // v0.25.1 (link-parent ownership — core BarLink.hpp defect 4):
+    // this bar's link just turned on. When a live linked PARENT (a
+    // lower appId with a published background) already exists, the
+    // parent owns the shared background: do NOT re-stamp my pre-link
+    // values over the group — clear the parent's seen marker instead,
+    // so the adoption scan takes its standing packet on this tick.
+    // Only when there is no such parent (I am the parent, or no
+    // packet exists yet) does the item-13 re-stamp apply. MeterBar
+    // is appId 0 — the standing parent whenever it is linked — so
+    // for MeterBar the parent branch is the one that runs.
+    void refreshBgOnLinkJoin() {
+        meterbar::LinkShared snap;
+        if (readShared(snap)) {
+            const long long now = nowMs();
+            for (int i = 0; i < 3; ++i) {
+                const auto& p = snap.slots[i];
+                if (p.appId >= 0 && p.appId < appId_ && p.linked && meterbar::slotLive(p, now) && p.bgSeq != 0) {
+                    bgSync_.seenSeq[i] = 0;
+                    bgSync_.adoptedFrom = -1;
+                    return;
+                }
+            }
+        }
+        meterbar::bgForceRepublish(bgSync_);
+        publishBg();
     }
     bool bgLinkOn() const { return !bgLinkEnabled || bgLinkEnabled(); }
 
@@ -186,9 +216,12 @@ private:
         // Item 13: the tick this app's link turns ON, force a fresh
         // publish of its current background (sentinel reset — see
         // bgForceRepublish) so peers adopt it immediately instead of
-        // waiting for the next change.
+        // waiting for the next change. v0.25.1: parent ownership —
+        // a FOLLOWER joining a group with a live parent must not
+        // re-stamp over the parent's background; refreshBgOnLinkJoin
+        // makes it adopt the parent's standing packet instead.
         const bool linkedNow = isLinked && isLinked();
-        if (linkedNow && !wasLinked_) meterbar::bgForceRepublish(bgSync_);
+        if (linkedNow && !wasLinked_) refreshBgOnLinkJoin();
         wasLinked_ = linkedNow;
         publishBg();
         meterbar::LinkShared snap;

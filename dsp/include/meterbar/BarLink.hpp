@@ -23,9 +23,10 @@ namespace meterbar {
 //    its own x and no longer sat under the peer), so top/bottom
 //    docking treats the linked group as one bar.
 //  - SHARED BACKGROUND: each slot carries a bgSeq-stamped background
-//    (family style ordinal + opacity); a change in any linked bar is
-//    adopted by the others (the client publishes only on change, so
-//    adoption cannot ping-pong).
+//    (family style ordinal + opacity); the group PARENT's background
+//    (lowest appId among live linked members) is adopted by the
+//    others — link-parent ownership, v0.25.1 (the client publishes
+//    only on change, so adoption cannot ping-pong).
 //
 // A drag session is "live" while its stamp is fresher than
 // kLeaderStaleMs; staleness — never a stuck flag — ends it.
@@ -187,6 +188,24 @@ inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge)
 //     every unseen live+linked peer seq is marked seen in one scan,
 //     and the LAST such peer in slot order supplies the values (the
 //     v0.2.0 loop's effective outcome, now pinned by tests).
+//
+//  4. NO PARENT (v0.25.1, the 2026-11-01 field report): the rules
+//     above are SYMMETRIC — any bar's packet can be adopted by any
+//     other. Combined with the client's link-join re-stamp (a bar
+//     turning its link on force-republishes its own pre-link
+//     background under a fresh bgSeq), two bars linking up each
+//     adopted the OTHER's stale background — a swap, not an
+//     inheritance — and the bar Jackson set the shared background
+//     on never became the authority. His standing rule is
+//     link-PARENT ownership: when bars are linked, the parent
+//     applies the visual settings to the others. Rule: adoption
+//     flows DOWNHILL ONLY. The group parent is the lowest appId
+//     among the live, linked members (canonical family order —
+//     the same order planStackAll stacks in). A bar adopts ONLY
+//     from its parent; the parent adopts from nobody. A follower's
+//     own local change still publishes (its packet becomes the
+//     authority if it ever becomes the parent), but no follower
+//     packet is ever adopted while a parent is live.
 struct BgPacket {
     int style = 0;      // family background-style ordinal (LinkSlot::bgStyle)
     int opacityPct = 100;
@@ -196,6 +215,7 @@ struct BgSyncState {
     int publishedStyle = -999, publishedPct = -999; // values this app last published OR adopted (-999 = none yet)
     int publishedEffect = -999;                     // same, for the effect ordinal
     unsigned seenSeq[3] = { 0, 0, 0 };              // newest bgSeq consumed per app slot
+    int adoptedFrom = -1;                           // v0.25.1: appId of the parent the current values came from (-1 = own / none)
 };
 // True when (style, pct, effect) differ from what this app last
 // published or adopted — the ONLY condition under which bgSeq may
@@ -206,28 +226,41 @@ inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct, int effect
 // Live-linked opacity repair (v0.3.0, item 13): drop this client's
 // published markers to the "none yet" sentinel, so the next publish
 // re-stamps the CURRENT values under a fresh bgSeq and peers adopt
-// them. The client calls this when its link turns on — the join path
+// them. The client calls this when its link turns on AND it is the
+// group parent (or no parent packet exists yet) — the join path
 // where the v0.2.1 "an opacity change only lands after re-linking"
-// report lived.
+// report lived. Since v0.25.1 a FOLLOWER joining a group whose
+// parent already publishes does NOT re-stamp: it adopts the
+// parent's standing packet instead (parent ownership, defect 4).
 inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publishedPct = -999; s.publishedEffect = -999; }
-// Scan the shared block for a background this app has not consumed.
-// Every live, linked peer with an unseen non-zero bgSeq is marked
-// seen; when at least one qualifies, the LAST one in slot order wins:
-// returns true and fills `out`, and records the adopted values as
-// this app's published values (the echo rule). Peers that are
-// unlinked, stale, empty, or self never qualify.
+// Scan the shared block for the group PARENT's background (v0.25.1
+// parent ownership — see defect 4 above). The parent is the lowest
+// appId among this app and its live, linked peers. When this app IS
+// the parent there is nothing to adopt (and adoptedFrom resets, so
+// a later parent is never mistaken for the source of the current
+// values). Otherwise the parent's packet is adopted when it is
+// non-zero and either unseen OR the parent changed since the last
+// adoption (parent turnover: the new parent's standing packet is
+// authoritative even if its seq was consumed under an old regime).
+// Adopted values are recorded as this app's published values (the
+// echo rule). Peers that are unlinked, stale, empty, or not the
+// parent never supply values.
 inline bool bgAdoption(const LinkShared& sh, int selfApp, BgSyncState& s, long long nowMs, BgPacket& out) {
-    bool found = false;
+    int parentApp = selfApp, parentSlot = -1;
     for (int i = 0; i < 3; ++i) {
         const LinkSlot& p = sh.slots[i];
         if (p.appId < 0 || p.appId == selfApp || !p.linked || !slotLive(p, nowMs)) continue;
-        if (p.bgSeq == 0 || p.bgSeq == s.seenSeq[i]) continue;
-        s.seenSeq[i] = p.bgSeq;
-        out = BgPacket{ p.bgStyle, p.bgOpacityPct, p.bgEffect };
-        found = true;
+        if (p.appId < parentApp) { parentApp = p.appId; parentSlot = i; }
     }
-    if (found) { s.publishedStyle = out.style; s.publishedPct = out.opacityPct; s.publishedEffect = out.effect; }
-    return found;
+    if (parentSlot < 0) { s.adoptedFrom = -1; return false; } // self is the parent
+    const LinkSlot& p = sh.slots[parentSlot];
+    if (p.bgSeq == 0) return false;
+    if (p.bgSeq == s.seenSeq[parentSlot] && s.adoptedFrom == parentApp) return false;
+    s.seenSeq[parentSlot] = p.bgSeq;
+    s.adoptedFrom = parentApp;
+    out = BgPacket{ p.bgStyle, p.bgOpacityPct, p.bgEffect };
+    s.publishedStyle = out.style; s.publishedPct = out.opacityPct; s.publishedEffect = out.effect;
+    return true;
 }
 // ONE-CLICK STACK PLANNER (v0.3.0, item 12). Given the shared state
 // and the initiator (whose slot carries stackAnchor + stackEdge),

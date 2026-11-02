@@ -1026,44 +1026,57 @@ int main() {
     CHECK(bgIsLocalChange(sync, 1, 55, 0));  // opacity moved
     CHECK(bgIsLocalChange(sync, 2, 100, 0)); // style moved
     CHECK(bgIsLocalChange(sync, 1, 100, 1)); // effect moved (BLK3)
-    // a peer publishes a new background: adopted once
+    // v0.25.1 parent ownership: adoption flows DOWNHILL only, from
+    // the group parent (lowest appId). The packet mechanics are
+    // exercised from a follower's seat (self = 2, parent = 0)...
     LinkShared sh;
-    auto& peer = sh.slots[1]; peer.appId = 1; peer.linked = 1; peer.heartbeatMs = now;
+    auto& peer = sh.slots[0]; peer.appId = 0; peer.linked = 1; peer.heartbeatMs = now;
     peer.bgSeq = 7; peer.bgStyle = 2; peer.bgOpacityPct = 40; peer.bgEffect = 2;
     BgPacket out;
-    CHECK(bgAdoption(sh, 0, sync, now, out));
+    CHECK(bgAdoption(sh, 2, sync, now, out));
     CHECK(out.style == 2 && out.opacityPct == 40 && out.effect == 2);
+    CHECK(sync.adoptedFrom == 0);
     // the adopted values are now OUR published values: no echo publish
     CHECK(!bgIsLocalChange(sync, 2, 40, 2));
     // the same seq is never adopted twice
-    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    CHECK(!bgAdoption(sh, 2, sync, now, out));
     // a genuinely new seq adopts again
     peer.bgSeq = 8; peer.bgStyle = 0; peer.bgOpacityPct = 90; peer.bgEffect = 1;
-    CHECK(bgAdoption(sh, 0, sync, now, out));
+    CHECK(bgAdoption(sh, 2, sync, now, out));
     CHECK(out.style == 0 && out.opacityPct == 90 && out.effect == 1);
     // BLK4: effect 3 (visualizer Lines) rides the same packet,
     // adopted verbatim like every other ordinal
     peer.bgSeq = 12; peer.bgEffect = 3;
-    CHECK(bgAdoption(sh, 0, sync, now, out));
+    CHECK(bgAdoption(sh, 2, sync, now, out));
     CHECK(out.effect == 3);
     CHECK(!bgIsLocalChange(sync, 0, 90, 3)); // adopted = published: no echo
     // unlinked peers, stale peers, seq 0 and self never supply a background
     peer.linked = 0; peer.bgSeq = 9;
-    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    CHECK(!bgAdoption(sh, 2, sync, now, out));
     peer.linked = 1; peer.heartbeatMs = now - kPeerStaleMs - 1;
-    CHECK(!bgAdoption(sh, 0, sync, now, out));
+    CHECK(!bgAdoption(sh, 2, sync, now, out));
     peer.heartbeatMs = now; peer.bgSeq = 0;
-    CHECK(!bgAdoption(sh, 0, sync, now, out));
-    peer.bgSeq = 11; peer.appId = 0; // the peer slot carries OUR id: self, ignored
-    CHECK(!bgAdoption(sh, 0, sync, now, out));
-    // two peers changed at once: the LAST in slot order wins, both are marked seen
+    CHECK(!bgAdoption(sh, 2, sync, now, out));
+    peer.bgSeq = 11; peer.appId = 2; // the peer slot carries OUR id: self, ignored
+    CHECK(!bgAdoption(sh, 2, sync, now, out));
+    // ...and from the parent's own seat (self = 0, MeterBar's seat):
+    // the parent adopts from NOBODY, however fresh the followers'
+    // packets are — the pre-v0.25.1 join swap, pinned shut.
     LinkShared sh2; BgSyncState sync2;
     auto& p1 = sh2.slots[1]; p1.appId = 1; p1.linked = 1; p1.heartbeatMs = now; p1.bgSeq = 3; p1.bgStyle = 1; p1.bgOpacityPct = 70;
     auto& p2 = sh2.slots[2]; p2.appId = 2; p2.linked = 1; p2.heartbeatMs = now; p2.bgSeq = 4; p2.bgStyle = 2; p2.bgOpacityPct = 30;
-    CHECK(bgAdoption(sh2, 0, sync2, now, out));
-    CHECK(out.style == 2 && out.opacityPct == 30);
-    CHECK(sync2.seenSeq[1] == 3 && sync2.seenSeq[2] == 4);
     CHECK(!bgAdoption(sh2, 0, sync2, now, out));
+    CHECK(sync2.adoptedFrom == -1);
+    // a middle bar (self = 1) between the same two peers takes the
+    // parent's (appId 0 is absent here, so with only appId 2 live it
+    // is itself the parent) — with appId 0 present it takes 0's:
+    auto& p0 = sh2.slots[0]; p0.appId = 0; p0.linked = 1; p0.heartbeatMs = now; p0.bgSeq = 5; p0.bgStyle = 1; p0.bgOpacityPct = 70;
+    BgSyncState sync3;
+    CHECK(bgAdoption(sh2, 1, sync3, now, out));
+    CHECK(out.style == 1 && out.opacityPct == 70);
+    CHECK(sync3.seenSeq[0] == 5 && sync3.seenSeq[2] == 0);
+    CHECK(sync3.adoptedFrom == 0);
+    CHECK(!bgAdoption(sh2, 1, sync3, now, out));
 }
 
 
