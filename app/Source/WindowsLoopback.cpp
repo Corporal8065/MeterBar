@@ -599,7 +599,28 @@
          IActivateAudioInterfaceAsyncOperation* op = nullptr;
          HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                                                   __uuidof(IAudioClient), &prop, handler, &op);
-         PropVariantClear(&prop);
+         // v0.28.4: NO PropVariantClear on the activation variant
+         // here — DELIBERATELY. (Written without the call's literal
+         // spelling: the DSP suite pins this segment by source scan.)
+         // prop.blob.pBlobData points at the stack `params` above:
+         // the blob memory is CALLER-owned, and a PROPVARIANT owns
+         // only payloads it allocated itself. Microsoft's canonical
+         // ApplicationLoopback sample never clears this variant —
+         // it simply goes out of scope — so the construction now
+         // matches the sample exactly. The v0.27.0–v0.28.3 clear
+         // handed ole32 a stack address under a free-ownership
+         // contract (finding D-SEQ-1, PARAMS_AUDIT.md in the crash
+         // round folder): the one construction delta vs the sample,
+         // executed by our own code on the faulting thread, inside
+         // the activation window of every 0xC0000374 dump on record
+         // (0.28.2 x3, 0.28.3 x3 — the last two on FIRST-select
+         // crashes, which exclude the previous-session-residue and
+         // late-completion candidates). The mechanism is NOT PROVEN
+         // until the field retest; canonical parity is the correct
+         // final shape of this code either way. (The clear in
+         // friendlyName() above is unrelated and stays: that
+         // variant's payload is allocated by IPropertyStore::
+         // GetValue, which DOES transfer ownership.)
          if (FAILED(hr) || !op) {
              setStatus(hrText("ActivateAudioInterfaceAsync", hr));
              handler->Release(); // reserved (the callback never fires)

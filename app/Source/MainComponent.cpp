@@ -17,6 +17,62 @@ static juce::File meterBarDocsDir() {
     return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
 }
 static void openLogFolder() { auto dir = meterBarDocsDir(); dir.createDirectory(); dir.startAsProcess(); }
+// v0.28.4: WER HARVEST (family crash-log contract amendment,
+// 2026-11-03 ~14:08 PT). The in-process crash handler
+// (CrashHandler.h) NEVER fires for heap-corruption deaths — ntdll
+// fast-fail goes straight to WER — so for exactly the crash class
+// behind the per-app capture crash, the only record is the dump
+// WER's LocalDumps wrote to %LOCALAPPDATA%\CrashDumps (the dumps
+// Jackson has been sending by hand). On launch, copy each NEW
+// MeterBar dump from there into Documents\MeterBar under a
+// crash-record name — timestamp = the dump's last-write time, so
+// the stem sorts with the crash — plus a .txt sibling composed by
+// the core, so the next-launch notice below and Open Log Folder
+// surface it exactly like a handler-written record. Copied dumps
+// are keyed in wer-harvested.txt (core CrashWatch) and never
+// copied twice; the source files are left untouched.
+static void harvestWerCrashDumps() {
+#if JUCE_WINDOWS
+    const auto localApp = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", juce::String());
+    if (localApp.isEmpty()) return;
+    juce::File srcDir = juce::File(localApp).getChildFile("CrashDumps");
+    if (!srcDir.isDirectory()) return;
+    auto dir = meterBarDocsDir(); dir.createDirectory();
+    auto logFile = dir.getChildFile("wer-harvested.txt");
+    std::string logText = logFile.loadFileAsString().toStdString();
+    std::vector<std::string> existing;
+    for (auto& f : dir.findChildFiles(juce::File::findFiles, false))
+        existing.push_back(f.getFileName().toStdString());
+    for (auto& f : srcDir.findChildFiles(juce::File::findFiles, false)) {
+        const std::string name = f.getFileName().toStdString();
+        if (!meterbar::isWerDumpName(name)) continue;
+        if (f.getSize() <= 0) continue; // a dump WER failed to write carries nothing
+        const auto mt = f.getLastModificationTime();
+        meterbar::CrashTimeParts parts;
+        parts.year = mt.getYear(); parts.month = mt.getMonth() + 1; parts.day = mt.getDayOfMonth();
+        parts.hour = mt.getHours(); parts.minute = mt.getMinutes(); parts.second = mt.getSeconds();
+        const std::string key = meterbar::werHarvestKey(name, (long long) f.getSize(), parts);
+        if (meterbar::werHarvestKeySeen(logText, key)) continue;
+        const std::string stem = meterbar::harvestStem(existing, parts);
+        if (!f.copyFileTo(dir.getChildFile(juce::String(stem + ".dmp")))) continue;
+        existing.push_back(stem + ".dmp");
+        // The .txt is what the notice keys on. The handler never
+        // ran for this crash — no exception code exists to quote —
+        // so the record says where the dump came from and lets the
+        // .dmp speak for the rest.
+        const std::string snap =
+            "source: harvested from %LOCALAPPDATA%\\CrashDumps\\" + name + " on launch \xe2\x80\x94 "
+            "Windows Error Reporting wrote this dump; the in-process crash handler did not "
+            "fire (fast-fail crash class).\nexception details: inside the .dmp.\n";
+        auto rec = meterbar::crashRecordText(meterbar::kVersionString, "harvested record (see .dmp)",
+                                             meterbar::crashTimeText(parts), 0ul, "n/a", snap);
+        dir.getChildFile(juce::String(stem + ".txt")).replaceWithText(juce::String(rec));
+        existing.push_back(stem + ".txt");
+        logFile.appendText(juce::String(key + "\n"));
+        logText += key + "\n";
+    }
+#endif
+}
 MainComponent::MainComponent() {
     setOpaque(false); // v0.13: lets translucent background fills show the desktop (window is non-opaque too)
     theme = themeByName(engine.state.themeName);
@@ -187,11 +243,15 @@ MainComponent::MainComponent() {
     // The crash handler (CrashHandler.h, installed in Main.cpp)
     // leaves crash-*.txt + .dmp in Documents\MeterBar; a crash file
     // without a ".seen" sibling earns exactly one notice, however
-    // many launches it survives. Deferred via callAsync so the bar
-    // is fully up before the dialog appears. Either button marks
-    // every unseen crash seen — the notice never repeats for the
-    // same crash file.
+    // many launches it survives. v0.28.4: harvestWerCrashDumps()
+    // first brings in any WER LocalDumps records the handler could
+    // not write (fast-fail classes), under the same naming — the
+    // scan below then covers both provenances uniformly. Deferred
+    // via callAsync so the bar is fully up before the dialog
+    // appears. Either button marks every unseen crash seen — the
+    // notice never repeats for the same crash file.
     juce::MessageManager::callAsync([this]{
+        harvestWerCrashDumps(); // v0.28.4: WER dumps land in the folder BEFORE the unseen scan below, so the notice counts them too
         auto dir = meterBarDocsDir();
         std::vector<std::string> names;
         for (auto& f : dir.findChildFiles(juce::File::findFiles, false))

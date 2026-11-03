@@ -2643,6 +2643,97 @@ int main() {
         CHECK(recEmpty.find("(none recorded)") != std::string::npos);
     }
 
+    // === v0.28.4 — CrashWatch WER harvest: the handler never fires
+    // for heap-corruption deaths (ntdll fast-fail -> WER), so new
+    // MeterBar dumps in %LOCALAPPDATA%\CrashDumps are harvested on
+    // launch into crash-record names. Pinned here: source-name
+    // recognition, harvest keys (copy exactly once), +1s carry,
+    // collision-free destination stems.
+    {
+        // source names: WER writes MeterBar.exe.<pid>.dmp (or bare)
+        CHECK(isWerDumpName("MeterBar.exe.39596.dmp"));
+        CHECK(isWerDumpName("MeterBar.exe.dmp"));
+        CHECK(!isWerDumpName("MeterBar.exe.dmp.tmp"));
+        CHECK(!isWerDumpName("MeterBar.exe.abc.dmp"));       // pid suffix must be digits
+        CHECK(!isWerDumpName("MeterBar.exe..dmp"));          // empty pid
+        CHECK(!isWerDumpName("OtherApp.exe.39596.dmp"));     // not our dumps
+        CHECK(!isWerDumpName("crash-2026-11-03_114806.dmp")); // handler names are not sources
+        CHECK(!isWerDumpName("MeterBar.exe.39596.txt"));
+        // keys: name + size + write time; whole-line membership
+        CrashTimeParts mt; mt.year = 2026; mt.month = 11; mt.day = 3; mt.hour = 14; mt.minute = 4; mt.second = 59;
+        const auto k1 = werHarvestKey("MeterBar.exe.39596.dmp", 3803091, mt);
+        CHECK(k1 == "MeterBar.exe.39596.dmp|3803091|2026-11-03_140459");
+        CHECK(werHarvestKey("MeterBar.exe.39596.dmp", 3803092, mt) != k1); // size differs
+        CHECK(werHarvestKey("MeterBar.exe.39597.dmp", 3803091, mt) != k1); // pid differs
+        const std::string log = "MeterBar.exe.111.dmp|100|2026-11-03_010203\n" + k1 + "\n";
+        CHECK(werHarvestKeySeen(log, k1));
+        CHECK(werHarvestKeySeen(log, "MeterBar.exe.111.dmp|100|2026-11-03_010203"));
+        CHECK(!werHarvestKeySeen(log, "MeterBar.exe.39596.dmp|3803091|2026-11-03_14045"));  // prefix is not a line
+        CHECK(!werHarvestKeySeen(log, "MeterBar.exe.222.dmp|100|2026-11-03_010203"));
+        CHECK(!werHarvestKeySeen("", k1));
+        // +1s carry across every boundary
+        CrashTimeParts a; a.year = 2026; a.month = 11; a.day = 3; a.hour = 14; a.minute = 4; a.second = 58;
+        CHECK(crashFileStem(addOneSecond(a)) == "crash-2026-11-03_140459");
+        a.second = 59;
+        CHECK(crashFileStem(addOneSecond(a)) == "crash-2026-11-03_140500"); // minute carry
+        CrashTimeParts b; b.year = 2026; b.month = 1; b.day = 31; b.hour = 23; b.minute = 59; b.second = 59;
+        CHECK(crashFileStem(addOneSecond(b)) == "crash-2026-02-01_000000"); // month carry
+        CrashTimeParts c; c.year = 2028; c.month = 2; c.day = 28; c.hour = 23; c.minute = 59; c.second = 59;
+        CHECK(crashFileStem(addOneSecond(c)) == "crash-2028-02-29_000000"); // leap year
+        CrashTimeParts d; d.year = 2026; d.month = 2; d.day = 28; d.hour = 23; d.minute = 59; d.second = 59;
+        CHECK(crashFileStem(addOneSecond(d)) == "crash-2026-03-01_000000"); // non-leap
+        CrashTimeParts e; e.year = 2026; e.month = 12; e.day = 31; e.hour = 23; e.minute = 59; e.second = 59;
+        CHECK(crashFileStem(addOneSecond(e)) == "crash-2027-01-01_000000"); // year carry
+        // stems: free -> as-is; clash on either sibling -> bump
+        CrashTimeParts t; t.year = 2026; t.month = 11; t.day = 3; t.hour = 14; t.minute = 4; t.second = 59;
+        CHECK(harvestStem({}, t) == "crash-2026-11-03_140459");
+        CHECK(harvestStem({ "crash-2026-11-03_140459.txt" }, t) == "crash-2026-11-03_140500");
+        CHECK(harvestStem({ "crash-2026-11-03_140459.dmp" }, t) == "crash-2026-11-03_140500");
+        CHECK(harvestStem({ "crash-2026-11-03_140459.txt", "crash-2026-11-03_140500.dmp" }, t)
+              == "crash-2026-11-03_140501"); // double clash bumps twice
+        // a harvested record is an ordinary unseen crash to the notice
+        auto unseenH = unseenCrashes({ harvestStem({}, t) + ".txt", harvestStem({}, t) + ".dmp" });
+        CHECK(unseenH.size() == 1);
+    }
+
+    // === v0.28.4 — activation construction pin (D-SEQ-1). The core
+    // cannot call Windows APIs, but it CAN read the app source when
+    // run from a tree checkout (the release CI runs this suite from
+    // the repo root): the segment between the activation call and
+    // the wait must contain NO PropVariantClear(&prop) — the blob
+    // payload is the caller's stack struct and is never ours to
+    // clear — while the unrelated GetValue clear in friendlyName
+    // (payload owned by the caller there) must still be present,
+    // proving the scan is reading the right file. If the source is
+    // not reachable the pin SKIPS with a printed note (checked by
+    // the round's local run + CI, where it does execute).
+    {
+        std::string src;
+        const char* candidates[] = { "app/Source/WindowsLoopback.cpp",
+                                     "../app/Source/WindowsLoopback.cpp",
+                                     "../../app/Source/WindowsLoopback.cpp" };
+        for (auto* path : candidates) {
+            std::FILE* fh = std::fopen(path, "rb");
+            if (!fh) continue;
+            char chunk[8192]; std::size_t n;
+            while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+            std::fclose(fh);
+            if (!src.empty()) break;
+        }
+        if (src.empty()) {
+            std::printf("v0.28.4 activation pin SKIPPED (WindowsLoopback.cpp not reachable from CWD)\n");
+        } else {
+            const auto callPos = src.find("ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK");
+            const auto waitPos = src.find("WaitForSingleObject(handler->done", callPos);
+            CHECK(callPos != std::string::npos && waitPos != std::string::npos && waitPos > callPos);
+            if (callPos != std::string::npos && waitPos != std::string::npos && waitPos > callPos) {
+                const std::string seg = src.substr(callPos, waitPos - callPos);
+                CHECK(seg.find("PropVariantClear(&prop)") == std::string::npos); // D-SEQ-1 stays gone
+            }
+            CHECK(src.find("PropVariantClear(&v)") != std::string::npos); // the owned-payload clear stays
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

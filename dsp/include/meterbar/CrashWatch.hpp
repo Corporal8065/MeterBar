@@ -26,11 +26,14 @@ namespace meterbar {
 // reads a clock — the same discipline as the rest of the suite).
 struct CrashTimeParts { int year = 1970, month = 1, day = 1, hour = 0, minute = 0, second = 0; };
 
-inline std::string crashFileStem(const CrashTimeParts& t) {
-    char buf[40];
-    std::snprintf(buf, sizeof buf, "crash-%04d-%02d-%02d_%02d%02d%02d",
+inline std::string crashTimeText(const CrashTimeParts& t) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02d_%02d%02d%02d",
                   t.year, t.month, t.day, t.hour, t.minute, t.second);
     return buf;
+}
+inline std::string crashFileStem(const CrashTimeParts& t) {
+    return "crash-" + crashTimeText(t);
 }
 inline std::string crashTextName(const CrashTimeParts& t) { return crashFileStem(t) + ".txt"; }
 inline std::string crashDumpName(const CrashTimeParts& t) { return crashFileStem(t) + ".dmp"; }
@@ -60,6 +63,94 @@ inline std::vector<std::string> unseenCrashes(const std::vector<std::string>& fi
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+// --- v0.28.4: WER LocalDumps harvest --------------------------------
+// The in-process handler never fires for heap-corruption deaths:
+// ntdll fast-fail goes straight to WER (field finding, 2026-11-03),
+// so for exactly that crash class the ONLY record is the dump WER
+// writes to %LOCALAPPDATA%\CrashDumps. On launch the app copies each
+// NEW MeterBar dump from there into the log folder under a
+// crash-record name (timestamp = the dump's last-write time), where
+// the next-launch notice + Open Log Folder flow above surfaces it
+// like any handler-written record. The decidable parts live here:
+// which source names are ours, how a source dump is keyed (so it is
+// copied exactly once), and which destination stem it gets when
+// its timestamp collides with an existing record.
+
+// WER LocalDumps names a per-app dump "MeterBar.exe.<pid>.dmp"
+// (or "MeterBar.exe.dmp" with no pid suffix). Anything else in
+// that folder — other apps' dumps, our handler's crash-* names —
+// is not a harvest source.
+inline bool isWerDumpName(const std::string& name) {
+    static const std::string bare = "MeterBar.exe.dmp";
+    static const std::string prefix = "MeterBar.exe.";
+    if (name == bare) return true;
+    if (name.rfind(prefix, 0) != 0) return false;
+    if (name.size() <= prefix.size() + 4) return false;
+    if (name.compare(name.size() - 4, 4, ".dmp") != 0) return false;
+    const std::string mid = name.substr(prefix.size(), name.size() - prefix.size() - 4);
+    if (mid.empty()) return false;
+    for (char c : mid) if (c < '0' || c > '9') return false;
+    return true;
+}
+
+// Identity of one source dump: name + size + last-write time. A
+// dump that reappears with the same identity was already
+// harvested; a later crash writes a new file (new pid in the name
+// and/or a new write time), so it keys differently and harvests.
+inline std::string werHarvestKey(const std::string& name, long long sizeBytes,
+                                 const CrashTimeParts& mtime) {
+    return name + "|" + std::to_string(sizeBytes) + "|" + crashTimeText(mtime);
+}
+
+// The harvest log is one key per line. Membership is whole-line.
+inline bool werHarvestKeySeen(const std::string& logText, const std::string& key) {
+    std::string::size_type pos = 0;
+    while (pos <= logText.size()) {
+        const auto nl = logText.find('\n', pos);
+        const auto line = logText.substr(pos, nl == std::string::npos ? nl : nl - pos);
+        if (line == key) return true;
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return false;
+}
+
+// +1 second with full carry (minute/hour/day/month/year, leap
+// years included) — a harvested dump's stem is its write time,
+// and a same-second sibling record must be bumped, not clobbered.
+inline CrashTimeParts addOneSecond(CrashTimeParts t) {
+    static const int daysInMonth[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    auto leap = [](int y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); };
+    if (++t.second < 60) return t;
+    t.second = 0;
+    if (++t.minute < 60) return t;
+    t.minute = 0;
+    if (++t.hour < 24) return t;
+    t.hour = 0;
+    int dim = daysInMonth[(t.month >= 1 && t.month <= 12) ? t.month - 1 : 0];
+    if (t.month == 2 && leap(t.year)) dim = 29;
+    if (++t.day <= dim) return t;
+    t.day = 1;
+    if (++t.month <= 12) return t;
+    t.month = 1;
+    ++t.year;
+    return t;
+}
+
+// The destination stem for a harvested dump written at `t`: the
+// plain timestamp stem, bumped one second at a time until neither
+// the .txt nor the .dmp of that stem exists in the log folder.
+inline std::string harvestStem(const std::vector<std::string>& existingNames, CrashTimeParts t) {
+    for (;;) {
+        const std::string stem = crashFileStem(t);
+        const bool clash =
+            std::find(existingNames.begin(), existingNames.end(), stem + ".txt") != existingNames.end() ||
+            std::find(existingNames.begin(), existingNames.end(), stem + ".dmp") != existingNames.end();
+        if (!clash) return stem;
+        t = addOneSecond(t);
+    }
 }
 
 // The crash record's text. `stateSnapshot` is the app's last honest
