@@ -86,4 +86,37 @@ inline void drawFitted(juce::Graphics& g, const juce::String& text, juce::Rectan
     g.drawFittedText(text, r, j, maxLines, minScale);
 }
 
+// BLACK-BACK variants (v0.28.0 — Jackson, 2026-11-02 21:54 PT,
+// correcting the reach of the v0.27.1 white rule): for the METER
+// READOUT labels — loudness L/R, the waveform chip (BPM + time
+// signature), the stereometer bottom line, the oscilloscope and
+// spectrum bottom text — the offset back copy is PURE BLACK.
+// The white-back build "looks pretty bad" on those readouts (his
+// words); his Loudness remark was about these meter labels, not
+// a family-wide rule. The white FRONT copy and the geometry are
+// unchanged; every other label keeps draw/drawFitted above.
+inline juce::Colour blackBackFor(juce::Colour colour) {
+    return juce::Colours::black.withAlpha(colour.getFloatAlpha());
+}
+inline void drawBlackBack(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
+                          juce::Justification j, juce::Colour colour) {
+    const float off = offsetFor(g.getCurrentFont().getHeight());
+    g.setColour(blackBackFor(colour));
+    g.drawText(text, r.translated(off, off), j);   // black copy, bottom-right, BEHIND
+    g.setColour(juce::Colours::white.withAlpha(colour.getFloatAlpha()));
+    g.drawText(text, r, j);                        // white copy, top-left, IN FRONT
+}
+inline void drawBlackBack(juce::Graphics& g, const juce::String& text, juce::Rectangle<int> r,
+                          juce::Justification j, juce::Colour colour) {
+    drawBlackBack(g, text, r.toFloat(), j, colour);
+}
+inline void drawFittedBlackBack(juce::Graphics& g, const juce::String& text, juce::Rectangle<int> r,
+                                juce::Justification j, int maxLines, float minScale, juce::Colour colour) {
+    const int off = juce::roundToInt(offsetFor(g.getCurrentFont().getHeight()));
+    g.setColour(blackBackFor(colour));
+    g.drawFittedText(text, r.translated(off, off), j, maxLines, minScale);
+    g.setColour(juce::Colours::white.withAlpha(colour.getFloatAlpha()));
+    g.drawFittedText(text, r, j, maxLines, minScale);
+}
+
 } // namespace textpop

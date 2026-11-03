@@ -29,6 +29,7 @@
 #include "../dsp/include/meterbar/Glyphs.hpp"
 #include "../dsp/include/meterbar/Captions.hpp"
 #include "../dsp/include/meterbar/BeatTrack.hpp"
+#include "../dsp/include/meterbar/Undertow.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -318,7 +319,7 @@ int main() {
         PresetState p;
         CHECK(p.name == "Default");
         CHECK(p.themeName == "Midnight Kids"); CHECK(p.colorMap == ColorMapId::Midnight);
-        CHECK(p.backgroundStyle == BackgroundStyle::CleanDark); CHECK(p.backgroundOpacity == 0.15f);
+        CHECK(p.backgroundStyle == BackgroundStyle::MidnightKids); CHECK(p.backgroundOpacity == 0.15f); // v0.28.0 recipe (was CleanDark)
         CHECK(p.spectrumStyle == PresetState::SpectrumStyle::Both);
         CHECK(p.spectrumSmoothingPct == 50.0f);
         CHECK(p.spectrumDisplayTiltDb == 1.15f);                 // display tilt
@@ -331,7 +332,11 @@ int main() {
         CHECK(p.scopeWindowMs == 100.0f);
         CHECK(p.audioSource == "System Loopback");               // OS-default output, NOT the test tone
         CHECK(p.outputDeviceName.empty() && p.outputDeviceId.empty()); // empty = default render endpoint
-        CHECK(std::abs(p.trimDb - 10.18f) < 1e-6);               // +10.18 dB exactly
+        CHECK(std::abs(p.trimDb - 27.0f) < 1e-6);                 // v0.28.0 recipe: +27 dB (was +10.18 through v0.27.x)
+        CHECK(p.visualizerEnabled);                              // v0.28.0 recipe: visualizer background ON
+        CHECK(p.visualizerStyle == 2);                           // v0.28.0 recipe: Field style by default
+        CHECK(p.undertowBloomQuarter && p.undertowBloomEighth && p.undertowPreArm); // grading hooks at the committed design
+        CHECK(std::abs(p.undertowKickTauMs - 65.0f) < 1e-6);     // committed kick release τ
         CHECK(p.spectrogramEnabled && p.waveformEnabled && p.loudnessEnabled
               && p.stereometerEnabled && p.oscilloscopeEnabled && p.spectrumEnabled);
         bool flexOk = true; for (float f : p.moduleFlex) flexOk = flexOk && (f == 1.0f);
@@ -2015,6 +2020,270 @@ int main() {
             std::vector<float> db2(513, -70.f);
             for (int b = 1; b < 513; ++b) { double f = b * 48000.0 / 1024; if (f > 150.0 && f < 300.0) db2[(size_t)b] = -10.f; }
             CHECK(subBandEnergy(db2, 1024, 48000.0) < 0.05f);
+        }
+    }
+
+    // === v0.28.0 — Undertow (visualizer council DESIGN.md) ===
+    // --- committed envelope law + follower maths
+    {
+        CHECK(kUndertowKickReleaseTau == 0.065f);            // τ 65 ms, no hold (the council's settled argument)
+        CHECK(kUndertowPipelineCompSec == 0.034f);           // 34 ms pipeline compensation
+        CHECK(kUndertowPredictedCap == 0.45f);               // unconfirmed prediction cap
+        CHECK(kUndertowConfirmWindowSec == 0.060f);          // ±60 ms confirmation window
+        const float v150 = decayTau(1.f, 0.150f, kUndertowKickReleaseTau);
+        CHECK(v150 > 0.07f && v150 < 0.13f);                 // ~10% of peak inside 150 ms (the gap reads empty)
+        CHECK(decayTau(1.f, 0.255f, kUndertowKickReleaseTau) < 0.02f);
+        float stepped = 1.f; for (int i = 0; i < 10; ++i) stepped = decayTau(stepped, 0.016f, 0.065f);
+        CHECK(std::abs(stepped - decayTau(1.f, 0.16f, 0.065f)) < 0.001f); // dt-corrected: step size must not matter
+        // tails: born at full factor, quadratic alpha / 1.5-power width, dead at 220 ms
+        CHECK(tailAlphaFactor(0.f) == 1.f && tailWidthFactor(0.f) == 1.f);
+        CHECK(std::abs(tailAlphaFactor(0.11f) - 0.25f) < 0.01f);
+        CHECK(tailWidthFactor(0.11f) > 0.30f && tailWidthFactor(0.11f) < 0.40f);
+        CHECK(tailAlphaFactor(0.22f) == 0.f && tailWidthFactor(0.30f) == 0.f);
+        UndertowTrail trl; trl.reset(0.1f, 0.2f);
+        trl.advance(0.15f); CHECK(trl.n == 1 && trl.age[0] > 0.14f);
+        trl.push(0.3f, 0.4f); CHECK(trl.n == 2 && trl.age[0] == 0.f && trl.age[1] > 0.14f);
+        trl.advance(0.10f); CHECK(trl.n == 1);               // the 250 ms-old point is pruned; the 100 ms one stays
+        CHECK(softClipUnit(0.f) == 0.f && std::abs(softClipUnit(1.f) - 1.f) < 1e-5f);
+        CHECK(softClipUnit(0.5f) > 0.60f && softClipUnit(0.5f) < 0.72f);
+        CHECK(undertowDbToLevel(-60.f) == 0.f && undertowDbToLevel(-6.f) == 1.f);
+        CHECK(std::abs(undertowDbToLevel(-33.f) - 0.5f) < 1e-6f);
+        CHECK(undertowDbToLevel(-100.f) == 0.f && undertowDbToLevel(0.f) == 1.f);
+        // palette: the fixed Midnight Kits band colours, exact hexes (DESIGN §(e))
+        auto c0 = UndertowModel::bandColour(0); CHECK(c0.r == 0x4A && c0.g == 0x5F && c0.b == 0xD9);
+        auto c1 = UndertowModel::bandColour(1); CHECK(c1.r == 0x33 && c1.g == 0x50 && c1.b == 0x7A);
+        auto c2 = UndertowModel::bandColour(2); CHECK(c2.r == 0xE8 && c2.g == 0xEE && c2.b == 0xF5);
+        auto c3 = UndertowModel::bandColour(3); CHECK(c3.r == 0x9F && c3.g == 0xD8 && c3.b == 0xE8);
+        auto c4 = UndertowModel::bandColour(4); CHECK(c4.r == 0xCF && c4.g == 0xC8 && c4.b == 0xE8);
+        auto ce = UndertowModel::membraneEdgeColour(); CHECK(ce.r == 0x7C && ce.g == 0x8C && ce.b == 0xF0);
+        auto cw = UndertowModel::ringWarmColour(); CHECK(cw.r == 0xE8 && cw.g == 0xD9 && cw.b == 0xB0);
+    }
+    // --- Path A: FiveBandOnsets selectivity (time-domain; no FFT anywhere near timing)
+    {
+        const int blk = 256;
+        std::vector<float> L(blk), R(blk);
+        double tNow = 0;
+        auto tone = [&](FiveBandOnsets& ob, double freq, double amp, double secs) {
+            int n = (int)std::lround(secs * sr / blk);
+            for (int b = 0; b < n; ++b) {
+                for (int i = 0; i < blk; ++i) { double tt = tNow + (double)i / sr; L[(size_t)i] = R[(size_t)i] = (float)(amp * std::sin(2 * M_PI * freq * tt)); }
+                ob.pushBlock(L.data(), R.data(), blk); tNow += blk / sr;
+            }
+        };
+        auto silence = [&](FiveBandOnsets& ob, double secs) {
+            std::vector<float> z(blk, 0.f);
+            int n = (int)std::lround(secs * sr / blk);
+            for (int b = 0; b < n; ++b) { ob.pushBlock(z.data(), z.data(), blk); tNow += blk / sr; }
+        };
+        // kicks: 60 Hz bursts; optional softer off-beat bass (the v0.26.1 trap)
+        auto kickTrain = [&](FiveBandOnsets& ob, double secs, double period, double kickAmp, double bassAmp) {
+            int n = (int)std::lround(secs * sr / blk);
+            for (int b = 0; b < n; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    double tt = tNow + (double)i / sr;
+                    double v = 0.01 * std::sin(2 * M_PI * 440.0 * tt);
+                    double pos = std::fmod(tt, period);
+                    if (pos < 0.09) v += kickAmp * std::sin(2 * M_PI * 60.0 * pos) * (1.0 - pos / 0.09);
+                    if (bassAmp > 0) { double pb = std::fmod(tt - period * 0.5, period); if (pb < 0) pb += period;
+                        if (pb < 0.12) v += bassAmp * std::sin(2 * M_PI * 55.0 * pb) * (1.0 - pb / 0.12); }
+                    L[(size_t)i] = R[(size_t)i] = (float)v;
+                }
+                ob.pushBlock(L.data(), R.data(), blk); tNow += blk / sr;
+            }
+        };
+        {   // silence: nothing fires, ever
+            FiveBandOnsets ob; ob.prepare(sr); tNow = 0; silence(ob, 2.0);
+            uint64_t tot = 0; for (int b = 0; b < 5; ++b) tot += ob.onsetCount(b);
+            CHECK(tot == 0);
+        }
+        {   // a steady tone is not an onset: count frozen after warm-up
+            FiveBandOnsets ob; ob.prepare(sr); tNow = 0; tone(ob, 60.0, 0.5, 3.0);
+            uint64_t c0[5]; for (int b = 0; b < 5; ++b) c0[b] = ob.onsetCount(b);
+            tone(ob, 60.0, 0.5, 2.0);
+            bool frozen = true; for (int b = 0; b < 5; ++b) frozen = frozen && ob.onsetCount(b) == c0[b];
+            CHECK(frozen);
+        }
+        {   // 120 BPM kick train: the sub band tracks the kicks
+            FiveBandOnsets ob; ob.prepare(sr); tNow = 0; kickTrain(ob, 3.0, 0.5, 0.9, 0.0);
+            const uint64_t before = ob.onsetCount(0);
+            kickTrain(ob, 3.0, 0.5, 0.9, 0.0);
+            const uint64_t got = ob.onsetCount(0) - before;
+            std::printf("undertow onsets: sub kicks in 3 s = %llu (6 fed)\n", (unsigned long long)got);
+            CHECK(got >= 5 && got <= 7);
+        }
+        {   // peak gate: softer off-beat bass must NOT double the sub count
+            FiveBandOnsets ob; ob.prepare(sr); tNow = 0; kickTrain(ob, 4.0, 0.5, 0.9, 0.30);
+            std::printf("undertow onsets: sub with bass train = %llu (8 kicks fed)\n", (unsigned long long)ob.onsetCount(0));
+            CHECK(ob.onsetCount(0) >= 5 && ob.onsetCount(0) <= 11);
+        }
+        {   // absolute floor: inaudible kicks never fire
+            FiveBandOnsets ob; ob.prepare(sr); tNow = 0; kickTrain(ob, 3.0, 0.5, 0.0001, 0.0);
+            CHECK(ob.onsetCount(0) == 0);
+        }
+        {   // high ticks over a steady sub bed: high fires, sub stays silent
+            FiveBandOnsets ob; ob.prepare(sr); tNow = 0;
+            int n = (int)std::lround(4.0 * sr / blk);
+            for (int b = 0; b < n; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    double tt = tNow + (double)i / sr;
+                    double v = 0.02 * std::sin(2 * M_PI * 60.0 * tt);
+                    double pos = std::fmod(tt, 0.5);
+                    if (pos < 0.04) v += 0.5 * std::sin(2 * M_PI * 6000.0 * pos);
+                    L[(size_t)i] = R[(size_t)i] = (float)v;
+                }
+                ob.pushBlock(L.data(), R.data(), blk); tNow += blk / sr;
+            }
+            std::printf("undertow onsets: high ticks = %llu (8 fed), sub = %llu\n",
+                        (unsigned long long)ob.onsetCount(3), (unsigned long long)ob.onsetCount(0));
+            CHECK(ob.onsetCount(3) >= 5 && ob.onsetCount(3) <= 10);
+            CHECK(ob.onsetCount(0) == 0);
+        }
+        {   // presence: sparse 12 kHz ticks clear the strictest ratio
+            FiveBandOnsets ob; ob.prepare(sr); tNow = 0;
+            int n = (int)std::lround(4.0 * sr / blk);
+            for (int b = 0; b < n; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    double tt = tNow + (double)i / sr;
+                    double pos = std::fmod(tt, 1.0);
+                    double v = pos < 0.03 ? 0.6 * std::sin(2 * M_PI * 12000.0 * pos) : 0.0;
+                    L[(size_t)i] = R[(size_t)i] = (float)v;
+                }
+                ob.pushBlock(L.data(), R.data(), blk); tNow += blk / sr;
+            }
+            CHECK(ob.onsetCount(4) >= 3);
+        }
+    }
+    // --- Path B: levels from the unsmoothed spectrum
+    {
+        std::vector<float> db(1025, -100.f);
+        db[1] = -14.f; db[2] = -8.f; // 23.4 + 46.9 Hz: sub energy
+        auto lv = fiveBandLevelsFromRawDb(db, 2048, 48000.0);
+        CHECK(lv.band[0] > 0.7f);
+        CHECK(lv.band[2] < 0.05f);
+        int pk = 0; for (int i = 1; i < FiveBandLevels::kEdgePoints; ++i) if (lv.edge[i] > lv.edge[pk]) pk = i;
+        const double pkHz = 20.0 * std::pow(12.5, ((double)pk + 0.5) / FiveBandLevels::kEdgePoints);
+        CHECK(pkHz > 35.0 && pkHz < 60.0); // the membrane edge peaks at the tone, not at DC or the band edge
+        std::vector<float> db2(1025, -100.f);
+        for (int b = 42; b <= 46; ++b) db2[(size_t)b] = -8.f; // ~1 kHz cluster
+        auto lv2 = fiveBandLevelsFromRawDb(db2, 2048, 48000.0);
+        CHECK(lv2.band[2] > 0.65f);
+        CHECK(lv2.band[0] < 0.05f);
+        std::vector<float> db3(1025, -100.f);
+        auto lv3 = fiveBandLevelsFromRawDb(db3, 2048, 48000.0);
+        bool allZero = true; for (int b = 0; b < 5; ++b) allZero = allZero && lv3.band[b] < 0.02f;
+        CHECK(allZero);
+    }
+    // --- the model: envelope law, beat states, Governor
+    {
+        FiveBandLevels loud; for (int b = 0; b < 5; ++b) loud.band[b] = 0.8f;
+        FiveBandLevels zero{};
+        UndertowBeatFeed noBeat; UndertowOnsetFeed none;
+        {   // a sub onset fires the kick on the committed envelope
+            UndertowModel m;
+            UndertowOnsetFeed fire; fire.count[0] = 1; fire.strength[0] = 1.f; fire.lastSec[0] = 50.0;
+            m.update(0.016f, loud, -20.f, noBeat, fire);
+            CHECK(m.kickValue() > 0.7f);                       // fired this frame (one frame of τ65 decay applied)
+            CHECK(m.kickSpikeDisplay() > m.kickValue());       // the render-only easeOutBack overshoot is live
+            for (int i = 0; i < 3; ++i) m.update(0.016f, loud, -20.f, noBeat, none);
+            CHECK(std::abs(m.kickSpikeDisplay() - m.kickValue()) < 1e-5f); // overshoot window (40 ms) over: display IS the envelope
+            for (int i = 0; i < 6; ++i) m.update(0.016f, loud, -20.f, noBeat, none);
+            CHECK(m.kickValue() > 0.04f && m.kickValue() < 0.14f);  // ~0.16 s after the hit: the gap is nearly empty
+            for (int i = 0; i < 6; ++i) m.update(0.016f, loud, -20.f, noBeat, none);
+            CHECK(m.kickValue() < 0.03f);                      // ~0.26 s: gone
+            CHECK(m.beatState() == UndertowBeatState::Reactive);
+        }
+        {   // silence: the gate hard-zeros; no grid + no sub for 10 s -> AMBIENT; a kick revives it
+            UndertowModel m;
+            for (int i = 0; i < 750; ++i) m.update(0.016f, zero, -60.f, noBeat, none); // 12 s
+            CHECK(m.silenceGate() == 0.f);
+            CHECK(m.displayGain() == 0.f);
+            CHECK(m.beatState() == UndertowBeatState::Ambient);
+            UndertowOnsetFeed fire; fire.count[0] = 1; fire.strength[0] = 1.f; fire.lastSec[0] = 999.0;
+            m.update(0.016f, zero, -60.f, noBeat, fire);
+            CHECK(m.beatState() == UndertowBeatState::Reactive);
+        }
+        {   // Still: low activity sustained -> rest state
+            UndertowModel m;
+            FiveBandLevels low; for (int b = 0; b < 5; ++b) low.band[b] = 0.05f;
+            for (int i = 0; i < 125; ++i) m.update(0.016f, low, -20.f, noBeat, none); // 2 s
+            CHECK(m.still());
+        }
+        // a simulated 120 BPM grid in 4/4 (beats at 0.5 s spacing)
+        struct GridSim {
+            double now = 0, nextBeat = 0.5; uint64_t beats = 0;
+            UndertowBeatFeed f;
+            GridSim(float conf) { f.locked = true; f.confidence = conf; f.bpm = 120.f; f.beatsPerBar = 4; f.lastGridBeatSec = -1; }
+            void step(UndertowModel& m, const FiveBandLevels& lv, const UndertowOnsetFeed& onf) {
+                now += 0.016;
+                while (now >= nextBeat) {
+                    f.lastGridBeatSec = nextBeat; ++beats; nextBeat += 0.5;
+                    f.gridBeatCount = beats;
+                    f.countInBar = (int)((beats - 1) % 4) + 1;
+                }
+                f.nextIsDownbeat = (beats % 4) == 0;
+                f.trackerNowSec = now; f.secondsToNextBeat = nextBeat - now;
+                m.update(0.016f, lv, -20.f, f, onf);
+            }
+        };
+        {   // LOCKED: two grid beats at confidence >= 0.60 engage prediction;
+            // the downbeat pulse fires 34 ms early, capped, then confirms to full
+            GridSim g(0.8f); UndertowModel m;
+            for (int i = 0; i < 80; ++i) g.step(m, loud, none);       // 1.28 s: beats at 0.5, 1.0
+            CHECK(m.beatState() == UndertowBeatState::Locked);
+            while (g.now < 2.40) g.step(m, loud, none);
+            float maxPre = 0;
+            while (g.now < 2.49) { g.step(m, loud, none); maxPre = std::max(maxPre, m.kickValue()); }
+            std::printf("undertow predict: pre-beat kick peak = %.3f (cap 0.45 x downbeat 1.25)\n", (double)maxPre);
+            CHECK(maxPre > 0.35f);                                    // the prediction really fired early
+            CHECK(maxPre <= 0.58f);                                   // ... and stayed under the cap x downbeat
+            UndertowOnsetFeed conf; conf.count[0] = 1; conf.strength[0] = 0.9f; conf.lastSec[0] = 2.5;
+            g.step(m, loud, conf);                                    // the onset lands on the beat
+            CHECK(m.kickValue() > 0.65f);                             // confirmed: upgraded to full strength
+        }
+        {   // REACTIVE (confidence under the bar): the grid alone never fires a pulse
+            GridSim g(0.4f); UndertowModel m;
+            for (int i = 0; i < 160; ++i) g.step(m, loud, none);      // 2.56 s of grid, zero onsets
+            CHECK(m.beatState() == UndertowBeatState::Reactive);
+            CHECK(m.kickValue() < 0.01f);
+        }
+        {   // pre-arm: mid onsets at count 2 in two consecutive bars arm that position
+            GridSim g(0.8f); UndertowModel m;
+            UndertowOnsetFeed feed;
+            int injectedBar = -1;
+            while (g.now < 4.6) {
+                g.step(m, loud, feed);
+                const int bar = (int)((g.beats - 1) / 4);              // model bars run 0-based here; beats 1-4 = bar 0
+                if (g.f.countInBar == 2 && bar <= 1 && injectedBar != bar) {
+                    injectedBar = bar;
+                    feed.count[2] += 1; feed.strength[2] = 0.8f; feed.lastSec[2] = g.now;
+                    g.step(m, loud, feed);                            // drain the latch on the next frame
+                }
+                if (g.f.countInBar == 1 && g.beats >= 9) break;       // third bar begins: position 2 is upcoming
+            }
+            CHECK(m.preArm(2));
+            CHECK(std::abs(m.thresholdScale(2) - 0.88f) < 1e-6f);
+            CHECK(!m.preArm(3));                                      // a band that never fired there stays unarmed
+            CHECK(m.thresholdScale(3) == 1.f);
+        }
+        {   // the limiter never retimes an envelope: identical onsets into a
+            // limiter-hot model and a cold model give identical kick curves
+            UndertowModel hot, cold;
+            FiveBandLevels maxLv; for (int b = 0; b < 5; ++b) maxLv.band[b] = 1.f;
+            for (int i = 0; i < 375; ++i) { hot.update(0.016f, maxLv, -6.f, noBeat, none); cold.update(0.016f, zero, -60.f, noBeat, none); }
+            std::printf("undertow limiter: est=%.3f dark=%.3f dots=%d\n",
+                        (double)hot.estimatedLuminance(), (double)hot.darkFraction(), hot.liveDots());
+            CHECK(hot.estimatedLuminance() > 0.f && hot.estimatedLuminance() <= 0.19f); // rolling average under the 18% cap
+            CHECK(hot.darkFraction() >= 0.60f);                       // the soak rule: >=60% near-black even driven hard
+            CHECK(hot.liveDots() <= UndertowModel::kDotHardCap);
+            CHECK(hot.displayGain() > 0.f && hot.displayGain() <= 1.f);
+            UndertowOnsetFeed fire; fire.count[0] = 1; fire.strength[0] = 1.f; fire.lastSec[0] = 100.0;
+            bool same = true;
+            for (int i = 0; i < 20; ++i) {
+                hot.update(0.016f, maxLv, -6.f, noBeat, fire);
+                cold.update(0.016f, zero, -60.f, noBeat, fire);
+                if (std::abs(hot.kickValue() - cold.kickValue()) > 1e-6f) same = false;
+            }
+            CHECK(same);
         }
     }
 

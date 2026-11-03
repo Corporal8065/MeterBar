@@ -92,6 +92,15 @@ public:
                         juce::Justification j, juce::Colour colour) {
         textpop::draw(g, text, r, j, colour);
     }
+    // v0.28.0: the meter-readout variant — BLACK back copy (Jackson,
+    // 2026-11-02 21:54 PT: the white-back build "looks pretty bad"
+    // on these labels). Used ONLY by the readout labels he named:
+    // loudness L/R, the waveform chip, the stereometer bottom line,
+    // the oscilloscope and spectrum bottom text.
+    void drawBlackBackText(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
+                           juce::Justification j, juce::Colour colour) {
+        textpop::drawBlackBack(g, text, r, j, colour);
+    }
     juce::Image sgCache; // spectrogram render cache (v0.11)
     // v0.20.2: what the cache was last rendered FROM — drawSpectrogram
     // skips its re-render while every input in this signature is
@@ -287,8 +296,8 @@ private:
             }
         }
         g.setFont(9.f);
-        drawPoppedText(g, "20", p.removeFromBottom(10), juce::Justification::bottomLeft, th.dim);
-        drawPoppedText(g, "20k", p, juce::Justification::bottomRight, th.dim);
+        drawBlackBackText(g, "20", p.removeFromBottom(10), juce::Justification::bottomLeft, th.dim);
+        drawBlackBackText(g, "20k", p, juce::Justification::bottomRight, th.dim);
         // v0.27.0 (item 14): hover readout — a hairline at the
         // cursor plus the EXACT frequency under it.
         if (hoverFreq_ > 0) {
@@ -476,7 +485,7 @@ private:
             juce::String label = sig;
             if (data->beatLocked && data->beatBpm > 0.f) label += " " + juce::String((int)std::lround(data->beatBpm));
             g.setFont(juce::Font(9.f, juce::Font::bold));
-            drawPoppedText(g, label, chip, juce::Justification::centred, th.text);
+            drawBlackBackText(g, label, chip, juce::Justification::centred, th.text); // v0.28.0: meter readout -> black back copy
         }
         (void)st;
     }
@@ -516,8 +525,8 @@ private:
         chanBar(mkBar(barL), data->loudDbL, data->loudPeakDbL);
         chanBar(mkBar(barR), data->loudDbR, data->loudPeakDbR);
         g.setFont(9.f);
-        drawPoppedText(g, "L", juce::Rectangle<float>(barL.getX(), barL.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
-        drawPoppedText(g, "R", juce::Rectangle<float>(barR.getX(), barR.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
+        drawBlackBackText(g, "L", juce::Rectangle<float>(barL.getX(), barL.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
+        drawBlackBackText(g, "R", juce::Rectangle<float>(barR.getX(), barR.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
         // numeric readout immediately right of the bars, level-live
         auto num = plot.withTrimmedLeft(6);
         g.setFont(juce::Font(22.f, juce::Font::bold));
@@ -592,8 +601,12 @@ private:
         g.setFont(10.f);
         // v0.16: width % joins the correlation readout under the vectorscope
         // (correlation itself landed in v0.15; both update live per frame).
-        drawPoppedText(g, "corr " + juce::String(f.correlation, 2) + "   width " + juce::String((int)std::lround(f.widthPct)) + "%   bal " + juce::String(f.balance, 2),
-                       getLocalBounds().toFloat().removeFromBottom(12).withTrimmedLeft(4), juce::Justification::bottomLeft, th.text);
+        // v0.28.0: FITTED draw with a black back copy — the plain draw
+        // ellipsised the balance figure ("bal -0.0...") at narrow
+        // module widths (Jackson, 2026-11-02 21:54 PT); minScale 0.6
+        // lets the whole line fit instead of truncating.
+        textpop::drawFittedBlackBack(g, "corr " + juce::String(f.correlation, 2) + "   width " + juce::String((int)std::lround(f.widthPct)) + "%   bal " + juce::String(f.balance, 2),
+                       getLocalBounds().removeFromBottom(12).withTrimmedLeft(4), juce::Justification::bottomLeft, 1, 0.6f, th.text);
     }
     // v0.26.0: the beat grid's readout for the scope. Its window
     // (10..200 ms) is shorter than one beat, so grid LINES cannot
@@ -611,7 +624,7 @@ private:
             g.fillEllipse(row.getX() + 1.f, row.getCentreY() - 2.5f, 5.f, 5.f);
         }
         g.setFont(9.f);
-        drawPoppedText(g, juce::String((int)std::lround(data->beatBpm)) + " BPM",
+        drawBlackBackText(g, juce::String((int)std::lround(data->beatBpm)) + " BPM",
                        row.withTrimmedLeft(9), juce::Justification::bottomLeft, th.dim);
         // v0.27.0 (item 13): the scope is MATCHED to the BPM — a
         // phase track runs along the readout row and its marker
@@ -658,7 +671,7 @@ private:
             }
             drawScopeBeatReadout(g, p, th);
             if (data->scopeFreq > 0) { g.setFont(9.f);
-                drawPoppedText(g, juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight, th.dim); }
+                drawBlackBackText(g, juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight, th.dim); }
             return;
         }
         float midY = p.getCentreY(); g.setColour(th.dim.withAlpha(0.5f)); g.drawLine(p.getX(), midY, p.getRight(), midY, 0.5f);
@@ -683,7 +696,7 @@ private:
         }
         drawScopeBeatReadout(g, p, th);
         if (data->scopeFreq > 0) { g.setFont(9.f);
-            drawPoppedText(g, juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight, th.dim); }
+            drawBlackBackText(g, juce::String(data->scopeFreq, 1) + " Hz", p, juce::Justification::bottomRight, th.dim); }
     }
 };
 

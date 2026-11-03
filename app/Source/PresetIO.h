@@ -47,7 +47,9 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("vizEnabled", s.visualizerEnabled); set("vizHue", s.visualizerBaseHue); // v0.20.0
     set("vizSat", s.visualizerSaturation); set("vizSpread", s.visualizerSpread);
     set("vizCycle", s.visualizerCycleSec);
-    set("vizStyle", s.visualizerStyle); // v0.21.5: 0 Bubbles / 1 Lines; v0.25.0: 2 Field
+    set("vizStyle", s.visualizerStyle); // v0.21.5: 0 Bubbles / 1 Lines; v0.25.0: 2 Field; v0.28.0: 3 Undertow
+    set("utBloomQ", s.undertowBloomQuarter); set("utBloomE", s.undertowBloomEighth); // v0.28.0: Undertow grading hooks
+    set("utPreArm", s.undertowPreArm); set("utKickTauMs", s.undertowKickTauMs);
     set("winX", s.windowX); set("winY", s.windowY); set("winW", s.windowW); set("winH", s.windowH);
     return juce::var(o);
 }
@@ -98,12 +100,16 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.reserveScreenSpace = gb("reserveSpace", s.reserveScreenSpace); // v0.18 (absent in old presets -> default off)
     s.linkEnabled = gb("linkEnabled", s.linkEnabled); // v0.20.0 (k) (absent -> OFF)
     s.linkBackground = gb("linkBackground", s.linkBackground); // v0.21.3 (absent -> ON)
-    s.visualizerEnabled = gb("vizEnabled", s.visualizerEnabled); // v0.20.0 (absent -> OFF)
+    s.visualizerEnabled = gb("vizEnabled", s.visualizerEnabled); // v0.20.0 (absent -> recipe default; v0.28.0 recipe: ON)
     s.visualizerBaseHue = gf("vizHue", s.visualizerBaseHue);
     s.visualizerSaturation = gf("vizSat", s.visualizerSaturation);
     s.visualizerSpread = gf("vizSpread", s.visualizerSpread);
     s.visualizerCycleSec = gf("vizCycle", s.visualizerCycleSec);
-    { int vs = gi("vizStyle", s.visualizerStyle); s.visualizerStyle = vs < 0 ? 0 : vs > 2 ? 2 : vs; } // v0.21.5 (absent -> Bubbles); v0.25.0: Field (2) admitted
+    { int vs = gi("vizStyle", s.visualizerStyle); s.visualizerStyle = vs < 0 ? 0 : vs > 3 ? 3 : vs; } // v0.21.5 (absent -> recipe default); v0.25.0: Field (2) admitted; v0.28.0: Undertow (3) admitted
+    s.undertowBloomQuarter = gb("utBloomQ", s.undertowBloomQuarter); // v0.28.0 (absent in old presets -> grading defaults)
+    s.undertowBloomEighth = gb("utBloomE", s.undertowBloomEighth);
+    s.undertowPreArm = gb("utPreArm", s.undertowPreArm);
+    s.undertowKickTauMs = gf("utKickTauMs", s.undertowKickTauMs);
     s.showToolbar = gb("showToolbar", s.showToolbar); s.showRepositionHint = gb("showHint", s.showRepositionHint);
     s.windowX = gi("winX", s.windowX); s.windowY = gi("winY", s.windowY); s.windowW = gi("winW", s.windowW); s.windowH = gi("winH", s.windowH);
     return s;

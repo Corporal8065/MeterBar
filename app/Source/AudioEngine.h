@@ -9,6 +9,7 @@
 #include <meterbar/Loudness.hpp>
 #include <meterbar/Modules.hpp>
 #include <meterbar/BeatTrack.hpp>
+#include <meterbar/Undertow.hpp>
 #include <meterbar/State.hpp>
 #include "WindowsLoopback.h"
 #include "Captions/CaptionTap.h"
@@ -127,10 +128,11 @@ public:
         // the detector's time constants are expressed per block duration.
         // v0.26.0: the auto-BPM beat grid rides the same sub-blocks.
         if (sr > 0) {
-            if (std::abs(sr - beatSr_) > 1.0) { beatPulse.prepare(sr); beatTracker.prepare(sr); applyBeatMeter(); beatSr_ = sr; }
+            if (std::abs(sr - beatSr_) > 1.0) { beatPulse.prepare(sr); beatTracker.prepare(sr); fiveBand.prepare(sr); applyBeatMeter(); beatSr_ = sr; }
             for (int off = 0; off < n; off += 256) {
                 beatPulse.pushBlock(scratchL.data() + off, scratchR.data() + off, std::min(256, n - off));
                 beatTracker.pushBlock(scratchL.data() + off, scratchR.data() + off, std::min(256, n - off));
+                fiveBand.pushBlock(scratchL.data() + off, scratchR.data() + off, std::min(256, n - off)); // v0.28.0: Undertow Path A rides the same sub-blocks (timing path; no FFT)
             }
         }
         feedRecorder(scratchL.data(), scratchR.data(), n);
@@ -152,6 +154,33 @@ public:
     int collectBeats(float maxAge, float* ages, int* counts, int maxOut) {
         return beatTracker.collectRecentBeats(maxAge, ages, counts, maxOut);
     }
+    // v0.28.0: Undertow feeds. Path A: the five-band onset latch,
+    // drained per UI frame into the model's onset feed (the same
+    // unsynchronised-scalar pattern as the beat accessors above).
+    // The beat feed exports the tracker's grid timing UNMODIFIED —
+    // Undertow consumes BeatTracker; it never retunes it (DESIGN
+    // build notes).
+    void undertowOnsets(meterbar::UndertowOnsetFeed& out) {
+        for (int b = 0; b < 5; ++b) {
+            out.count[b] = fiveBand.onsetCount(b);
+            out.strength[b] = fiveBand.lastStrength(b);
+            out.lastSec[b] = fiveBand.lastOnsetSec(b);
+        }
+        out.nowSec = fiveBand.nowSec();
+    }
+    void undertowBeatFeed(meterbar::UndertowBeatFeed& out) {
+        out.locked = beatTracker.locked();
+        out.confidence = beatTracker.confidence();
+        out.bpm = (float)beatTracker.bpm();
+        out.secondsToNextBeat = (float)beatTracker.secondsToNextBeat();
+        out.nextIsDownbeat = beatTracker.nextBeatIsDownbeat();
+        out.gridBeatCount = beatTracker.gridBeatCount();
+        out.countInBar = beatTracker.countInBar();
+        out.beatsPerBar = beatTracker.beatsPerBar();
+        out.trackerNowSec = beatTracker.nowSec();
+        out.lastGridBeatSec = beatTracker.lastGridBeatSec();
+    }
+    void setUndertowThresholdScale(int band, float s) { fiveBand.setThresholdScale(band, s); } // pre-arm ceiling write-back (UI -> detector)
     // The meter behind state.beatTimeSignature: 0 = 4/4, 1 = 3/4,
     // 2 = 6/8 (subdivided: the kick period splits into 3 pulses).
     void applyBeatMeter() {
@@ -346,6 +375,7 @@ private:
     std::atomic<uint32_t> captionEpoch_{1}; // v0.23.0: caption stream epoch
     meterbar::BeatPulse beatPulse; double beatSr_ = 0; // v0.16
     meterbar::BeatTracker beatTracker; // v0.26.0: auto-BPM grid, fed beside beatPulse
+    meterbar::FiveBandOnsets fiveBand; // v0.28.0: Undertow Path A, fed beside beatTracker in the same sub-block loop
     juce::AudioFormatManager formatManager;
     std::unique_ptr<RecorderThread> recorder_;
     juce::CriticalSection recPtrLock; // guards recorder_ hand-off between feeder threads and the UI thread

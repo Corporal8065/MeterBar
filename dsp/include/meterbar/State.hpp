@@ -12,14 +12,16 @@ enum class BackgroundStyle { CleanDark, MidnightKids, Flat, Pastel }; // v0.16 (
 // NOTE (v0.16 item 1, recipe revised v0.17): the C++ defaults of this
 // struct ARE Jackson's "Default" preset recipe — a fresh install (no
 // saved state anywhere) constructs exactly this state: Midnight Kids
-// theme + Midnight colour map, Clean Dark background at 15% opacity,
-// Spectrum style Both, smoothing 50, display Tilt 1.15 dB/oct, analyser
+// theme + Midnight colour map, Midnight Kids background style at 15%
+// opacity, Spectrum style Both, smoothing 50, display Tilt 1.15 dB/oct, analyser
 // tilt 5.6 dB, Colour By = Level, scope window 100 ms, LUFS Momentary,
 // loudness streaming-target lines OFF, beat pulse on, cute click sounds
-// on, trim +10.18 dB, all modules enabled at equal widths, and the audio
+// on, trim +27 dB, visualizer background ON (Field style), all modules enabled at equal widths, and the audio
 // source = System Loopback on the OS-default output (never the test
 // tone). Saved presets are separate files and are never touched by
-// these defaults.
+// these defaults. (v0.28.0 recipe revision, Jackson's word 2026-11-02:
+// trim +10.18 -> +27 dB, background style Clean Dark -> Midnight Kids,
+// visualizer OFF/Bubbles -> ON/Field.)
 struct PresetState {
     std::string name = "Default";
     // Modules enable
@@ -60,10 +62,12 @@ struct PresetState {
     std::string themeName = "Midnight Kids"; // v0.12: Jackson's colourful default (was "Midnight Pink", still selectable)
     ColorMapId colorMap = ColorMapId::Midnight; // v0.15: was Plasma — Midnight IS the v0.14 palette as a LUT, so the default spectrogram look is unchanged while the selector now visibly drives it (saved presets keep their own stored map)
     float backgroundOpacity = 0.15f;       // v0.13: module/window background alpha 0.15..1 (desktop shows through below 1). v0.17 recipe: 15% — the slider/view floor, airy over the desktop
-    // v0.16: background STYLE (Settings -> Appearance). CleanDark is the
-    // default — it is part of Jackson's "Default" preset recipe (item 1).
+    // v0.16: background STYLE (Settings -> Appearance). CleanDark is a
+    // selectable style; v0.28.0 the Default recipe's pick is
+    // MidnightKids (Jackson's word 2026-11-02; FEEDBACK.md named it
+    // "Midnight Kits" — Midnight Kids is the exact in-app style name).
     // Pastel is appended (value 3) as the Anime theme's paired background.
-    BackgroundStyle backgroundStyle = BackgroundStyle::CleanDark;
+    BackgroundStyle backgroundStyle = BackgroundStyle::MidnightKids;
     bool beatPulseEnabled = true;          // v0.16: onset-reactive border glow, default ON in the Default recipe (subtle)
     int beatTimeSignature = 0;             // v0.26.0: auto-BPM downbeat marking meter — 0 = 4/4, 1 = 3/4, 2 = 6/8; switched from the chip at the waveform's bottom-right, drives the core BeatTracker's meter
     // v0.20.0 (item l): visualizer background mode — the pure model is
@@ -73,8 +77,17 @@ struct PresetState {
     // particle layer renders behind the modules.
     bool linkEnabled = false;              // v0.20.0 (k): family linking — opt-in, default OFF
     bool linkBackground = true;            // v0.21.3: share background (style/opacity/effect) with linked bars — default ON; the visible toggle Jackson asked for
-    bool visualizerEnabled = false;
-    int visualizerStyle = 0;               // v0.21.5: 0 = Bubbles (particle engine), 1 = Lines (flowing ribbons) — Jackson's second style, chosen beside the toggle in Settings; rides the link packet as bgEffect 1 vs 3 (BLK4). v0.25.0: 2 = Field (wandering vortices), bgEffect 4 (BLK5)
+    bool visualizerEnabled = true;         // v0.28.0 recipe: ON by default (was OFF through v0.27.x)
+    int visualizerStyle = 2;               // v0.21.5: 0 = Bubbles (particle engine), 1 = Lines (flowing ribbons) — Jackson's second style, chosen beside the toggle in Settings; rides the link packet as bgEffect 1 vs 3 (BLK4). v0.25.0: 2 = Field (wandering vortices), bgEffect 4 (BLK5). v0.28.0: 3 = Undertow (five-band council design; local only — over the link it presents as Bubbles via the shared 3-band broadcast). v0.28.0 recipe: Field (2) is the default style.
+    // v0.28.0: Undertow grading hooks (visualizer-council DESIGN.md
+    // build notes: "the prototype should expose" them so Jackson's
+    // grading settles the council's open numbers). Defaults ARE the
+    // committed design: both bloom scales on, pre-arm on, kick
+    // release τ 65 ms.
+    bool undertowBloomQuarter = true;      // quarter-res bloom scale
+    bool undertowBloomEighth = true;       // eighth-res halo scale
+    bool undertowPreArm = true;            // T2-5 pre-arm ceiling
+    float undertowKickTauMs = 65.0f;       // 40..120 ms — the §(b) number grading may move
     float visualizerBaseHue = 0.83f;       // 0..1 (family pink)
     float visualizerSaturation = 0.85f;    // 0..1
     float visualizerSpread = 0.75f;        // 0..1 of the hue wheel per burst stroke
@@ -92,7 +105,7 @@ struct PresetState {
     std::string audioDeviceName;           // chosen INPUT device (source = Input)
     std::string outputDeviceName;          // chosen OUTPUT device (source = System Loopback captures THIS device)
     std::string outputDeviceId;            // v0.13: WASAPI endpoint ID of the chosen output — loopback keys on THIS, name is display/fallback
-    float trimDb = 10.18f;             // -48..+48 since v0.20.3 (was -24..+24; v0.17 recipe: +10.18 dB exactly, Jackson's number)
+    float trimDb = 27.0f;              // -48..+48 since v0.20.3 (was -24..+24; v0.17 recipe: +10.18 dB exactly; v0.28.0 recipe: +27 dB, Jackson's word 2026-11-02)
     int routingPair = 0;               // stereo pair index
     int routingCh1 = 0, routingCh2 = 1;
     // Performance (§7)

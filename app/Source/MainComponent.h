@@ -125,9 +125,16 @@ public:
         const int textWidth = button.getWidth() - leftIndent - rightIndent;
         if (textWidth > 0) {
             g.setColour(colour);
+            // v0.28.0: minScale 0.55 (was 1.0) — the Rec button's
+            // text is swapped to "Rec"/"Stop" by the frame timer,
+            // and at minScale 1.0 the stock fitted draw ellipsised
+            // it to "R..." in the 44 px cluster button (Jackson,
+            // 2026-11-02 21:54 PT: the Recording label must fit in
+            // full). Glyphs are single wide characters and are
+            // unaffected in practice.
             g.drawFittedText(button.getButtonText(),
                              juce::Rectangle<int>(leftIndent, yIndent, textWidth, button.getHeight() - yIndent * 2),
-                             juce::Justification::centred, 2, 1.0f);
+                             juce::Justification::centred, 2, 0.55f);
         }
     }
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override {
@@ -198,7 +205,12 @@ private:
     bool updateCheckPending = false;
     bool updateCheckFromLaunch = false;                           // launch checks stay silent unless a newer release is found
     bool updateAvailable = false;                                 // a newer release is known: the toolbar indicator is lit
-    PoppedButtonLookAndFeel wordBtnLnf_;                          // v0.26.1: Update!'s text-pop look (stock font); declared before updateBtn so it outlives it
+    // v0.28.0: updateBtn no longer wears wordBtnLnf_ (the text-pop
+    // look) — Jackson, 2026-11-02 21:54 PT: the Update button's
+    // label "was doubled" by the pop's back copy over the toolbar;
+    // it draws plainly, once, with the stock look now. The
+    // PoppedButtonLookAndFeel class above stays for the record;
+    // nothing else used it.
     juce::TextButton updateBtn { "Update!" };                     // v0.19.2: non-modal launch-check surface (opens showUpdatePanel)
     mbupdate::ReleaseInfo pendingRelease;                         // the release a download/Update action refers to
     std::unique_ptr<juce::URL::DownloadTask> updateDownload;
@@ -235,6 +247,16 @@ private:
     meterbar::VisualizerEngine visualizer;   // v0.20.0: background-mode particle model (pure core)
     meterbar::VisualizerLines vizLines;      // v0.21.5: the Lines style's ribbon model (pure core)
     meterbar::VisualizerField vizField;      // v0.25.0: the Field style's vortex model (pure core)
+    meterbar::UndertowModel undertow_;       // v0.28.0: the Undertow style's five-band model (pure core, visualizer council DESIGN.md)
+    meterbar::SpectrumAnalyser utAnalyser_;  // v0.28.0: dedicated 2048-pt Path B analyser — unsmoothed, untilted, never the display spectrum
+    bool utAnalyserReady_ = false;
+    double lastUtMs_ = 0;                    // v0.28.0: the Undertow model's real-dt clock (the fixed frame step is banned for this section)
+    std::vector<float> utMono_;              // v0.28.0: Path B's mono feed buffer
+    juce::Image vizBloomQ, vizBloomE;        // v0.28.0: thresholded bright-pass bloom results (quarter / eighth res of the layer)
+    int utBloomFrame_ = 0;                   // v0.28.0: bloom recompute cadence — every 2nd frame (~30 Hz per DESIGN)
+    std::vector<juce::Rectangle<int>> utSafeLocal_; // v0.28.0: label safe zones in local px — the renderer dims the layer inside them
+    void drawUndertowLayer(juce::Graphics&, int iw, int ih);   // v0.28.0: render the Undertow model into the half-res layer
+    void rebuildUndertowBloom(int iw, int ih);                 // v0.28.0: thresholded bright-pass + dual-scale blur
     std::array<float, 3> latestBands_{};     // v0.20.1: newest spectrum band energies (BarLink audio broadcast, item 17)
     float latestLevel_ = 0.f;                // v0.20.1: newest overall level 0..1 for the same broadcast
     float latestBalance_ = 0.f;              // v0.25.0: newest stereo balance -1..1 for the same broadcast + local emitters

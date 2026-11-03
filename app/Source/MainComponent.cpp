@@ -32,10 +32,12 @@ MainComponent::MainComponent() {
     // v0.22.1: the glyph buttons wear the emoji typeface (see
     // IconButtonLookAndFeel) — everything else keeps the stock font.
     for (auto* b : { &linkBtn, &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setLookAndFeel(&iconLnf_);
-    // v0.26.1: the Update! button and the toolbar labels wear the
-    // text-pop looks (TextPop.h) — same pictured backing as the
-    // module text, over the translucent toolbar strip.
-    updateBtn.setLookAndFeel(&wordBtnLnf_);
+    // v0.26.1: the toolbar labels wear the text-pop look
+    // (TextPop.h) — same pictured backing as the module text,
+    // over the translucent toolbar strip. v0.28.0: the Update!
+    // button does NOT any more — its label read doubled through
+    // the pop (Jackson, 2026-11-02 21:54 PT); it keeps the stock
+    // look and draws once.
     for (auto* l : { &logoLabel, &versionLabel, &hintLabel }) l->setLookAndFeel(&labelLnf_);
     // v0.20.0 (k): family LINK toggle + client wiring. Geometry leads
     // via notifyWindowGeometryChanged. v0.2.1: the settings feed is
@@ -581,6 +583,187 @@ void MainComponent::layoutModules() {
 // black -> blurred glow -> crisp dots on top. The model itself is
 // the capped pure core (<= 600 particles), so per-frame cost is the
 // image work only.
+// v0.28.0: render the Undertow model into the half-res layer.
+// Local field map only — Undertow is a local section (over the
+// link it presents as Bubbles via the shared 3-band broadcast,
+// which stays untouched). Every alpha is pre-scaled by the
+// model's display gain (visual limiter x silence gate): the
+// limiter scales alphas only, never timing (DESIGN §(f)).
+void MainComponent::drawUndertowLayer(juce::Graphics& ig, int iw, int ih) {
+    auto own = getScreenBounds();
+    const auto fm = meterbar::fieldMap(
+        meterbar::IntRect{ own.getX(), own.getY(), own.getWidth(), own.getHeight() },
+        meterbar::IntRect{ own.getX(), own.getY(), own.getWidth(), own.getHeight() }, iw, ih);
+    const float sc = (float)ih / 270.f; // canonical-height scale (model radii/widths are px at 270)
+    const float gain = undertow_.displayGain();
+    auto col = [](meterbar::VizRgb c) { return juce::Colour(c.r, c.g, c.b); };
+    const auto& lv = undertow_.levels();
+    constexpr int kEdge = meterbar::FiveBandLevels::kEdgePoints;
+    // ---- ground membrane: fill shaped by the 64-point sub/low
+    // edge profile, a stroked top edge, and the kick crest — the
+    // edge lifted by the spike envelope through the render-only
+    // easeOutBack mapping (bounce lives in the mapping, never in
+    // the signal; there is no spring in this section). ----
+    {
+        const float mh = undertow_.membraneHeight();
+        juce::Path fill, edge;
+        for (int i = 0; i < kEdge; ++i) {
+            const float u = (float)i / (float)(kEdge - 1);
+            const float h = mh * (0.30f + 0.70f * lv.edge[i]);
+            float px, py;
+            meterbar::fieldToLocal(fm, u, 1.f - h, px, py);
+            if (i == 0) { fill.startNewSubPath(px, (float)ih); fill.lineTo(px, py); edge.startNewSubPath(px, py); }
+            else { fill.lineTo(px, py); edge.lineTo(px, py); }
+            if (i == kEdge - 1) fill.lineTo(px, (float)ih);
+        }
+        fill.closeSubPath();
+        ig.setColour(col(meterbar::UndertowModel::bandColour(0)).withAlpha(undertow_.membraneFillAlpha() * 0.55f * gain));
+        ig.fillPath(fill);
+        ig.setColour(col(meterbar::UndertowModel::membraneEdgeColour())
+                         .withAlpha(juce::jmin(1.f, undertow_.membraneFillAlpha() + 0.2f) * gain));
+        ig.strokePath(edge, juce::PathStrokeType(1.5f * sc));
+        const float spike = undertow_.kickSpikeDisplay();
+        if (spike > 0.01f) {
+            juce::Path crest;
+            for (int i = 0; i < kEdge; ++i) {
+                const float u = (float)i / (float)(kEdge - 1);
+                const float h = mh * (0.30f + 0.70f * lv.edge[i]) + spike * 0.10f * (0.4f + 0.6f * lv.edge[i]);
+                float px, py;
+                meterbar::fieldToLocal(fm, u, 1.f - h, px, py);
+                if (i == 0) crest.startNewSubPath(px, py); else crest.lineTo(px, py);
+            }
+            ig.setColour(col(meterbar::UndertowModel::membraneEdgeColour())
+                             .withAlpha(juce::jmin(1.f, spike) * 0.85f * gain));
+            ig.strokePath(crest, juce::PathStrokeType(2.f * sc));
+        }
+    }
+    // ---- echo rings: follow-through for confirmed hits, born at
+    // the distributed emitters on the membrane line ----
+    for (auto& r : undertow_.rings()) {
+        if (!r.active) continue;
+        float cx, cy;
+        meterbar::fieldToLocal(fm, r.x, 0.76f, cx, cy);
+        const float rad = (r.age / 0.280f) * 0.32f * (float)iw;
+        auto rc = col(meterbar::UndertowModel::membraneEdgeColour());
+        if (r.warm) rc = rc.interpolatedWith(col(meterbar::UndertowModel::ringWarmColour()), 0.10f); // beat 1: ~10% toward the warm note
+        ig.setColour(rc.withAlpha(0.18f * r.amp * (1.f - r.age / 0.280f) * gain));
+        ig.drawEllipse(cx - rad, cy - rad, rad * 2.f, rad * 2.f, 1.5f * sc);
+    }
+    // ---- trails helper: segments oldest -> newest; a segment's
+    // width/alpha ride the DESIGN §(c) tapers at its age, and the
+    // birth alpha factor (x0.55) is applied by the caller. ----
+    auto drawTrail = [&](const meterbar::UndertowTrail& tr, juce::Colour c, float headW, float alpha) {
+        for (int k = tr.n - 1; k >= 1; --k) {
+            float x0, y0, x1, y1;
+            meterbar::fieldToLocal(fm, tr.x[k], tr.y[k], x0, y0);
+            meterbar::fieldToLocal(fm, tr.x[k - 1], tr.y[k - 1], x1, y1);
+            const float age = tr.age[k];
+            ig.setColour(c.withAlpha(alpha * 0.55f * meterbar::tailAlphaFactor(age)));
+            ig.drawLine(x0, y0, x1, y1, headW * meterbar::tailWidthFactor(age));
+        }
+    };
+    // ---- low orbs: slate discs drifting against the swarm ----
+    for (auto& o : undertow_.orbs()) {
+        float px, py;
+        meterbar::fieldToLocal(fm, o.x, o.y, px, py);
+        const float r = o.radius * sc;
+        drawTrail(o.trail, col(meterbar::UndertowModel::bandColour(1)), r * 2.f, o.alpha * gain);
+        ig.setColour(col(meterbar::UndertowModel::bandColour(1)).withAlpha(o.alpha * gain));
+        ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
+    }
+    // ---- mid swarm: warm-white inward swirl, the hero ----
+    for (auto& p : undertow_.swarm()) {
+        if (!p.alive) continue;
+        float px, py;
+        meterbar::fieldToLocal(fm, p.x, p.y, px, py);
+        const float r = p.size * sc;
+        drawTrail(p.trail, col(meterbar::UndertowModel::bandColour(2)), r * 2.f, p.alpha * gain);
+        ig.setColour(col(meterbar::UndertowModel::bandColour(2)).withAlpha(p.alpha * gain));
+        ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
+    }
+    // ---- high ticks: short falling streaks, transient-born ----
+    for (auto& t : undertow_.ticks()) {
+        if (!t.alive) continue;
+        float px, py;
+        meterbar::fieldToLocal(fm, t.x, t.y, px, py);
+        drawTrail(t.trail, col(meterbar::UndertowModel::bandColour(3)), 1.2f * sc, t.alpha * gain);
+        const float vl = std::sqrt(t.vx * t.vx + t.vy * t.vy);
+        const float dx = vl > 1e-6f ? t.vx / vl : 0.f, dy = vl > 1e-6f ? t.vy / vl : 1.f;
+        ig.setColour(col(meterbar::UndertowModel::bandColour(3)).withAlpha(t.alpha * gain));
+        ig.drawLine(px, py, px - dx * t.len * sc, py - dy * t.len * sc, 1.2f * sc);
+    }
+    // ---- presence dust: level-written points, no follower ----
+    {
+        const int n = undertow_.dustCount();
+        ig.setColour(col(meterbar::UndertowModel::bandColour(4)).withAlpha(undertow_.dustAlpha() * gain));
+        for (int i = 0; i < n; ++i) {
+            float ux, uy, px, py;
+            undertow_.dustPoint(i, ux, uy);
+            meterbar::fieldToLocal(fm, ux, uy, px, py);
+            ig.fillEllipse(px - sc, py - sc, 2.f * sc, 2.f * sc);
+        }
+    }
+}
+// v0.28.0: the thresholded bright-pass bloom (DESIGN §(d)) —
+// only luminance above 0.75 blooms, through a soft knee; the
+// quarter-res scale blurs with the house 9-tap sigma 2.75 kernel,
+// the eighth-res scale is a blur OF that blur. Post-only: this
+// result never feeds back into the model. Rebuilt at <=30 Hz.
+void MainComponent::rebuildUndertowBloom(int iw, int ih) {
+    const int qw = std::max(1, iw / 2), qh = std::max(1, ih / 2);
+    const int ew = std::max(1, iw / 4), eh = std::max(1, ih / 4);
+    if (!vizBloomQ.isValid() || vizBloomQ.getWidth() != qw || vizBloomQ.getHeight() != qh)
+        vizBloomQ = juce::Image(juce::Image::RGB, qw, qh, true);
+    if (!vizBloomE.isValid() || vizBloomE.getWidth() != ew || vizBloomE.getHeight() != eh)
+        vizBloomE = juce::Image(juce::Image::RGB, ew, eh, true);
+    {   // bright-pass + 2x2 downsample in one pass
+        juce::Image::BitmapData src(vizCache, juce::Image::BitmapData::readOnly);
+        juce::Image::BitmapData dst(vizBloomQ, juce::Image::BitmapData::writeOnly);
+        for (int y = 0; y < qh; ++y) {
+            for (int x = 0; x < qw; ++x) {
+                float rr = 0, gg = 0, bb = 0;
+                for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+                    const int sx = std::min(iw - 1, x * 2 + dx), sy = std::min(ih - 1, y * 2 + dy);
+                    const auto* p = reinterpret_cast<const juce::PixelRGB*>(src.getPixelPointer(sx, sy));
+                    rr += p->getRed(); gg += p->getGreen(); bb += p->getBlue();
+                }
+                rr *= 0.25f; gg *= 0.25f; bb *= 0.25f;
+                const float lum = (0.2126f * rr + 0.7152f * gg + 0.0722f * bb) / 255.f;
+                const float k = lum > 0.75f ? (lum - 0.75f) / 0.25f : 0.f;
+                auto* q = reinterpret_cast<juce::PixelRGB*>(dst.getPixelPointer(x, y));
+                q->setARGB(0xFF, (juce::uint8)(rr * k), (juce::uint8)(gg * k), (juce::uint8)(bb * k)); // PixelRGB's component setter is setARGB (alpha ignored)
+            }
+        }
+    }
+    {   // quarter-res blur (9 taps / sigma 2.75, the house kernel)
+        juce::Image blurred = vizBloomQ; blurred.duplicateIfShared();
+        juce::ImageConvolutionKernel kernel(9);
+        kernel.createGaussianBlur(2.75f);
+        kernel.applyToImage(blurred, vizBloomQ, vizBloomQ.getBounds());
+        vizBloomQ = blurred;
+    }
+    {   // eighth-res: downsample the blurred quarter, blur again
+        juce::Image::BitmapData src(vizBloomQ, juce::Image::BitmapData::readOnly);
+        juce::Image::BitmapData dst(vizBloomE, juce::Image::BitmapData::writeOnly);
+        for (int y = 0; y < eh; ++y) {
+            for (int x = 0; x < ew; ++x) {
+                float rr = 0, gg = 0, bb = 0;
+                for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+                    const int sx = std::min(qw - 1, x * 2 + dx), sy = std::min(qh - 1, y * 2 + dy);
+                    const auto* p = reinterpret_cast<const juce::PixelRGB*>(src.getPixelPointer(sx, sy));
+                    rr += p->getRed(); gg += p->getGreen(); bb += p->getBlue();
+                }
+                auto* q = reinterpret_cast<juce::PixelRGB*>(dst.getPixelPointer(x, y));
+                q->setARGB(0xFF, (juce::uint8)(rr * 0.25f), (juce::uint8)(gg * 0.25f), (juce::uint8)(bb * 0.25f));
+            }
+        }
+        juce::Image blurred = vizBloomE; blurred.duplicateIfShared();
+        juce::ImageConvolutionKernel kernel(9);
+        kernel.createGaussianBlur(2.75f);
+        kernel.applyToImage(blurred, vizBloomE, vizBloomE.getBounds());
+        vizBloomE = blurred;
+    }
+}
 void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
     auto bounds = getLocalBounds();
     if (bounds.isEmpty()) return;
@@ -721,6 +904,12 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
                 ig.setColour(juce::Colour(c.r, c.g, c.b));
                 ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
             }
+        } else if (engine.state.visualizerStyle == 3) {
+            // v0.28.0 UNDERTOW: the five-band field, rendered from
+            // the core model only — the renderer applies no
+            // smoothing of its own to any audio envelope (DESIGN
+            // principle 4: hold, don't interpolate).
+            drawUndertowLayer(ig, iw, ih);
         } else {
             for (auto& p : visualizer.particles()) {
                 auto c = visualizer.colorFor(p, vs);
@@ -732,6 +921,44 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
                 ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
             }
         }
+    }
+    // v0.28.0 UNDERTOW composite: the generic blur wash below is
+    // NOT thresholded, and DESIGN §(d) forbids bloom smearing the
+    // near-black field — so this style takes its own path: label
+    // safe zones are dimmed in the layer itself (x0.35, which also
+    // masks the bright-pass there), a thresholded bright-pass
+    // bloom composites at the two committed scales (total wash
+    // <= 0.55), then the crisp layer at 0.30 and the house scrim.
+    // Module labels paint after this function returns, so text
+    // never blooms (DESIGN principle 8).
+    if (engine.state.visualizerStyle == 3) {
+        {
+            juce::Graphics ig2(vizCache);
+            ig2.setColour(juce::Colours::black.withAlpha(0.65f));
+            const float sx = (float)iw / (float)std::max(1, bounds.getWidth());
+            const float sy = (float)ih / (float)std::max(1, bounds.getHeight());
+            for (auto& r : utSafeLocal_)
+                ig2.fillRect((float)r.getX() * sx, (float)r.getY() * sy,
+                             (float)r.getWidth() * sx, (float)r.getHeight() * sy);
+        }
+        const bool groupedU = group != own;
+        const float bgOpU = juce::jlimit(0.15f, 1.0f, engine.state.backgroundOpacity);
+        const float washOpU = groupedU ? bgOpU : 1.0f;
+        if ((utBloomFrame_++ % 2) == 0) rebuildUndertowBloom(iw, ih); // <=30 Hz (DESIGN §(d))
+        if (engine.state.undertowBloomQuarter && vizBloomQ.isValid()) {
+            g.setOpacity(0.33f * washOpU);
+            g.drawImage(vizBloomQ, bounds.toFloat());
+        }
+        if (engine.state.undertowBloomEighth && vizBloomE.isValid()) {
+            g.setOpacity(0.22f * washOpU);
+            g.drawImage(vizBloomE, bounds.toFloat());
+        }
+        g.setOpacity(groupedU ? 0.30f * bgOpU : 0.30f);
+        g.drawImage(vizCache, bounds.toFloat());
+        g.setOpacity(1.0f);
+        g.setColour(juce::Colours::black.withAlpha(0.18f));
+        g.fillRect(bounds);
+        return;
     }
     // v0.23.1 (LAG FIX — audit Finding 3): the blur used to be a full
     // 15x15 Gaussian over the entire half-res layer EVERY frame (at
@@ -1006,6 +1233,63 @@ void MainComponent::prepareFrame() {
                                                                               : engine.beatLevel() * 0.8f,
                                                           juce::jlimit(0.f, 1.f, frame.stereo.widthPct / 100.f),
                                                           meterbar::subBandEnergy(frame.spectrumDb, st.fftSize, frame.sampleRate));
+        else if (st.visualizerStyle == 3) {
+            // v0.28.0 UNDERTOW (visualizer council DESIGN.md). Two
+            // paths, never derived from each other: Path A timing
+            // arrives from the engine's five-band onset latch (fed
+            // on the audio ingest in 256-sample sub-blocks); Path B
+            // levels come from a DEDICATED 2048-pt analyser run
+            // here on the newest samples — unsmoothed, untilted,
+            // never the display spectrum above. The model advances
+            // on REAL elapsed dt: the fixed dt the other styles use
+            // is banned for this section (DESIGN build notes), so
+            // the envelope wall-clock rates are true.
+            const double nowMs = juce::Time::getMillisecondCounterHiRes();
+            float rdt = lastUtMs_ > 0 ? (float)((nowMs - lastUtMs_) / 1000.0) : 0.016f;
+            lastUtMs_ = nowMs;
+            rdt = juce::jlimit(0.001f, 0.1f, rdt);
+            if (!utAnalyserReady_) { utAnalyser_.prepare(2048); utAnalyser_.setSmoothing(0.f); utAnalyser_.setTiltDb(0.f); utAnalyserReady_ = true; }
+            const int un = std::min(2048, need);
+            utMono_.assign(2048, 0.f);
+            for (int i = 0; i < un; ++i)
+                utMono_[(size_t)(2048 - un + i)] = 0.5f * (bufL[(size_t)(need - un + i)] + bufR[(size_t)(need - un + i)]);
+            auto& rawDb = utAnalyser_.process(utMono_.data(), 2048);
+            auto lv = meterbar::fiveBandLevelsFromRawDb(rawDb, 2048, frame.sampleRate);
+            // The Governor's level input: short-term loudness,
+            // which tracks programme RMS closely enough for the
+            // Still/silence rules (digital silence reads -120 and
+            // hard-zeros the gate, as designed).
+            const float overallDb = frame.loudShortTerm > -119.0 ? (float)frame.loudShortTerm : -120.f;
+            // Label safe zones (DESIGN principle 8): every visible
+            // module's header strip + bottom readout strip, plus
+            // the toolbar strip — unit space for the model's spawn
+            // rejection, local px for the renderer's dimming.
+            std::vector<meterbar::UndertowSafeRect> safeU;
+            utSafeLocal_.clear();
+            const float W = (float)std::max(1, getWidth()), H = (float)std::max(1, getHeight());
+            auto addSafe = [&](juce::Rectangle<int> r) {
+                if (r.isEmpty()) return;
+                utSafeLocal_.push_back(r);
+                safeU.push_back({ r.getX() / W, r.getY() / H, r.getRight() / W, r.getBottom() / H });
+            };
+            if (st.showToolbar) addSafe({ 0, 0, getWidth(), 30 });
+            for (auto& mv : modules) {
+                if (!mv->isVisible()) continue;
+                auto b = mv->getBounds();
+                addSafe({ b.getX(), b.getY(), b.getWidth(), 15 });
+                addSafe({ b.getX(), b.getBottom() - 13, b.getWidth(), 13 });
+            }
+            undertow_.setSafeRects(safeU);
+            undertow_.preArmEnabled = st.undertowPreArm;
+            undertow_.setKickTau(st.undertowKickTauMs / 1000.f);
+            meterbar::UndertowBeatFeed bf; engine.undertowBeatFeed(bf);
+            meterbar::UndertowOnsetFeed of; engine.undertowOnsets(of);
+            undertow_.update(rdt, lv, overallDb, bf, of);
+            // Pre-arm ceiling write-back: the model may lower a
+            // band's detection threshold for one beat position —
+            // it can never fire, time, or scale an event (T2-5).
+            for (int b = 0; b < 5; ++b) engine.setUndertowThresholdScale(b, undertow_.thresholdScale(b));
+        }
         else visualizer.update(dt, e.data(), vs, latestBalance_);
     }
 }

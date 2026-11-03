@@ -176,7 +176,7 @@ public:
             note("Below 100 the desktop shows through the module backgrounds (traces and text stay solid). Translucency only — no background blur in this build.");
             toggle("Beat Pulse (subtle glow on beats)", st->beatPulseEnabled, [&](bool b){ st->beatPulseEnabled = b; });
             toggle("Visualizer background (particles + rainbow bursts, v0.20.0)", st->visualizerEnabled, [&](bool b){ st->visualizerEnabled = b; });
-            combo("Visualizer style", {"Bubbles (particles)", "Lines (flowing ribbons)", "Field (wandering vortices)"}, st->visualizerStyle, [&](int v){ st->visualizerStyle = v; }); // v0.21.5: Jackson's second style, beside the toggle; v0.25.0: Field added
+            combo("Visualizer style", {"Bubbles (particles)", "Lines (flowing ribbons)", "Field (wandering vortices)", "Undertow (five-band field)"}, st->visualizerStyle, [&](int v){ st->visualizerStyle = v; }); // v0.21.5: Jackson's second style, beside the toggle; v0.25.0: Field added; v0.28.0: Undertow (the visualizer council's design) added
             toggle("Link background (share style, opacity and visualizer with linked bars)", st->linkBackground, [&](bool b){ st->linkBackground = b; if (onBgLinkToggled) onBgLinkToggled(); });
             slider("Visualizer base hue (deg)", 0.0, 360.0, st->visualizerBaseHue * 360.0,
                    [&](double v){ st->visualizerBaseHue = (float)(v / 360.0); });
@@ -186,6 +186,12 @@ public:
                    [&](double v){ st->visualizerSpread = (float)(v / 100.0); });
             slider("Visualizer palette cycle (s, 0 = static)", 0.0, 60.0, st->visualizerCycleSec,
                    [&](double v){ st->visualizerCycleSec = (float)v; });
+            note("Undertow grading hooks (v0.28.0 — the design council's committed numbers are the defaults; these exist so grading real songs can settle the numbers the council left open):");
+            toggle("Undertow bloom: fine scale (quarter-res)", st->undertowBloomQuarter, [&](bool b){ st->undertowBloomQuarter = b; });
+            toggle("Undertow bloom: halo scale (eighth-res)", st->undertowBloomEighth, [&](bool b){ st->undertowBloomEighth = b; });
+            toggle("Undertow pre-arm (pattern ceiling — never fires an event, only pre-brightens)", st->undertowPreArm, [&](bool b){ st->undertowPreArm = b; });
+            slider("Undertow kick release (ms)", 40.0, 120.0, st->undertowKickTauMs,
+                   [&](double v){ st->undertowKickTauMs = (float)v; });
             note("Visualizer: black background over a heavily blurred glow layer. Bubbles style: white particles drifting inward (calmed in v0.21.5 — same ease-out and brightness envelope as the dots), frequency bands bursting rainbow strokes that dissolve into dots; since v0.25.0 particles are born across the field at their band's position (low left, high right, shifted by the stereo balance) instead of at the centre; particle count is hard-capped (600) for gaming PCs. Lines style: three flowing ribbons, one per band, spring-smoothed, swelling with the music and near-still in quiet. Field style: dots orbit four slowly wandering vortices, each fed by the band nearest its position. All styles fade out entirely in silence.");
             toggle("Cute click sounds (Anime theme only)", st->animeClickSounds, [&](bool b){ st->animeClickSounds = b; });
             note("Click sounds only ever play in the Anime theme; switching themes silences them completely.");

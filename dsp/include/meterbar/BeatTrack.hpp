@@ -132,6 +132,7 @@ public:
             const double pulse = period_ / sub_;
             if (pulse > 0) {
                 while (nextBeatT_ <= now + 1e-9) {
+                    lastGridBeatT_ = nextBeatT_; // v0.28.0: plumbing for Undertow's confirmation window
                     beatEnv_ = std::max(beatEnv_, 0.85f);
                     if (pendingCount_ == 1) downbeatEnv_ = 1.0f;
                     countInBar_ = pendingCount_;
@@ -141,7 +142,7 @@ public:
                 }
             }
             if (sinceOnset_ > 2.0) conf_ = std::max(0.35f, conf_ - (float)(blockSec * 0.02));
-            if (sinceOnset_ > 12.0) { locked_ = false; conf_ = 0; intervals_.clear(); }
+            if (sinceOnset_ > 12.0) { locked_ = false; conf_ = 0; intervals_.clear(); lastGridBeatT_ = -1; }
         }
         beatEnv_ *= (float)std::exp(-blockSec / 0.10);
         downbeatEnv_ *= (float)std::exp(-blockSec / 0.18);
@@ -150,6 +151,18 @@ public:
 
     bool locked() const { return locked_; }
     double bpm() const { return locked_ && period_ > 0 ? 60.0 / period_ : 0.0; }
+    // v0.28.0 PLUMBING ONLY (Undertow, DESIGN.md build notes): the
+    // tracker already holds nextBeatT_ internally; these accessors
+    // export the grid's timing so a consumer can schedule against
+    // the predicted beat. No tuning, gate or state changes — the
+    // tracker is consumed, never second-guessed.
+    double nowSec() const { return sr_ > 0 ? (double)samples_ / sr_ : 0.0; } // the tracker's own sample clock
+    double secondsToNextBeat() const { // until the next grid pulse; -1 when no grid is running
+        if (!locked_ || period_ <= 0) return -1.0;
+        return nextBeatT_ - nowSec();
+    }
+    bool nextBeatIsDownbeat() const { return locked_ && pendingCount_ == 1; }
+    double lastGridBeatSec() const { return lastGridBeatT_; } // sample-clock time of the most recent emitted grid beat (-1 = none)
     double beatPeriodSec() const { return period_; }
     float confidence() const { return locked_ ? conf_ : 0.f; }
     int countInBar() const { return countInBar_; }       // count of the most recent grid beat (1..bpb), 0 before the first
@@ -200,6 +213,7 @@ private:
     }
     void relock(double t, double period) {
         locked_ = true; period_ = period; anchorT_ = t; nextBeatT_ = t;
+        lastGridBeatT_ = -1; // v0.28.0 plumbing: a fresh grid has emitted nothing yet
         pendingCount_ = 1;
     }
     void tryLock(double t) {
@@ -265,7 +279,7 @@ private:
     double elapsed_ = 0, sinceOnset_ = 1e9, lastOnsetT_ = -1;
     std::deque<double> intervals_;
     bool locked_ = false;
-    double period_ = 0, anchorT_ = 0, nextBeatT_ = 0;
+    double period_ = 0, anchorT_ = 0, nextBeatT_ = 0, lastGridBeatT_ = -1;
     int bpb_ = 4, sub_ = 1;
     int pendingCount_ = 1, countInBar_ = 0;
     float conf_ = 0, beatEnv_ = 0, downbeatEnv_ = 0;
