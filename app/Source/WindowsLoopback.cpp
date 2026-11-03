@@ -96,6 +96,19 @@
  private:
      std::atomic<ULONG> refs_{ 1 };
  };
+#if defined(_MSC_VER)
+ // v0.27.1: SEH guard as a FREE function — MSVC forbids __try in a
+ // function that requires C++ object unwinding (C2712, the first
+ // CI build of this hotfix), and a member function calling member
+ // state from its handler qualifies. This frame holds nothing but
+ // raw pointers, so it never requires unwinding; the guarded body
+ // runs in its own function (Impl::loopProcessGuarded).
+ inline void sehGuard(void (*fn)(void*), void* ctx, bool& faulted) {
+     faulted = false;
+     __try { fn(ctx); }
+     __except (EXCEPTION_EXECUTE_HANDLER) { faulted = true; }
+ }
+#endif
  } // namespace
  struct WindowsLoopback::Impl {
      meterbar::BoundedThread th; std::atomic<bool> run{false}; std::atomic<double> sr{48000}; Callback cb;
@@ -516,10 +529,9 @@
      // catches the AV class; other compilers: C++ exceptions.)
      void loopProcess() {
  #if defined(_MSC_VER)
-         __try { loopProcessGuarded(); }
-         __except (EXCEPTION_EXECUTE_HANDLER) {
-             setStatus("per-app capture stopped (internal fault)");
-         }
+         bool faulted = false;
+         sehGuard([](void* p) { static_cast<Impl*>(p)->loopProcessGuarded(); }, this, faulted);
+         if (faulted) setStatus("per-app capture stopped (internal fault)");
  #else
          try { loopProcessGuarded(); }
          catch (...) { setStatus("per-app capture stopped (internal fault)"); }
