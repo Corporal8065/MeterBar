@@ -37,7 +37,10 @@ namespace meterbar {
 // A drag session is "live" while its stamp is fresher than
 // kLeaderStaleMs; staleness — never a stuck flag — ends it.
 
-inline constexpr unsigned kLinkMagic = 0x424C4B36; // "BLK6" — appended linkSeq to
+inline constexpr unsigned kLinkMagic = 0x424C4B37; // "BLK7" — appended the appearance
+    // extension (bgTheme/bgScheme/palette) + pulse fields to LinkSlot and
+    // lastClaim/linkAll* to LinkShared (BLK7 link-direction fix, 2026-11-03).
+    // BLK6 appended linkSeq to
     // LinkSlot and nextLinkSeq to LinkShared (the first-clicked-wins
     // join-order stamp). Same rule as every earlier bump: the layout
     // grew, so the magic moves with it — mixed BLK5/BLK6 binaries
@@ -106,15 +109,47 @@ struct LinkSlot {
     // first bar that clicked Link (see bgParentApp). Appended last,
     // like every field since BLK1.
     unsigned linkSeq = 0;
+    // BLK7: appearance extension — the group parent's theme, colour
+    // scheme and visualizer palette ride the background packet.
+    int bgTheme = -1;        // family theme ordinal (see DESIGN §2), -1 = none yet
+    int bgScheme = -1;       // family colour-scheme ordinal (DESIGN §2), -1 = none yet
+    float bgPalHue = 0.f, bgPalSat = 0.f, bgPalSpread = 0.f, bgPalCycle = 0.f;
+    // BLK7: linked transients — MeterBar stamps a pulse on each audio
+    // impact; linked siblings fire a cell impulse on the seq edge.
+    unsigned pulseSeq = 0;
+    int pulseColour = 0;     // 0xRRGGBB
+    float pulseStrength = 0.f; // 0..1 emitter-side strength at stamp time
 };
 struct LinkShared {
     unsigned magic = kLinkMagic;
     LinkSlot slots[3];
     unsigned nextLinkSeq = 0; // BLK6: join-order counter; a client claims ++nextLinkSeq under the block mutex when its Link turns on
+    unsigned lastClaim[3] = { 0, 0, 0 }; // BLK7: per-app last linkSeq claim,
+        // survives that app's restart while any member keeps the block
+        // alive; cleared only by a deliberate link OFF edge (DESIGN §4).
+    // BLK7: LINK ALL request (DESIGN §6), stamped by the initiator under the
+    // block mutex; consumed by every client incl. the initiator.
+    unsigned linkAllSeq = 0;
+    int linkAllEdge = 0;              // ReserveEdge ordinal: 0 Top, 1 Bottom only
+    unsigned linkAllBaseSeq = 0;      // claims reserved: base+appId+1 (DESIGN §6)
+    IntRect linkAllArea{};            // display bounds the stack docks into
 };
 
 inline bool slotLive(const LinkSlot& s, long long nowMs) {
     return s.appId >= 0 && s.heartbeatMs > 0 && nowMs - s.heartbeatMs <= kPeerStaleMs;
+}
+// BLK7 claim restore (DESIGN §4): the seq a (re)joining app should
+// stamp. Returns the app's recorded lastClaim when it is nonzero AND
+// no LIVE slot currently holds that value (the holder may be the
+// app's own stale slot from its previous process — that is exactly
+// the restart case); 0 = take a fresh counter claim (++nextLinkSeq).
+inline unsigned claimFor(const LinkShared& sh, int appId, long long nowMs) {
+    if (appId < 0 || appId > 2) return 0;
+    const unsigned last = sh.lastClaim[appId];
+    if (last == 0) return 0;
+    for (int i = 0; i < 3; ++i)
+        if (sh.slots[i].linkSeq == last && slotLive(sh.slots[i], nowMs)) return 0;
+    return last;
 }
 inline bool dragLive(const LinkSlot& s, long long nowMs) {
     return s.dragSeq != 0 && s.dragStampMs > 0 && nowMs - s.dragStampMs <= kLeaderStaleMs;
@@ -171,6 +206,14 @@ using DockArg = ReserveEdge; // this app's groupDockRect argument type (SessionB
 // peer still stacks and settles in one step (the target depends only
 // on the peer's rect, which does not move in response).
 inline bool groupDockFollows(int selfDockedEdge) { return selfDockedEdge < 0; }
+inline int bgParentApp(const LinkShared& sh, int selfApp, unsigned selfLinkSeq, long long nowMs, int* parentSlotOut = nullptr); // defined with the bg sync decisions below
+// BLK7 (DESIGN §5): the AUTOMATIC group-dock never moves the group
+// PARENT — parentage governs geometry at exactly this one point
+// (drag-follow / drag-end snap / Stack stay parent-blind: explicit
+// gestures/commands move the whole stack, per Jackson's rule).
+inline bool groupDockMovesSelf(const LinkShared& sh, int selfApp, unsigned selfLinkSeq, long long nowMs) {
+    return bgParentApp(sh, selfApp, selfLinkSeq, nowMs) != selfApp;
+}
 inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge) {
     IntRect out = follower;
     switch (edge) {
@@ -246,10 +289,18 @@ struct BgPacket {
     int style = 0;      // family background-style ordinal (LinkSlot::bgStyle)
     int opacityPct = 100;
     int effect = 0;     // bgEffect ordinal (LinkSlot::bgEffect) — BLK3; BLK4 adds ordinal 3 (Lines), BLK5 ordinal 4 (Field)
+    // BLK7 appearance extension (DESIGN §3): family theme ordinal,
+    // family colour-scheme ordinal, visualizer palette — ride the
+    // same packet, gated by the same "Link background" toggle.
+    int theme = -1;     // family theme ordinal (DESIGN §2), -1 = none yet
+    int scheme = -1;    // family colour-scheme ordinal (DESIGN §2), -1 = none yet
+    float palHue = 0.f, palSat = 0.f, palSpread = 0.f, palCycle = 0.f;
 };
 struct BgSyncState {
     int publishedStyle = -999, publishedPct = -999; // values this app last published OR adopted (-999 = none yet)
     int publishedEffect = -999;                     // same, for the effect ordinal
+    int publishedTheme = -999, publishedScheme = -999; // BLK7: same, for theme/scheme (-999 = none yet)
+    float publishedPalHue = -999.f, publishedPalSat = -999.f, publishedPalSpread = -999.f, publishedPalCycle = -999.f; // BLK7 palette markers
     unsigned seenSeq[3] = { 0, 0, 0 };              // newest bgSeq consumed per app slot
     int adoptedFrom = -1;                           // v0.25.1: appId of the parent the current values came from (-1 = own / none)
     unsigned adoptedLinkSeq = 0;                    // BLK6: linkSeq of that parent when the values were adopted (a parent relink / handoff re-fires adoption)
@@ -260,6 +311,14 @@ struct BgSyncState {
 inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct, int effect) {
     return style != s.publishedStyle || pct != s.publishedPct || effect != s.publishedEffect;
 }
+// BLK7: the nine-field gate — the ONLY condition under which bgSeq
+// may be bumped once the appearance extension rides the packet.
+inline bool bgIsLocalChange(const BgSyncState& s, const BgPacket& v) {
+    return v.style != s.publishedStyle || v.opacityPct != s.publishedPct || v.effect != s.publishedEffect
+        || v.theme != s.publishedTheme || v.scheme != s.publishedScheme
+        || v.palHue != s.publishedPalHue || v.palSat != s.publishedPalSat
+        || v.palSpread != s.publishedPalSpread || v.palCycle != s.publishedPalCycle;
+}
 // Live-linked opacity repair (v0.3.0, item 13): drop this client's
 // published markers to the "none yet" sentinel, so the next publish
 // re-stamps the CURRENT values under a fresh bgSeq and peers adopt
@@ -269,7 +328,9 @@ inline bool bgIsLocalChange(const BgSyncState& s, int style, int pct, int effect
 // report lived. Since v0.25.1 a FOLLOWER joining a group whose
 // parent already publishes does NOT re-stamp: it adopts the
 // parent's standing packet instead (parent ownership, defect 4).
-inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publishedPct = -999; s.publishedEffect = -999; }
+inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publishedPct = -999; s.publishedEffect = -999;
+    s.publishedTheme = -999; s.publishedScheme = -999; // BLK7
+    s.publishedPalHue = -999.f; s.publishedPalSat = -999.f; s.publishedPalSpread = -999.f; s.publishedPalCycle = -999.f; }
 // The group background PARENT (BLK6 first-clicked-wins — defect 5
 // above): the live, linked member with the smallest linkSeq; ties
 // (linkSeq 0 = unclaimed, or a counter reset after the shared
@@ -281,7 +342,7 @@ inline void bgForceRepublish(BgSyncState& s) { s.publishedStyle = -999; s.publis
 // path runs before the tick that republishes self's slot).
 // parentSlotOut, when given, receives the parent's slot index
 // (-1 when the parent is self and self has no slot in the block).
-inline int bgParentApp(const LinkShared& sh, int selfApp, unsigned selfLinkSeq, long long nowMs, int* parentSlotOut = nullptr) {
+inline int bgParentApp(const LinkShared& sh, int selfApp, unsigned selfLinkSeq, long long nowMs, int* parentSlotOut) {
     auto effSeq = [](unsigned s) { return s == 0 ? 0xFFFFFFFFu : s; };
     // Self's effective claim: the explicit claim when given, else
     // self's slot in the block. Computed BEFORE the peer scan — an
@@ -332,12 +393,28 @@ inline bool bgAdoption(const LinkShared& sh, int selfApp, BgSyncState& s, long l
     if (parentSlot < 0) return false;
     const LinkSlot& p = sh.slots[parentSlot];
     if (p.bgSeq == 0) return false;
-    if (p.bgSeq == s.seenSeq[parentSlot] && s.adoptedFrom == parentApp && s.adoptedLinkSeq == p.linkSeq) return false;
+    // BLK7 defect-6 port (DESIGN §3): the siblings' DIVERGED gate,
+    // extended to all nine fields — adoption is CONTINUOUS: whenever
+    // this app's published values differ from the parent's standing
+    // packet, the packet is (re-)adopted, whatever the seq
+    // bookkeeping says (a follower-side local change no longer
+    // strands the follower away from the parent's values).
+    const bool triggerMoved = p.bgSeq != s.seenSeq[parentSlot] || s.adoptedFrom != parentApp || s.adoptedLinkSeq != p.linkSeq;
+    const bool diverged = s.publishedStyle != p.bgStyle || s.publishedPct != p.bgOpacityPct || s.publishedEffect != p.bgEffect
+        || s.publishedTheme != p.bgTheme || s.publishedScheme != p.bgScheme
+        || s.publishedPalHue != p.bgPalHue || s.publishedPalSat != p.bgPalSat
+        || s.publishedPalSpread != p.bgPalSpread || s.publishedPalCycle != p.bgPalCycle;
+    if (!triggerMoved && !diverged) return false;
     s.seenSeq[parentSlot] = p.bgSeq;
     s.adoptedFrom = parentApp;
     s.adoptedLinkSeq = p.linkSeq;
-    out = BgPacket{ p.bgStyle, p.bgOpacityPct, p.bgEffect };
+    out = BgPacket{};
+    out.style = p.bgStyle; out.opacityPct = p.bgOpacityPct; out.effect = p.bgEffect;
+    out.theme = p.bgTheme; out.scheme = p.bgScheme;
+    out.palHue = p.bgPalHue; out.palSat = p.bgPalSat; out.palSpread = p.bgPalSpread; out.palCycle = p.bgPalCycle;
     s.publishedStyle = out.style; s.publishedPct = out.opacityPct; s.publishedEffect = out.effect;
+    s.publishedTheme = out.theme; s.publishedScheme = out.scheme;
+    s.publishedPalHue = out.palHue; s.publishedPalSat = out.palSat; s.publishedPalSpread = out.palSpread; s.publishedPalCycle = out.palCycle;
     return true;
 }
 // ONE-CLICK STACK PLANNER (v0.3.0, item 12). Given the shared state
@@ -377,6 +454,51 @@ inline int planStackAll(const LinkShared& sh, long long nowMs, int initiatorApp,
         ++count;
     }
     return count;
+}
+
+// BLK7 LINK ALL PLANNER (DESIGN §6c). Participants: slots that are
+// slotLive (a bar that is not running cannot be stacked; a running-
+// but-unlinked bar IS included — its client links it in the same
+// event; its slot rect supplies its height). Order is fixed appId
+// 0,1,2 top-to-bottom for BOTH edges. Every target: x = area.x,
+// w = area.w, h = that bar's own slot height. Top: cursor starts at
+// area.y, each next bar below the previous. Bottom: cursor starts at
+// area.bottom(); place appId 2 first upward, then 1, then 0 — visual
+// top-to-bottom order stays 0,1,2 with SessionBar flush to the
+// bottom edge. Non-participants keep w == 0. Returns participant count.
+inline int planLinkAll(const LinkShared& sh, long long nowMs, int edge, IntRect area, IntRect targets[3]) {
+    for (int i = 0; i < 3; ++i) targets[i] = IntRect{};
+    if (area.w <= 0 || area.h <= 0) return 0;
+    bool part[3] = { false, false, false };
+    int count = 0;
+    for (int i = 0; i < 3; ++i) {
+        const LinkSlot& sl = sh.slots[i];
+        if (slotLive(sl, nowMs) && sl.rect.h > 0) { part[i] = true; ++count; }
+    }
+    if (edge == 1) { // Bottom
+        int cursor = area.bottom();
+        for (int i = 2; i >= 0; --i) {
+            if (!part[i]) continue;
+            targets[i] = IntRect{ area.x, cursor - sh.slots[i].rect.h, area.w, sh.slots[i].rect.h };
+            cursor = targets[i].y;
+        }
+    } else { // Top (and any non-Bottom ordinal)
+        int cursor = area.y;
+        for (int i = 0; i < 3; ++i) {
+            if (!part[i]) continue;
+            targets[i] = IntRect{ area.x, cursor, area.w, sh.slots[i].rect.h };
+            cursor = targets[i].bottom();
+        }
+    }
+    return count;
+}
+
+// BLK7 linked transients (DESIGN §7): read a peer's stamped pulse.
+// True when the slot is live and has stamped at least once.
+inline bool pulsePacket(const LinkSlot& s, long long nowMs, unsigned& seq, int& colour, float& strength) {
+    if (!slotLive(s, nowMs) || s.pulseSeq == 0) return false;
+    seq = s.pulseSeq; colour = s.pulseColour; strength = s.pulseStrength;
+    return true;
 }
 
 // Read a peer's audio broadcast. True when the slot is live and has

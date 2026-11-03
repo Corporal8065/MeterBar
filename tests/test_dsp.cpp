@@ -863,7 +863,7 @@ int main() {
         // BLK5 widened the domain (BLK6, below in the file, moved
         // the magic again for the linkSeq field); the stereo
         // balance rides the audio packet at [4]
-        CHECK(kLinkMagic == 0x424C4B36u);
+        CHECK(kLinkMagic == 0x424C4B37u); // BLK7 (v0.28.4): appearance extension + lastClaim/linkAll appends moved the magic again
         LinkSlot slot; slot.appId = 1; slot.heartbeatMs = 1000; slot.audioSeq = 3;
         slot.audioLow = 0.1f; slot.audioMid = 0.2f; slot.audioHigh = 0.3f; slot.audioLevel = 0.4f; slot.audioBalance = 0.7f;
         float pkt[5] = { 0, 0, 0, 0, 0 };
@@ -2731,6 +2731,143 @@ int main() {
                 CHECK(seg.find("PropVariantClear(&prop)") == std::string::npos); // D-SEQ-1 stays gone
             }
             CHECK(src.find("PropVariantClear(&v)") != std::string::npos); // the owned-payload clear stays
+        }
+    }
+
+    // === BLK7 (v0.28.4) — link-direction fix: nine-field packet,
+    // diverged gate, claim restore, group-dock parent exemption,
+    // planLinkAll, parent-untouched scenario ===
+    {
+        using namespace meterbar;
+        const long long now = 400000;
+        CHECK(kLinkMagic == 0x424C4B37u);
+        // helper: a live linked slot with a full nine-field packet
+        auto mkSlot = [&](LinkShared& sh, int idx, int app, unsigned lseq, unsigned bgseq) {
+            auto& sl = sh.slots[idx]; sl.appId = app; sl.linked = 1; sl.heartbeatMs = now; sl.linkSeq = lseq;
+            sl.rect = { app * 100, 0, 800, 40 };
+            sl.bgSeq = bgseq; sl.bgStyle = 2; sl.bgOpacityPct = 40; sl.bgEffect = 3;
+            sl.bgTheme = 1; sl.bgScheme = 5;
+            sl.bgPalHue = 0.25f; sl.bgPalSat = 0.5f; sl.bgPalSpread = 0.75f; sl.bgPalCycle = 12.f;
+        };
+        // --- nine-field adoption downhill; parent never adopts ---
+        {
+            LinkShared sh; mkSlot(sh, 0, 0, 1, 7); mkSlot(sh, 2, 2, 2, 9);
+            BgSyncState sy; BgPacket out;
+            CHECK(bgAdoption(sh, 2, sy, now, out));
+            CHECK(out.style == 2 && out.opacityPct == 40 && out.effect == 3);
+            CHECK(out.theme == 1 && out.scheme == 5);
+            CHECK(out.palHue == 0.25f && out.palSat == 0.5f && out.palSpread == 0.75f && out.palCycle == 12.f);
+            CHECK(!bgIsLocalChange(sy, out)); // adopted = published: no echo on any of the nine
+            CHECK(!bgAdoption(sh, 2, sy, now, out)); // converged: gate shut
+            BgSyncState parentSy;
+            CHECK(!bgAdoption(sh, 0, parentSy, now, out)); // the parent adopts from NOBODY
+            // nine-field local-change gate: each extension field moves it
+            BgPacket v = out;
+            v.theme = 2; CHECK(bgIsLocalChange(sy, v)); v = out;
+            v.scheme = 3; CHECK(bgIsLocalChange(sy, v)); v = out;
+            v.palCycle = 99.f; CHECK(bgIsLocalChange(sy, v));
+        }
+        // --- diverged gate (defect-6 port): a follower-side local
+        // change is re-converged to the parent's standing packet ---
+        {
+            LinkShared sh; mkSlot(sh, 0, 0, 1, 7); mkSlot(sh, 2, 2, 2, 9);
+            BgSyncState sy; BgPacket out;
+            CHECK(bgAdoption(sh, 2, sy, now, out));
+            // follower changes its own theme locally (published markers diverge)
+            sy.publishedTheme = 4; sy.publishedPalHue = 0.9f;
+            CHECK(bgAdoption(sh, 2, sy, now, out)); // same bgSeq, still re-adopts
+            CHECK(out.theme == 1 && out.palHue == 0.25f);
+            CHECK(!bgAdoption(sh, 2, sy, now, out));
+            // bgForceRepublish drops ALL nine markers to the sentinel
+            bgForceRepublish(sy);
+            CHECK(sy.publishedTheme == -999 && sy.publishedScheme == -999 && sy.publishedPalCycle == -999.f);
+            CHECK(bgAdoption(sh, 2, sy, now, out)); // forced republish state also re-converges
+        }
+        // --- claim restore (DESIGN §4) ---
+        {
+            LinkShared sh;
+            CHECK(claimFor(sh, 0, now) == 0); // no record -> fresh claim
+            sh.lastClaim[0] = 5;
+            CHECK(claimFor(sh, 0, now) == 5); // recorded, nobody holds it -> restore
+            auto& holder = sh.slots[1]; holder.appId = 1; holder.linked = 1; holder.heartbeatMs = now; holder.linkSeq = 5;
+            CHECK(claimFor(sh, 0, now) == 0); // LIVE holder collision -> fresh claim
+            holder.heartbeatMs = now - kPeerStaleMs - 1;
+            CHECK(claimFor(sh, 0, now) == 5); // stale holder does not block restore
+            sh.lastClaim[0] = 0; // deliberate-unlink clear (client OFF edge)
+            CHECK(claimFor(sh, 0, now) == 0);
+            CHECK(claimFor(sh, 7, now) == 0); // out-of-range app
+        }
+        // --- group-dock parent exemption (DESIGN §5) ---
+        {
+            LinkShared sh; mkSlot(sh, 0, 0, 1, 7); mkSlot(sh, 1, 1, 2, 3);
+            CHECK(!groupDockMovesSelf(sh, 0, 1, now)); // parent: no automatic move
+            CHECK(groupDockMovesSelf(sh, 1, 2, now));  // follower: moves (unchanged)
+        }
+        // --- planLinkAll (DESIGN §6c) ---
+        {
+            LinkShared sh; IntRect targets[3];
+            auto live = [&](int i, int h) { auto& sl = sh.slots[i]; sl.appId = i; sl.linked = 0; sl.heartbeatMs = now; sl.rect = { 50, 50, 300, h }; };
+            live(0, 40); live(1, 36); live(2, 44); // running-but-unlinked bars ARE participants
+            IntRect area{ 100, 200, 1920, 1080 };
+            CHECK(planLinkAll(sh, now, 0, area, targets) == 3); // Top
+            CHECK(targets[0].x == 100 && targets[0].y == 200 && targets[0].w == 1920 && targets[0].h == 40);
+            CHECK(targets[1].y == 240 && targets[1].h == 36);
+            CHECK(targets[2].y == 276 && targets[2].h == 44); // contiguous, heights preserved
+            CHECK(planLinkAll(sh, now, 1, area, targets) == 3); // Bottom
+            CHECK(targets[2].bottom() == 1280 && targets[2].y == 1236);
+            CHECK(targets[1].bottom() == targets[2].y && targets[0].bottom() == targets[1].y); // order stays 0,1,2 top-to-bottom
+            CHECK(targets[0].w == 1920 && targets[1].w == 1920 && targets[2].w == 1920);
+            // middle bar absent
+            sh.slots[1].heartbeatMs = now - kPeerStaleMs - 1;
+            CHECK(planLinkAll(sh, now, 0, area, targets) == 2);
+            CHECK(targets[1].w == 0);
+            CHECK(targets[2].y == targets[0].bottom()); // gap closed
+            // only MeterBar
+            sh.slots[2].heartbeatMs = now - kPeerStaleMs - 1;
+            CHECK(planLinkAll(sh, now, 1, area, targets) == 1);
+            CHECK(targets[0].bottom() == 1280 && targets[0].h == 40);
+            CHECK(planLinkAll(sh, now, 0, IntRect{}, targets) == 0); // degenerate area
+        }
+        // --- pulse packet (DESIGN §7) ---
+        {
+            LinkSlot sl; sl.appId = 0; sl.heartbeatMs = now;
+            unsigned seq = 0; int col = 0; float str = 0.f;
+            CHECK(!pulsePacket(sl, now, seq, col, str)); // never stamped
+            sl.pulseSeq = 3; sl.pulseColour = 0xE04C89; sl.pulseStrength = 0.7f;
+            CHECK(pulsePacket(sl, now, seq, col, str));
+            CHECK(seq == 3 && col == 0xE04C89 && str == 0.7f);
+        }
+        // --- PARENT-UNTOUCHED SCENARIO (DESIGN §10): join ->
+        // follower-change -> parent scenario; the parent's sync
+        // state and published packet stay untouched, no adoption
+        // ever fires for it ---
+        {
+            LinkShared sh;
+            mkSlot(sh, 0, 0, 1, 7); // parent (MeterBar, first-clicked)
+            // the parent's own published packet, stamped in its slot
+            BgSyncState parentSy;
+            parentSy.publishedStyle = 2; parentSy.publishedPct = 40; parentSy.publishedEffect = 3;
+            parentSy.publishedTheme = 1; parentSy.publishedScheme = 5;
+            parentSy.publishedPalHue = 0.25f; parentSy.publishedPalSat = 0.5f;
+            parentSy.publishedPalSpread = 0.75f; parentSy.publishedPalCycle = 12.f;
+            const BgSyncState parentBefore = parentSy;
+            const LinkSlot parentSlotBefore = sh.slots[0];
+            // follower joins and adopts
+            mkSlot(sh, 1, 1, 2, 1);
+            sh.slots[1].bgStyle = 0; sh.slots[1].bgTheme = 3; // follower's own (different) packet
+            BgSyncState folSy; BgPacket out;
+            CHECK(bgAdoption(sh, 1, folSy, now, out));
+            CHECK(out.theme == 1); // downhill: parent's theme wins
+            // follower changes locally; parent re-checks — nothing fires,
+            // nothing in the parent's state or slot moves
+            folSy.publishedTheme = 0;
+            CHECK(!bgAdoption(sh, 0, parentSy, now, out));
+            CHECK(parentSy.publishedStyle == parentBefore.publishedStyle
+               && parentSy.publishedTheme == parentBefore.publishedTheme
+               && parentSy.publishedPalCycle == parentBefore.publishedPalCycle
+               && parentSy.adoptedFrom == -1);
+            CHECK(sh.slots[0].bgSeq == parentSlotBefore.bgSeq && sh.slots[0].bgTheme == parentSlotBefore.bgTheme);
+            CHECK(!groupDockMovesSelf(sh, 0, 1, now)); // and the automatic dock cannot move it either
         }
     }
 

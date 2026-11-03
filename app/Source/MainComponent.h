@@ -251,6 +251,13 @@ private:
                      burgerBtn{juce::String::fromUTF8(meterbar::glyphMenuUtf8())};
     BarLinkClient linkClient_{ meterbar::kLinkAppMeter };        // v0.20.0 (k)
     int linkBgEffectShadow_ = -1;   // drag-lag fix (2026-10-31): last adopted link effect ordinal MeterBar cannot natively emit (peer glow = 2); getBg passes it through until a local settings change clears it
+    // BLK7 (DESIGN §6d/§7): link snapshot/restore + pulse emit state.
+    bool linkAppearanceSnapshot_ = false;
+    BarLinkClient::Bg linkSnapBg_{};
+    int linkSnapColorMap_ = 0; bool linkSnapVizEnabled_ = false; int linkSnapVizStyle_ = 0;
+    float linkSnapPal_[4] = { 0.f, 0.f, 0.f, 0.f };
+    bool linkAllGeomSnapshot_ = false; juce::Rectangle<int> linkAllGeom_{};
+    uint64_t pulseOnsetCount_ = 0; unsigned pulseSeq_ = 0; int pulseColour_ = 0; float pulseStrength_ = 0.f;
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
     meterbar::ReserveMachine reserveMachine;                      // v0.18.1: event-driven dock/reserve decisions (hysteresis) — replaces the v0.18 ~4x/sec timer poll
     juce::Label logoLabel, versionLabel, hintLabel;

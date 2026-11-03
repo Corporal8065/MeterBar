@@ -151,7 +151,22 @@ MainComponent::MainComponent() {
         // through; the display mapping in applyBg is unchanged.
         const int effect = linkBgEffectShadow_ >= 0 ? linkBgEffectShadow_
             : (engine.state.visualizerEnabled ? (engine.state.visualizerStyle == 1 ? 3 : engine.state.visualizerStyle == 2 ? 4 : 1) : 0);
-        return BarLinkClient::Bg{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, effect };
+        BarLinkClient::Bg out{ (int)engine.state.backgroundStyle, engine.state.backgroundOpacity, effect };
+        // BLK7 (DESIGN §2): theme — MeterBar's five menu themes map
+        // 0-4 directly onto the family ordinal list; an unknown name
+        // publishes -1 (none). Scheme — colorMap -> family ordinal:
+        // 0->1, 1->5, 2->2, 3->3, 4->4, 5->6, 6->7.
+        {
+            const char* names[] = { "Midnight Kids", "Midnight Pink", "Deep Teal", "Daylight", "Anime" };
+            out.theme = -1;
+            for (int i = 0; i < 5; ++i) if (engine.state.themeName == names[i]) out.theme = i;
+            static const int toFamily[] = { 1, 5, 2, 3, 4, 6, 7 };
+            const int cm = (int)engine.state.colorMap;
+            out.scheme = (cm >= 0 && cm < 7) ? toFamily[cm] : -1;
+            out.palHue = engine.state.visualizerBaseHue; out.palSat = engine.state.visualizerSaturation;
+            out.palSpread = engine.state.visualizerSpread; out.palCycle = engine.state.visualizerCycleSec;
+        }
+        return out;
     };
     linkClient_.applyBg = [this](const BarLinkClient::Bg& bg){
         engine.state.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 3, bg.style); // v0.20.1: Pastel (3) is a family style too
@@ -165,6 +180,30 @@ MainComponent::MainComponent() {
         else if (bg.effect == 4) { engine.state.visualizerEnabled = true; engine.state.visualizerStyle = 2; } // BLK5: Field
         else engine.state.visualizerEnabled = bg.effect != 0;
         linkBgEffectShadow_ = (bg.effect == 2) ? 2 : -1; // 2 (glow) is the only ordinal getBg cannot emit natively — see getBg
+        // BLK7 (DESIGN §3): follower apply order — background (above),
+        // then theme, then scheme, then palette.
+        // Theme: family ordinal 0-4 maps directly to MeterBar's menu
+        // themes; ordinal 5 (Clean Dark) has no MeterBar theme — keep
+        // our own theme for that field and adopt everything else.
+        if (bg.theme >= 0 && bg.theme <= 4) {
+            const char* names[] = { "Midnight Kids", "Midnight Pink", "Deep Teal", "Daylight", "Anime" };
+            engine.state.themeName = names[bg.theme];
+            applyTheme(); // the existing theme path (DESIGN §3); NOTE: applyTheme does not touch backgroundStyle, so no Anime->Pastel menu pairing leaks in
+        }
+        // Scheme: family ordinal -> colorMap (inverse of getBg's map);
+        // family 0 (Family) has no MeterBar counterpart — keep own.
+        {
+            static const int toLocal[] = { -1, 0, 2, 3, 4, 1, 5, 6 }; // family 0..7 -> colorMap (-1 = keep own)
+            if (bg.scheme >= 0 && bg.scheme < 8 && toLocal[bg.scheme] >= 0) {
+                engine.state.colorMap = (meterbar::ColorMapId)toLocal[bg.scheme];
+                frame.cmap = meterbar::ColorMap(engine.state.colorMap);
+            }
+        }
+        // Palette: plain field assignments (read live per frame).
+        engine.state.visualizerBaseHue = bg.palHue;
+        engine.state.visualizerSaturation = bg.palSat;
+        engine.state.visualizerSpread = bg.palSpread;
+        engine.state.visualizerCycleSec = bg.palCycle;
         repaint();
     };
     linkClient_.bgLinkEnabled = [this]{ return engine.state.linkBackground; }; // v0.21.3
@@ -176,6 +215,70 @@ MainComponent::MainComponent() {
     linkClient_.getAudio = [this](float out[5]) {
         out[0] = latestBands_[0]; out[1] = latestBands_[1]; out[2] = latestBands_[2]; out[3] = latestLevel_;
         out[4] = latestBalance_; // BLK5 (v0.25.0): stereo balance for the siblings' distributed emitters
+    };
+    // BLK7 (DESIGN §7): pulse EMIT. Host side tracks the engine's
+    // onset count; the callback reports the CURRENT pulse (the link
+    // tick stamps the slot when this seq advances). Threshold: the
+    // UI Beat Pulse renders frame.beatGlow when it exceeds 0.01
+    // (ModuleViews) — the same threshold gates emission here.
+    // Colour: theme.accent — the theme colour source the beat-glow
+    // render derives from (module accents are theme accents).
+    linkClient_.getPulse = [this](unsigned& seq, int& colourRgb, float& strength) {
+        seq = pulseSeq_; colourRgb = pulseColour_; strength = pulseStrength_;
+    };
+    // BLK7 (DESIGN §6b/§6d): Link All host surface.
+    linkClient_.onLinkAllForming = [this]{
+        if (!linkAllGeomSnapshot_) { linkAllGeom_ = getScreenBounds(); linkAllGeomSnapshot_ = true; }
+    };
+    linkClient_.setLinkEnabled = [this](bool on){
+        engine.state.linkEnabled = on;
+        linkBtn.setToggleState(on, juce::dontSendNotification);
+    };
+    linkClient_.getLinkAllArea = [this]{
+        // DESIGN §6a: bounds of the display containing MeterBar's
+        // current rect (MeterBar IS this app), else our own display.
+        auto own = getScreenBounds();
+        for (auto& d : juce::Desktop::getInstance().getDisplays().displays)
+            if (d.totalArea.contains(own.getCentre())) return d.totalArea;
+        return juce::Desktop::getInstance().getDisplays().getMainDisplay().totalArea;
+    };
+    // BLK7 (DESIGN §6d): appearance snapshot on the link OFF->ON edge
+    // (any cause), restore on ON->OFF; Link All geometry snapshot
+    // restores on the same OFF edge. In-memory only (MeterBar has no
+    // settings file; restoring writes the app-native fields back).
+    linkClient_.onLinkEdge = [this](bool on){
+        auto& st = engine.state;
+        if (on) {
+            if (!linkAppearanceSnapshot_) {
+                linkSnapBg_ = BarLinkClient::Bg{ (int)st.backgroundStyle, st.backgroundOpacity, 0 };
+                linkSnapBg_.theme = [&]{ const char* n[] = {"Midnight Kids","Midnight Pink","Deep Teal","Daylight","Anime"}; for (int i=0;i<5;++i) if (st.themeName==n[i]) return i; return -1; }();
+                linkSnapColorMap_ = (int)st.colorMap;
+                linkSnapVizEnabled_ = st.visualizerEnabled; linkSnapVizStyle_ = st.visualizerStyle;
+                linkSnapPal_[0] = st.visualizerBaseHue; linkSnapPal_[1] = st.visualizerSaturation;
+                linkSnapPal_[2] = st.visualizerSpread; linkSnapPal_[3] = st.visualizerCycleSec;
+                linkAppearanceSnapshot_ = true;
+            }
+        } else {
+            if (linkAppearanceSnapshot_) {
+                st.backgroundStyle = (meterbar::BackgroundStyle)juce::jlimit(0, 3, linkSnapBg_.style);
+                st.backgroundOpacity = juce::jlimit(0.15f, 1.0f, linkSnapBg_.opacity);
+                if (linkSnapBg_.theme >= 0 && linkSnapBg_.theme <= 4) {
+                    const char* n[] = {"Midnight Kids","Midnight Pink","Deep Teal","Daylight","Anime"};
+                    st.themeName = n[linkSnapBg_.theme];
+                }
+                st.colorMap = (meterbar::ColorMapId)linkSnapColorMap_;
+                st.visualizerEnabled = linkSnapVizEnabled_; st.visualizerStyle = linkSnapVizStyle_;
+                st.visualizerBaseHue = linkSnapPal_[0]; st.visualizerSaturation = linkSnapPal_[1];
+                st.visualizerSpread = linkSnapPal_[2]; st.visualizerCycleSec = linkSnapPal_[3];
+                linkBgEffectShadow_ = -1;
+                linkAppearanceSnapshot_ = false;
+                applyTheme(); repaint();
+            }
+            if (linkAllGeomSnapshot_) {
+                if (auto* tl = getTopLevelComponent()) tl->setBounds(linkAllGeom_);
+                linkAllGeomSnapshot_ = false;
+            }
+        }
     };
     linkClient_.start();
     // v0.22.0: Preset / Reposition / Arrange / Restore / Minimize /
@@ -1247,6 +1350,21 @@ void MainComponent::timerCallback() {
     // excited window; she also stays excited while the short-term level
     // runs hot (above about -12 LUFS). Calm otherwise.
     frame.beatGlow = engine.beatLevel();
+    // BLK7 (DESIGN §7): pulse emit bookkeeping — on a fresh onset
+    // whose level clears the UI Beat Pulse threshold (0.01, the
+    // ModuleViews render gate), advance the host pulse seq.
+    {
+        const uint64_t oc = engine.beatOnsets();
+        const float lvl = engine.beatLevel();
+        if (oc != pulseOnsetCount_) {
+            pulseOnsetCount_ = oc;
+            if (lvl > 0.01f) {
+                pulseSeq_ += 1;
+                pulseStrength_ = juce::jlimit(0.f, 1.f, lvl);
+                pulseColour_ = (int)(theme.accent.getARGB() & 0x00FFFFFFu);
+            }
+        }
+    }
     if (mascot.isVisible()) {
         uint64_t oc = engine.beatOnsets();
         if (oc != lastOnsetCount) { lastOnsetCount = oc; bobStartMs = now; excitedUntilMs = now + 600; }
@@ -1520,7 +1638,8 @@ enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
        idInDevBase=3300, idOutDevBase=3400,
        idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101, idOpenLogFolder=5102, // v0.21.4: Recordings submenu; v0.28.3: Open Log Folder (crash records live in the same Documents\MeterBar)
        idLcOff=7001, idLcTranscribe, idLcTranslate, idLcTop, idLcMove, idLcResetPos, idLcSetup, idLcStatus,
-       idLcPresentOverlay, idLcPresentDocked }; // v0.23.0: Live Captions submenu; v0.24.0: presentation flip ids
+       idLcPresentOverlay, idLcPresentDocked,
+       idLinkAllTop=8001, idLinkAllBottom }; // BLK7: Link All submenu (DESIGN §6e as amended 2026-11-03: option B only)
 void MainComponent::savePresetInteractive(bool saveAs) {
     auto& st = engine.state;
     if (!saveAs && st.name != "Default" && !st.name.empty()) { presetio::save(st, juce::String(st.name)); return; }
@@ -1672,6 +1791,11 @@ void MainComponent::showHamburgerMenu() {
     m.addItem(idArrange, "Arrange Windows");
     m.addItem(idRestore, "Restore Windows");
     m.addSubMenu("Reposition", buildRepositionSubMenu());
+    // BLK7 Link All (DESIGN §6e, amended: option B ONLY — two items,
+    // no auto-edge entry): one click links all three bars and stacks
+    // them MeterBar -> TickerBar -> SessionBar at the chosen edge.
+    { juce::PopupMenu la; la.addItem(idLinkAllTop, "Link All \u2192 Top"); la.addItem(idLinkAllBottom, "Link All \u2192 Bottom");
+      m.addSubMenu("Link All", la); }
     m.addSeparator();
     juce::PopupMenu settings; settings.addItem(idOpenSettings, "Open Settings Window"); m.addSubMenu("Settings", settings);
     juce::PopupMenu src; src.addItem(idSrcTone, "Test Tone", true, st.audioSource == "Test Tone");
@@ -1811,6 +1935,17 @@ void MainComponent::showHamburgerMenu() {
         else if (r == idDebug) debugWin->setVisible(!debugWin->isVisible());
         else if (r == idUpdates) checkForUpdates();
         else if (r == idOpenLogFolder) openLogFolder();
+        else if (r == idLinkAllTop || r == idLinkAllBottom) {
+            // BLK7 (DESIGN §6a): area = bounds of the display
+            // containing MeterBar's current rect (this app), via the
+            // client callback; defer past popup dismissal like the
+            // Reposition actions (menu-capture discipline).
+            const int edge = (r == idLinkAllBottom) ? 1 : 0;
+            juce::MessageManager::callAsync([this, edge]{
+                auto area = linkClient_.getLinkAllArea ? linkClient_.getLinkAllArea() : getScreenBounds();
+                linkClient_.requestLinkAll(edge, area);
+            });
+        }
         // v0.22.0: the compressed toolbar items. Preset actions are
         // the old dropdown's, unchanged; Arrange / Restore call the
         // same handlers the buttons did.
