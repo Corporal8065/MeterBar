@@ -35,6 +35,7 @@
  #include <mmdeviceapi.h>
  #include <audioclient.h>
  #include <audioclientactivationparams.h> // v0.27.0 (item 8): AUDIOCLIENT_ACTIVATION_PARAMS / ActivateAudioInterfaceAsync
+ #include <appmodel.h>                     // v0.28.3: GetPackageFamilyName (packaged-target detection)
  #include <tlhelp32.h>                     // v0.27.0 (item 8): process snapshot for the per-app PID lookup
  #include <functiondiscoverykeys_devpkey.h>
  #include <ksmedia.h>
