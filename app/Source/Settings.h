@@ -138,7 +138,7 @@ public:
         });
         nextKind_ = 4; panel("Stereometer", &st->stereometerEnabled, [&]{
             note("v0.15: display is a stereo VECTORSCOPE (L vs R, Ozone-style) — mono draws the diagonal, width spreads off it.");
-            combo("Color", {"Single (S)","RGB","Multi-band (M band)"}, (int)st->stereoColor, [&](int v){ st->stereoColor = (meterbar::StereoColor)v; });
+            combo("Color", {"Single (S)","RGB","Multi-band (M band)","Rainbow","Sunset","Ice"}, (int)st->stereoColor, [&](int v){ st->stereoColor = (meterbar::StereoColor)v; }); // v0.28.1: Rainbow/Sunset/Ice added (Jackson: colour beyond purple)
             toggle("Point Size Auto", st->stereoPointAuto, [&](bool b){ st->stereoPointAuto = b; });
             slider("Point Size (1-20)", 1.0, 20.0, st->stereoPointSize, [&](double v){ st->stereoPointSize = (float)v; });
             note("Reference: load/overlay a reference track is a later phase (panel reserved).");

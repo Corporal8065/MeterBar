@@ -154,6 +154,7 @@ public:
     int collectBeats(float maxAge, float* ages, int* counts, int maxOut) {
         return beatTracker.collectRecentBeats(maxAge, ages, counts, maxOut);
     }
+    int beatDownbeatCount() { return beatTracker.downbeatCount(); } // v0.28.1: evidence-proven downbeat count (0 = unproven)
     // v0.28.0: Undertow feeds. Path A: the five-band onset latch,
     // drained per UI frame into the model's onset feed (the same
     // unsynchronised-scalar pattern as the beat accessors above).

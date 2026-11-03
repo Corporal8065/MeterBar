@@ -934,7 +934,12 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
     if (engine.state.visualizerStyle == 3) {
         {
             juce::Graphics ig2(vizCache);
-            ig2.setColour(juce::Colours::black.withAlpha(0.65f));
+            // v0.28.1: the safe-zone dim drops 0.65 -> 0.35. At 0.65
+            // the dim ate most of the field wherever a module sat —
+            // and modules tile most of the bar — which is part of
+            // why the layer read as absent in the main view while
+            // the bare Field view looked fine.
+            ig2.setColour(juce::Colours::black.withAlpha(0.35f));
             const float sx = (float)iw / (float)std::max(1, bounds.getWidth());
             const float sy = (float)ih / (float)std::max(1, bounds.getHeight());
             for (auto& r : utSafeLocal_)
@@ -946,18 +951,31 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
         const float washOpU = groupedU ? bgOpU : 1.0f;
         if ((utBloomFrame_++ % 2) == 0) rebuildUndertowBloom(iw, ih); // <=30 Hz (DESIGN §(d))
         if (engine.state.undertowBloomQuarter && vizBloomQ.isValid()) {
-            g.setOpacity(0.33f * washOpU);
+            g.setOpacity(0.45f * washOpU);
             g.drawImage(vizBloomQ, bounds.toFloat());
         }
         if (engine.state.undertowBloomEighth && vizBloomE.isValid()) {
-            g.setOpacity(0.22f * washOpU);
+            g.setOpacity(0.30f * washOpU);
             g.drawImage(vizBloomE, bounds.toFloat());
         }
-        g.setOpacity(groupedU ? 0.30f * bgOpU : 0.30f);
+        // v0.28.1 VISIBILITY FIX (the invisible-background bug,
+        // Jackson's v0.28.0 grade): the crisp pass rises 0.30 ->
+        // 0.85 and the 0.18 black scrim over the whole layer is
+        // GONE. The v0.28.0 stack multiplied out to almost nothing
+        // by the time it reached the screen: model alphas (dust
+        // 0.18 x level, orbs ~0.1-0.28, membrane fill x0.55) x the
+        // Governor's display gain x crisp 0.30 x scrim ~0.82 left
+        // typical elements at 1-3% effective alpha over black —
+        // under the modules' own translucent panels, invisible.
+        // The Field style survived the same 0.30 crisp pass only
+        // because its elements draw at near-full alpha. The
+        // Governor's luminance budget is still enforced inside the
+        // core model (its estimate caps ~0.18), so the layer stays
+        // a background; what changed is that the renderer no longer
+        // throws away two-thirds of what the model produced.
+        g.setOpacity(groupedU ? 0.85f * bgOpU : 0.85f);
         g.drawImage(vizCache, bounds.toFloat());
         g.setOpacity(1.0f);
-        g.setColour(juce::Colours::black.withAlpha(0.18f));
-        g.fillRect(bounds);
         return;
     }
     // v0.23.1 (LAG FIX — audit Finding 3): the blur used to be a full
@@ -1142,6 +1160,12 @@ void MainComponent::prepareFrame() {
         float ages[64]; int counts[64];
         const int nb = engine.collectBeats(30.f, ages, counts, 64);
         frame.beatAges.assign(ages, ages + nb);
+        // v0.28.1: the counts cross now, alongside the core's
+        // evidence-proven downbeat (0 = unproven -> overlays draw
+        // every beat alike, the v0.26.1 rule). They exist only to
+        // emphasise a proven downbeat; never drawn as numbers.
+        frame.beatCounts.assign(counts, counts + nb);
+        frame.beatDownbeat = engine.beatDownbeatCount();
     }
     frame.waveSecPerColumn = 1.0f / ((float)std::max(1, st.fpsLimit) * (float)std::max(1, (int)std::lround(1 + st.linkedSpeed)));
     frame.sgSecPerRow = 1.0f / ((float)std::max(1, st.fpsLimit) * std::max(0.1f, st.linkedSpeed) * 0.2f);

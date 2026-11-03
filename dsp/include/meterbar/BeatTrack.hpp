@@ -59,6 +59,7 @@ public:
         locked_ = false; period_ = 0; anchorT_ = 0; nextBeatT_ = 0;
         pendingCount_ = 1; countInBar_ = 0; conf_ = 0;
         beatEnv_ = 0; downbeatEnv_ = 0; onsets_ = 0; gridBeats_ = 0;
+        resetPhase(); countBaseIdx_ = 0; countBasePending_ = false; // v0.28.1
         // The meter (bpb_/sub_) deliberately survives prepare():
         // it is a user setting, not stream state.
     }
@@ -66,9 +67,38 @@ public:
         bpb_ = beatsPerBar < 1 ? 1 : beatsPerBar > 12 ? 12 : beatsPerBar;
         sub_ = subdivision < 1 ? 1 : subdivision > 4 ? 4 : subdivision;
         pendingCount_ = 1; // re-phase: the next emitted beat is a downbeat
+        resetPhase(); countBasePending_ = true; // v0.28.1: counts re-base at the next count-1 emission; old evidence is meaningless under a new meter
     }
     int beatsPerBar() const { return bpb_; }
     int subdivision() const { return sub_; }
+
+    // v0.28.1: MEASURE PHASE (evidence accumulates in onOnset).
+    // The grid's count phase is anchored at whichever kick happened
+    // to lock the tempo — musically arbitrary — so until now the
+    // app drew every beat identically rather than assert a downbeat
+    // it could not support (the v0.26.x 1-2-3-4 numbering was
+    // removed for exactly that reason). downbeatCount() returns the
+    // count (1..beatsPerBar) the ACCENT EVIDENCE supports as the
+    // downbeat, or 0 = unproven. It turns non-zero only when one
+    // count's share of on-grid onset power clears the proof gates
+    // in recomputePhase(); uniform kicks — most four-on-the-floor —
+    // carry no phase information and stay 0, and the UI must then
+    // draw beats without measure emphasis.
+    int downbeatCount() const { return downbeatCount_; }
+    bool isDownbeatCount(int count) const { return downbeatCount_ > 0 && count == downbeatCount_; }
+    // Best-minus-second share of onset power across counts (the
+    // margin the proof gates judge). 0 with no evidence.
+    float phaseMargin() const {
+        double tot = 0; for (int i = 0; i < bpb_; ++i) tot += slotE_[i];
+        if (tot <= 0) return 0.f;
+        double best = 0, second = 0;
+        for (int i = 0; i < bpb_; ++i) {
+            const double sh = slotE_[i] / tot;
+            if (sh > best) { second = best; best = sh; }
+            else if (sh > second) second = sh;
+        }
+        return (float)(best - second);
+    }
 
     // Push one block (the app feeds the same 256-sample sub-blocks
     // as BeatPulse). Returns true on the block where a kick onset
@@ -118,12 +148,64 @@ public:
         // absolute floor so silence never fires, the v0.26.1 peak
         // gate (see header), and a 220 ms refractory (kicks closer
         // than that are one hit's ring, not two hits).
+        // v0.28.1: MISSED-BEAT GATE RELAXATION. Measured failure of
+        // the flat 0.45 gate: a loud chorus sets peakLow_, and the
+        // quieter verse after it (kick power ~0.2x the chorus's)
+        // can NEVER clear 45% of that peak — whole verses went
+        // onset-less (probe K3: 11 of 47 kicks missed). Cutting the
+        // peak decay to 3 s fixed the verse but let a kick-less
+        // breakdown's bassline fire within seconds (probe K6: 11
+        // false onsets), because the gate then sits at the bass's
+        // own level. The discriminator is the GRID: while locked,
+        // count grid beats whose confirmation window has closed
+        // with no confirming onset; the gate for an ON-GRID onset
+        // (inside the same +-18% pulse window onOnset confirms
+        // with) relaxes stepwise per missed beat, floor ~0.15 of
+        // peak. Off-grid onsets always face the full gate, so the
+        // eighth-note bass trap stays shut, and pre-lock there is
+        // no relaxation at all (lock acquisition keeps v0.26.1's
+        // strict gate).
+        double gateScale = 1.0;
+        if (locked_ && period_ > 0) {
+            const double pulse = period_ / sub_;
+            if (pulse > 0) {
+                const double k = std::round((now - anchorT_) / pulse);
+                const double err = now - (anchorT_ + k * pulse);
+                if (std::abs(err) <= 0.18 * pulse) {
+                    const int missed = missedBeats(now);
+                    gateScale = missed >= 3 ? 0.33 : missed == 2 ? 0.48 : missed == 1 ? 0.70 : 1.0;
+                }
+            }
+        }
+        // v0.28.1 (V4): the effective gate peak adapts to the level
+        // of CONFIRMED KICK-LIKE onsets (see classifyPending below).
+        const double gatePeak = adaptValid_ ? std::min(peakLow_, peakAdapt_) : peakLow_;
         if (elapsed_ > 0.6 && lowMs > 1e-8 && baseLow_ > 1e-10 &&
-            lowMs > baseLow_ * 2.0 && lowMs > peakLow_ * 0.45 &&
+            lowMs > baseLow_ * 2.0 && lowMs > gatePeak * 0.45 * gateScale &&
             sinceOnset_ > 0.22) {
             fired = true; ++onsets_;
-            onOnset(now);
+            pendClassT_ = now; pendClassMs_ = lowMs; pendClass_ = true;
+            onOnset(now, lowMs);
         }
+        // Classification of the pending fire, judged 250 ms later:
+        // a kick is a burst — by +250 ms the band statistic must
+        // have fallen under 40% of the fire value. A sustained bass
+        // note (or the next eighth-note) keeps it up, and such a
+        // fire does NOT lower the adaptive peak: it was rescued by
+        // the grid, not confirmed as a kick.
+        if (pendClass_ && now - pendClassT_ >= 0.25) {
+            pendClass_ = false;
+            if (lowMs < pendClassMs_ * 0.40) {
+                const double cand = pendClassMs_ * 2.55; // level that passes this kick at the 0.45 ratio, +15% headroom
+                if (!adaptValid_ || cand < peakAdapt_) peakAdapt_ = cand;
+                adaptValid_ = true;
+            }
+        }
+        // The adaptive peak forgets toward the raw peak over ~20 s,
+        // so a later loud section re-raises the gate through its own
+        // strict fires (each strict fire is also classified above).
+        if (adaptValid_)
+            peakAdapt_ += (peakLow_ - peakAdapt_) * (1.0 - std::exp(-blockSec / 20.0));
         baseLow_ += aBase * (lowMs - baseLow_);
         if (baseLow_ < 1e-10 && lowMs > 0) baseLow_ = lowMs; // cold start
         // --- grid emission: predicted beats fire on the clock,
@@ -136,6 +218,10 @@ public:
                     beatEnv_ = std::max(beatEnv_, 0.85f);
                     if (pendingCount_ == 1) downbeatEnv_ = 1.0f;
                     countInBar_ = pendingCount_;
+                    if (countBasePending_ && pendingCount_ == 1) { // v0.28.1: this count-1 beat re-bases the phase-evidence mapping (setMeter re-phase)
+                        countBaseIdx_ = (long long)std::llround((lastGridBeatT_ - anchorT_) / pulse);
+                        countBasePending_ = false;
+                    }
                     pendingCount_ = pendingCount_ % bpb_ + 1;
                     nextBeatT_ += pulse;
                     ++gridBeats_;
@@ -211,8 +297,49 @@ private:
         while (p < 0.28) p *= 2.0;
         return p;
     }
+    // v0.28.1: grid beats whose +-18% confirmation window has fully
+    // closed since the last confirmed onset (or since the lock).
+    int missedBeats(double now) const {
+        if (!locked_ || period_ <= 0) return 0;
+        const double pulse = period_ / sub_;
+        if (pulse <= 0) return 0;
+        const double from = lastConfirmT_ > 0 ? lastConfirmT_ : anchorT_;
+        const double kFirst = std::floor((from - anchorT_) / pulse) + 1.0;
+        const double kLast = std::floor((now - 0.18 * pulse - anchorT_) / pulse);
+        const double n = kLast - kFirst + 1.0;
+        return n > 0 ? (int)n : 0;
+    }
+    // v0.28.1 measure-phase helpers.
+    void resetPhase() {
+        for (int i = 0; i < 12; ++i) slotE_[i] = 0;
+        slotN_ = 0; lastEvidenceT_ = -1; downbeatCount_ = 0;
+    }
+    void recomputePhase() {
+        if (slotN_ < 10) return; // too little evidence to judge; verdict stands (0 after any reset)
+        double tot = 0; for (int i = 0; i < bpb_; ++i) tot += slotE_[i];
+        if (tot <= 0) { downbeatCount_ = 0; return; }
+        int best = 0; double bestSh = 0, secondSh = 0;
+        for (int i = 0; i < bpb_; ++i) {
+            const double sh = slotE_[i] / tot;
+            if (sh > bestSh) { secondSh = bestSh; bestSh = sh; best = i; }
+            else if (sh > secondSh) secondSh = sh;
+        }
+        if (downbeatCount_ == 0) {
+            // Proof gates: one count must hold at least 40% of the
+            // onset power AND lead the runner-up by 15 points.
+            if (bestSh >= 0.40 && bestSh - secondSh >= 0.15) downbeatCount_ = best + 1;
+        } else {
+            const double provenSh = slotE_[downbeatCount_ - 1] / tot;
+            if (best != downbeatCount_ - 1 && bestSh >= 0.50 && bestSh - provenSh >= 0.20)
+                downbeatCount_ = best + 1; // the accent pattern moved; follow the evidence
+            else if (provenSh < 0.33)
+                downbeatCount_ = 0; // evidence dissolved; un-prove rather than keep asserting
+        }
+    }
     void relock(double t, double period) {
         locked_ = true; period_ = period; anchorT_ = t; nextBeatT_ = t;
+        resetPhase(); countBaseIdx_ = 0; countBasePending_ = false; // v0.28.1: a new grid restarts phase evidence; its first emitted beat (index 0) carries count 1
+        lastConfirmT_ = -1; // v0.28.1: no beat confirmed on the new grid yet
         lastGridBeatT_ = -1; // v0.28.0 plumbing: a fresh grid has emitted nothing yet
         pendingCount_ = 1;
     }
@@ -230,7 +357,7 @@ private:
         const float cons = (float)good / (float)intervals_.size();
         if (cons >= 0.6f) { relock(t, folded); conf_ = cons; }
     }
-    void onOnset(double t) {
+    void onOnset(double t, double lowMs) {
         if (lastOnsetT_ > 0) {
             const double dt = t - lastOnsetT_;
             if (dt >= 0.24 && dt <= 2.4) {
@@ -260,6 +387,37 @@ private:
         const double k = std::round((t - anchorT_) / pulse);
         const double err = t - (anchorT_ + k * pulse);
         if (std::abs(err) <= 0.18 * pulse) {
+            lastConfirmT_ = t; // v0.28.1: a grid beat was confirmed here
+            // v0.28.1 MEASURE-PHASE EVIDENCE: this onset confirmed
+            // the grid beat with index k; its count follows from the
+            // count base (the beat index carrying count 1).
+            // Accumulate the onset's band power per count under a
+            // ~24 s forgetting time, so an arrangement change can
+            // move the answer. Accumulation asserts nothing by
+            // itself — proof is gated in recomputePhase().
+            {
+                const long long ki = (long long)k;
+                const int cnt = (int)(((ki - countBaseIdx_) % bpb_ + bpb_) % bpb_) + 1;
+                if (lastEvidenceT_ > 0)
+                    for (int i = 0; i < 12; ++i) slotE_[i] *= std::exp(-(t - lastEvidenceT_) / 24.0);
+                lastEvidenceT_ = t;
+                // Weight = the onset's band power SQUARED. The
+                // 140 Hz statistic compresses accent contrast (a
+                // 0.95-amp kick over the probe's bass bed reads
+                // 0.498 vs a 0.55-amp kick's 0.294 — a 1.7x power
+                // ratio, not the 3x the amplitudes suggest), and
+                // raw-power shares topped out at 0.36, just under
+                // the 0.40 proof gate. Squaring restores the
+                // contrast (shares ~0.49 vs 0.17) while uniform
+                // kicks stay uniform under it, so the no-evidence
+                // case still proves nothing. (A baseline-relative
+                // weight was tried first and measured WORSE: the
+                // baseline itself is phase-locked to the bar, so
+                // the ratio cancelled the accent out.)
+                slotE_[cnt - 1] += lowMs * lowMs;
+                ++slotN_;
+                recomputePhase();
+            }
             anchorT_ += err * 0.25; nextBeatT_ += err * 0.25;
             if (!intervals_.empty()) {
                 double cand = intervals_.back();
@@ -276,6 +434,12 @@ private:
     static constexpr int kWinPow = 128;
     std::vector<double> winPow_; int winHead_ = 0, winCount_ = 0; double winSum_ = 0;
     uint64_t samples_ = 0;
+    double lastConfirmT_ = -1; // v0.28.1: last on-grid confirmed onset (sample-clock seconds)
+    // v0.28.1 measure phase: per-count onset-power evidence + verdict
+    double slotE_[12] = {}; int slotN_ = 0; double lastEvidenceT_ = -1;
+    int downbeatCount_ = 0; long long countBaseIdx_ = 0; bool countBasePending_ = false;
+    double peakAdapt_ = 0; bool adaptValid_ = false; // v0.28.1: gate peak adapted to confirmed kick levels
+    double pendClassT_ = 0, pendClassMs_ = 0; bool pendClass_ = false; // pending fire awaiting burst classification
     double elapsed_ = 0, sinceOnset_ = 1e9, lastOnsetT_ = -1;
     std::deque<double> intervals_;
     bool locked_ = false;

@@ -334,7 +334,7 @@ int main() {
         CHECK(p.outputDeviceName.empty() && p.outputDeviceId.empty()); // empty = default render endpoint
         CHECK(std::abs(p.trimDb - 27.0f) < 1e-6);                 // v0.28.0 recipe: +27 dB (was +10.18 through v0.27.x)
         CHECK(p.visualizerEnabled);                              // v0.28.0 recipe: visualizer background ON
-        CHECK(p.visualizerStyle == 2);                           // v0.28.0 recipe: Field style by default
+        CHECK(p.visualizerStyle == 3);                           // v0.28.1 recipe: Undertow is the default background (auto-engage; v0.28.0 shipped Field/2)
         CHECK(p.undertowBloomQuarter && p.undertowBloomEighth && p.undertowPreArm); // grading hooks at the committed design
         CHECK(std::abs(p.undertowKickTauMs - 65.0f) < 1e-6);     // committed kick release τ
         CHECK(p.spectrogramEnabled && p.waveformEnabled && p.loudnessEnabled
@@ -2284,6 +2284,211 @@ int main() {
                 if (std::abs(hot.kickValue() - cold.kickValue()) > 1e-6f) same = false;
             }
             CHECK(same);
+        }
+    }
+
+
+    // ============================================================
+    // v0.28.1 — scored kick detection, measure phase, stereo enums
+    // (Jackson's v0.28.0 grading fixes). The kick tests SCORE the
+    // detectors against known kick placements (TP/FP/FN with a
+    // -30..+120 ms match window) instead of trusting adjectives.
+    // Measured on the development machine at the v0.28.1 freeze;
+    // the CHECKs carry headroom for platform float differences.
+    // ============================================================
+    {
+        const int blk = 256; const double sr = 48000.0;
+        auto kEnv281 = [](double lt, double dur, double atk) {
+            if (lt < 0 || lt >= dur) return 0.0;
+            return lt < atk ? 0.5 - 0.5 * std::cos(M_PI * lt / atk)
+                            : std::pow(1.0 - (lt - atk) / (dur - atk), 1.6);
+        };
+        struct Sc281 { int tp = 0, fp = 0, fn = 0; };
+        auto score281 = [](const std::vector<double>& kicks, const std::vector<double>& onsets) {
+            Sc281 sc; std::vector<bool> used(onsets.size(), false);
+            for (double k : kicks) {
+                int best = -1; double bd = 1e9;
+                for (size_t i = 0; i < onsets.size(); ++i) {
+                    if (used[i]) continue;
+                    const double d = onsets[i] - k;
+                    if (d >= -0.03 && d <= 0.12 && std::abs(d) < bd) { bd = std::abs(d); best = (int)i; }
+                }
+                if (best >= 0) { used[(size_t)best] = true; ++sc.tp; } else ++sc.fn;
+            }
+            for (bool u : used) if (!u) ++sc.fp;
+            return sc;
+        };
+        // Verse/chorus material: 100 BPM kicks, amplitude alternating
+        // 0.90 / 0.40 every two bars, over an eighth-note bassline.
+        // v0.28.0 SCORES on this signal (the failure Jackson graded):
+        // BeatTracker TP 36 / FN 11 — the flat 45%-of-peak gate can
+        // never hear the quiet verse under the chorus's peak;
+        // FiveBandOnsets sub TP 23 / FN 24 (half the kicks gone).
+        auto verseChorus = [&](auto&& sink, double secs) {
+            const double period = 0.6;
+            std::vector<double> kicks;
+            for (double t = 0.35; t < 28.5; t += period) kicks.push_back(t);
+            std::vector<float> L(blk), R(blk);
+            double tNow = 0;
+            const int blocks = (int)std::lround(secs * sr / blk);
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    const double tt = tNow + i / sr;
+                    double v = 0.008 * std::sin(2 * M_PI * 440.0 * tt);
+                    const int bar = (int)std::floor((tt - 0.35) / (period * 4));
+                    const double amp = ((bar / 2) % 2 == 0) ? 0.90 : 0.40;
+                    for (double k : kicks) v += amp * std::sin(2 * M_PI * 58.0 * (tt - k)) * kEnv281(tt - k, 0.30, 0.004);
+                    double hlt = std::fmod(tt - 0.35, period / 2); if (hlt < 0) hlt += period / 2;
+                    const int step = (int)std::floor((tt - 0.35) / (period / 2));
+                    const double bf = (step % 4 == 0) ? 55.0 : (step % 4 == 2) ? 65.4 : 49.0;
+                    v += 0.35 * std::sin(2 * M_PI * bf * tt) * kEnv281(hlt, period / 2 * 0.9, 0.01);
+                    L[(size_t)i] = R[(size_t)i] = (float)v;
+                }
+                sink(L.data(), R.data(), tNow);
+                tNow += blk / sr;
+            }
+            return kicks;
+        };
+        {   // BeatTracker on verse/chorus: v0.28.1 measured TP 44 / FP 1 / FN 3
+            BeatTracker tr; tr.prepare(sr);
+            std::vector<double> onsets;
+            auto kicks = verseChorus([&](const float* L, const float* R, double t0) {
+                if (tr.pushBlock(L, R, blk)) onsets.push_back(t0 + blk / sr);
+            }, 29.0);
+            const auto sc = score281(kicks, onsets);
+            std::printf("v0.28.1 tracker verse/chorus: TP=%d FP=%d FN=%d (of %d kicks)\n", sc.tp, sc.fp, sc.fn, (int)kicks.size());
+            CHECK(sc.tp >= 42); CHECK(sc.fn <= 5); CHECK(sc.fp <= 2);
+            CHECK(tr.locked()); CHECK(std::abs(tr.bpm() - 100.0) < 3.0);
+        }
+        {   // FiveBandOnsets sub on the same signal: v0.28.1 measured TP 39 / FP 0 / FN 8
+            FiveBandOnsets ob; ob.prepare(sr);
+            std::vector<double> onsets; uint64_t seen = 0;
+            auto kicks = verseChorus([&](const float* L, const float* R, double) {
+                ob.pushBlock(L, R, blk);
+                if (ob.onsetCount(0) != seen) { seen = ob.onsetCount(0); onsets.push_back(ob.lastOnsetSec(0)); }
+            }, 29.0);
+            const auto sc = score281(kicks, onsets);
+            std::printf("v0.28.1 fiveband verse/chorus: TP=%d FP=%d FN=%d (of %d kicks)\n", sc.tp, sc.fp, sc.fn, (int)kicks.size());
+            CHECK(sc.tp >= 36); CHECK(sc.fn <= 11); CHECK(sc.fp <= 1);
+        }
+        {   // Breakdown honesty: kicks stop for 6 s mid-song, the
+            // bassline plays on. The adaptive gate buys verse hearing
+            // at a measured price — a few on-beat bass notes fire as
+            // grid confirmations (v0.28.1 measured 4; v0.28.0 measured
+            // 0 but could not hear verses at all). Bound it, and pin
+            // that the grid survives at the true tempo.
+            BeatTracker tr; tr.prepare(sr);
+            const double period = 0.6;
+            std::vector<float> L(blk), R(blk);
+            double tNow = 0; int breakOnsets = 0;
+            const int blocks = (int)std::lround(22.0 * sr / blk);
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    const double tt = tNow + i / sr;
+                    double v = 0.008 * std::sin(2 * M_PI * 440.0 * tt);
+                    const bool kickTime = (tt < 8.0 || tt >= 14.0);
+                    double klt = std::fmod(tt - 0.35, period); if (klt < 0) klt += period;
+                    if (kickTime) v += 0.85 * std::sin(2 * M_PI * 58.0 * klt) * kEnv281(klt, 0.30, 0.004);
+                    double hlt = std::fmod(tt - 0.35, period / 2); if (hlt < 0) hlt += period / 2;
+                    const int step = (int)std::floor((tt - 0.35) / (period / 2));
+                    const double bf = (step % 4 == 0) ? 55.0 : (step % 4 == 2) ? 65.4 : 49.0;
+                    v += 0.42 * std::sin(2 * M_PI * bf * tt) * kEnv281(hlt, period / 2 * 0.9, 0.01);
+                    L[(size_t)i] = R[(size_t)i] = (float)v;
+                }
+                if (tr.pushBlock(L.data(), R.data(), blk) && tNow + blk / sr >= 8.6 && tNow + blk / sr < 13.8) ++breakOnsets;
+                tNow += blk / sr;
+            }
+            std::printf("v0.28.1 tracker breakdown: onsets inside the kick-less window = %d (bound 6)\n", breakOnsets);
+            CHECK(breakOnsets <= 6);
+            CHECK(tr.locked()); CHECK(std::abs(tr.bpm() - 100.0) < 3.0);
+        }
+        // --- Measure phase: accent evidence or silence ---
+        auto accentRun = [&](int bpb, int accentBeat, double secs, BeatTracker& tr) {
+            tr.prepare(sr); tr.setMeter(bpb, 1);
+            const double period = 0.6;
+            std::vector<float> L(blk), R(blk);
+            double tNow = 0;
+            const int blocks = (int)std::lround(secs * sr / blk);
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    const double tt = tNow + i / sr;
+                    double v = 0.008 * std::sin(2 * M_PI * 440.0 * tt);
+                    double klt = std::fmod(tt - 0.35, period); if (klt < 0) klt += period;
+                    const long beatIdx = (long)std::floor((tt - 0.35) / period);
+                    const int songBeat = (int)(beatIdx % bpb) + 1;
+                    const double amp = accentBeat == 0 ? 0.85 : (songBeat == accentBeat ? 0.95 : 0.55);
+                    v += amp * std::sin(2 * M_PI * 58.0 * klt) * kEnv281(klt, 0.30, 0.004);
+                    double hlt = std::fmod(tt - 0.35, period / 2); if (hlt < 0) hlt += period / 2;
+                    v += 0.30 * std::sin(2 * M_PI * 55.0 * tt) * kEnv281(hlt, period / 2 * 0.9, 0.01);
+                    L[(size_t)i] = R[(size_t)i] = (float)v;
+                }
+                tr.pushBlock(L.data(), R.data(), blk);
+                tNow += blk / sr;
+            }
+        };
+        {   // Accents on song beat 1 (4/4): a phase IS proven, and —
+            // the part that matters — the beats the DRAW path would
+            // emphasise (collectRecentBeats counts == downbeatCount)
+            // are exactly the accented song beats. The count NUMBER
+            // itself is frame-relative and not asserted.
+            BeatTracker tr; accentRun(4, 1, 30.0, tr);
+            std::printf("v0.28.1 phase accents-on-1: downbeatCount=%d margin=%.3f\n", tr.downbeatCount(), (double)tr.phaseMargin());
+            CHECK(tr.downbeatCount() > 0);
+            CHECK(tr.phaseMargin() >= 0.15f);
+            float ages[64]; int counts[64];
+            const int nb = tr.collectRecentBeats(12.f, ages, counts, 64);
+            CHECK(nb >= 12);
+            const double now = tr.nowSec();
+            int emphasised = 0, emphasisedOnAccent = 0;
+            for (int i = 0; i < nb; ++i) {
+                if (counts[i] != tr.downbeatCount()) continue;
+                ++emphasised;
+                const double beatT = now - ages[i];
+                const long beatIdx = std::lround((beatT - 0.35) / 0.6);
+                if ((int)(beatIdx % 4) + 1 == 1) ++emphasisedOnAccent;
+            }
+            std::printf("v0.28.1 phase draw consistency: %d emphasised beats, %d on the accented song beat\n", emphasised, emphasisedOnAccent);
+            CHECK(emphasised >= 2);
+            CHECK(emphasisedOnAccent == emphasised);
+        }
+        {   // Uniform kicks: NO phase may be proven (the v0.26.1 rule
+            // survives as the tracker's silence when it has no evidence).
+            BeatTracker tr; accentRun(4, 0, 30.0, tr);
+            std::printf("v0.28.1 phase uniform: downbeatCount=%d margin=%.3f (must stay unproven)\n", tr.downbeatCount(), (double)tr.phaseMargin());
+            CHECK(tr.downbeatCount() == 0);
+        }
+        {   // 3/4 with accents on 1: proven in the 3-count frame.
+            BeatTracker tr; accentRun(3, 1, 30.0, tr);
+            std::printf("v0.28.1 phase 3/4 accents-on-1: downbeatCount=%d margin=%.3f\n", tr.downbeatCount(), (double)tr.phaseMargin());
+            CHECK(tr.downbeatCount() > 0);
+        }
+        // --- Stereo colour enum: stored ints must never renumber ---
+        CHECK((int)StereoColor::Single == 0 && (int)StereoColor::Rgb == 1 && (int)StereoColor::MultiBand == 2);
+        CHECK((int)StereoColor::Rainbow == 3 && (int)StereoColor::Sunset == 4 && (int)StereoColor::Ice == 5);
+        // --- Undertow composite arithmetic (the v0.28.1 visibility
+        // fix, model side): a loud frame's model alphas, multiplied
+        // by the NEW crisp opacity (0.85, no scrim), must clear a
+        // conservative visibility floor; multiplied by the OLD
+        // stack (0.30 crisp x 0.82 scrim) the same frame sat under
+        // it — the arithmetic half of the invisibility diagnosis.
+        // (The renderer constants themselves are app-side and ride
+        // the Windows build; the on-screen result is Jackson's to
+        // grade — see the round receipt's NOT VERIFIED section.)
+        {
+            FiveBandLevels lv; for (int b = 0; b < 5; ++b) lv.band[b] = 0.8f;
+            UndertowModel m; UndertowOnsetFeed none;
+            for (int i = 0; i < 240; ++i) {
+                UndertowBeatFeed bf; bf.locked = true; bf.confidence = 0.9f; bf.bpm = 100.f;
+                bf.secondsToNextBeat = 0.3f; bf.nextIsDownbeat = (i % 60) == 0;
+                bf.countInBar = (i % 4) + 1; bf.beatsPerBar = 4;
+                bf.trackerNowSec = i / 60.0; bf.lastGridBeatSec = i / 60.0;
+                m.update(1.f / 60.f, lv, -8.f, bf, none);
+            }
+            const float memA = m.membraneFillAlpha() * 0.55f * m.displayGain();
+            std::printf("v0.28.1 visibility arithmetic: membrane alpha %.3f -> effective %.3f (new) vs %.3f (old stack)\n",
+                        (double)memA, (double)(memA * 0.85f), (double)(memA * 0.30f * 0.82f));
+            CHECK(memA * 0.85f >= 0.10f);        // new stack: visible over the black base
+            CHECK(memA * 0.30f * 0.82f < 0.10f); // old stack: under the floor — the bug, in numbers
         }
     }
 

@@ -63,7 +63,10 @@ private: int bins_=0, rows_=256, head_=0; float acc_=0; std::vector<float> data_
 };
 // ---------- Stereometer ----------
 enum class StereoMode { ScaledUnipolar, ScaledBipolar, LinearUnipolar, LinearBipolar, Lissajous };
-enum class StereoColor { Single, Rgb, MultiBand };
+enum class StereoColor { Single, Rgb, MultiBand, Rainbow, Sunset, Ice };
+// v0.28.1: Rainbow / Sunset / Ice appended — the values are stored
+// as ints in preset files, so existing entries must never renumber
+// (Single=0, Rgb=1, MultiBand=2 are on disk in user presets).
 inline const char* stereoModeName(StereoMode m){ switch(m){case StereoMode::ScaledUnipolar:return "Scaled - Unipolar";
  case StereoMode::ScaledBipolar:return "Scaled - Bipolar";case StereoMode::LinearUnipolar:return "Linear - Unipolar";
  case StereoMode::LinearBipolar:return "Linear - Bipolar";default:return "Lissajous";} }

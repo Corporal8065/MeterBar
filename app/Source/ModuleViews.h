@@ -32,6 +32,15 @@ struct AnalysisData {
     float beatPulseEnv = 0; // tracker envelope on ANY grid beat (scope dot)
     float beatPhase = 0;    // v0.27.0 (item 13): position inside the current grid pulse, 0..1 (0 = on the beat) — the scope's phase marker locks to this
     std::vector<float> beatAges;
+    // v0.28.1: the counts cross into the frame again — but ONLY as
+    // emphasis support for the core's evidence-proven downbeat
+    // (BeatTracker::downbeatCount). beatDownbeat is 0 whenever the
+    // accent evidence has not proven a phase, and in that case the
+    // overlays draw every beat alike, exactly as v0.26.1 ruled.
+    // When it is non-zero, beats whose count matches get the
+    // emphasised marker; counts are NEVER drawn as numbers.
+    std::vector<int> beatCounts;
+    int beatDownbeat = 0;
     float waveSecPerColumn = 0;              // waveform overlay timebase (seconds per history column)
     float sgSecPerRow = 0;                   // spectrogram overlay timebase (seconds per history row)
     std::vector<float> scopeBuf; float scopeFreq = 0;
@@ -74,6 +83,7 @@ public:
     }
     void mouseExit(const juce::MouseEvent&) override { hoverFreq_ = -1; repaint(); }
     double hoverFreq_ = -1; juce::Point<float> hoverPos_;
+    double stereoHueRot_ = 0; // v0.28.1: Rainbow stereometer hue rotation, advanced per draw
     // The chip's rect inside a plot area — shared by the waveform's
     // paint and its click test so the two can never drift apart.
     static juce::Rectangle<float> sigChipRect(juce::Rectangle<float> plot) {
@@ -422,9 +432,15 @@ private:
                 const float frac = rowsAgo / (float)sg->rows();
                 // v0.26.1: every beat the same line — no beat is
                 // singled out as beat 1 (see FrameData note).
-                g.setColour(data->theme.dim.withAlpha(0.45f * confA));
-                if (vert) { const float y = p.getY() + frac * p.getHeight(); g.drawLine(p.getX(), y, p.getRight(), y, 1.0f); }
-                else { const float x = p.getX() + frac * p.getWidth(); g.drawLine(x, p.getY(), x, p.getBottom(), 1.0f); }
+                // v0.28.1: unless the core's accent evidence has
+                // PROVEN the phase (beatDownbeat > 0) — then the
+                // proven downbeat's line is brighter and thicker,
+                // the same emphasis as the waveform's.
+                const bool isDb = data->beatDownbeat > 0 && i < data->beatCounts.size()
+                                  && data->beatCounts[i] == data->beatDownbeat;
+                g.setColour(data->theme.dim.withAlpha((isDb ? 0.85f : 0.45f) * confA));
+                if (vert) { const float y = p.getY() + frac * p.getHeight(); g.drawLine(p.getX(), y, p.getRight(), y, isDb ? 1.8f : 1.0f); }
+                else { const float x = p.getX() + frac * p.getWidth(); g.drawLine(x, p.getY(), x, p.getBottom(), isDb ? 1.8f : 1.0f); }
             }
         }
     }
@@ -463,13 +479,25 @@ private:
         if (data->beatLocked && data->waveSecPerColumn > 0.f && !data->beatAges.empty()) {
             const float cols = (float)n;
             const float confA = 0.30f + 0.70f * juce::jlimit(0.f, 1.f, data->beatConfidence);
-            g.setColour(th.accent.withAlpha(0.55f * confA));
             const float top = p.getY() + p.getHeight() * 0.12f;
             for (size_t i = 0; i < data->beatAges.size(); ++i) {
                 const float colsAgo = data->beatAges[i] / data->waveSecPerColumn;
                 if (colsAgo > cols) break; // ages ascend — the rest are off-screen
                 const float x = p.getRight() - (colsAgo / cols) * p.getWidth();
-                g.drawLine(x, top, x, p.getBottom(), 1.1f);
+                // v0.28.1: a PROVEN downbeat (core accent evidence,
+                // AnalysisData::beatDownbeat) draws taller, brighter
+                // and thicker; every other beat keeps the v0.26.1
+                // uniform tick. Unproven phase (beatDownbeat == 0)
+                // changes nothing at all.
+                const bool isDb = data->beatDownbeat > 0 && i < data->beatCounts.size()
+                                  && data->beatCounts[i] == data->beatDownbeat;
+                if (isDb) {
+                    g.setColour(th.accent.withAlpha(0.95f * confA));
+                    g.drawLine(x, p.getY() + 2.f, x, p.getBottom(), 2.2f);
+                } else {
+                    g.setColour(th.accent.withAlpha(0.55f * confA));
+                    g.drawLine(x, top, x, p.getBottom(), 1.1f);
+                }
             }
         }
         // v0.26.0: the time-signature chip, bottom-right — shows
@@ -579,6 +607,24 @@ private:
         float ps = st.stereoPointAuto ? 1.5f : juce::jlimit(1.f, 20.f, st.stereoPointSize);
         size_t n = std::min(f.xs.size(), f.ys.size());
         auto lowC = paletteGrad(0.1f), midC = paletteGrad(0.55f), highC = paletteGrad(0.95f);
+        // v0.28.1: colour modes beyond the purple Single (Jackson's
+        // ask). Rainbow is the dynamic one — hue cycles by point
+        // order and the whole wheel slowly rotates per draw.
+        // Sunset / Ice are fixed ramps across the point order
+        // (oldest -> newest). Values appended to the core enum so
+        // stored presets keep their meaning.
+        stereoHueRot_ += 0.004; if (stereoHueRot_ >= 1.0) stereoHueRot_ -= 1.0;
+        auto ramp = [](const juce::Colour* stops, int nStops, float t) {
+            t = juce::jlimit(0.f, 1.f, t) * (float)(nStops - 1);
+            const int k = std::min(nStops - 2, (int)t);
+            return stops[k].interpolatedWith(stops[k + 1], t - (float)k);
+        };
+        static const juce::Colour sunsetStops[] = {
+            juce::Colour(0xff3b1d5e), juce::Colour(0xffb52a6e), juce::Colour(0xfff0563a),
+            juce::Colour(0xfff59e42), juce::Colour(0xfff7d774) };
+        static const juce::Colour iceStops[] = {
+            juce::Colour(0xff123a6e), juce::Colour(0xff1d7fb8), juce::Colour(0xff39c2d7),
+            juce::Colour(0xffa8e6f0), juce::Colour(0xffffffff) };
         for (size_t i = 0; i < n; ++i) {
             auto pt = meterbar::StereometerEngine::lissajousPoint(f.ys[i], f.xs[i]); // {x = R, y = L}
             float x = sq.getCentreX() + juce::jlimit(-1.f, 1.f, pt.first) * sq.getWidth() * 0.5f;
@@ -586,6 +632,12 @@ private:
             juce::Colour c = th.moduleAccent((int)Kind::Stereometer);
             if (st.stereoColor == meterbar::StereoColor::Rgb) c = (i % 3 == 0 ? juce::Colours::red : i % 3 == 1 ? juce::Colours::limegreen : juce::Colours::blue);
             else if (st.stereoColor == meterbar::StereoColor::MultiBand) c = (i < n / 3 ? lowC : i < 2 * n / 3 ? midC : highC);
+            else if (st.stereoColor == meterbar::StereoColor::Rainbow)
+                c = juce::Colour::fromHSV((float)std::fmod((double)i * 0.013 + stereoHueRot_, 1.0), 0.85f, 1.0f, 1.0f);
+            else if (st.stereoColor == meterbar::StereoColor::Sunset)
+                c = ramp(sunsetStops, 5, n > 1 ? (float)i / (float)(n - 1) : 0.f);
+            else if (st.stereoColor == meterbar::StereoColor::Ice)
+                c = ramp(iceStops, 5, n > 1 ? (float)i / (float)(n - 1) : 0.f);
             g.setColour(c.withAlpha(0.7f)); g.fillRect(x, y, ps, ps);
         }
         g.setFont(9.f);

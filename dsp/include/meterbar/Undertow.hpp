@@ -166,8 +166,14 @@ private:
             // clear the ratio bar easily.
             double ms;
             if (msAvg_[b] <= 0 && msRaw > 0) msAvg_[b] = msRaw; // cold start, like the baseline seed
-            else msAvg_[b] += (msRaw - msAvg_[b]) * 0.25;
+            else msAvg_[b] += (msRaw - msAvg_[b]) * 0.45;
             ms = msAvg_[b];
+            // v0.28.1: the trailing integral above shortens from
+            // 0.25 (~21 ms) to 0.45 (~12 ms). Scored probes (known
+            // kick placements) found TP/FP counts identical at
+            // 0.25 / 0.45 / 1.0 on the synthetic set, so the lag
+            // halves while some phase smoothing — the reason the
+            // integral exists — is kept.
             sinceOnset_[b] += blockSec;
             // The decaying peak updates BEFORE the fire test, with
             // the current block included (BeatTracker's rule: a
@@ -180,7 +186,39 @@ private:
                                  && prevMs_[b] > 0 && ms > prevMs_[b] * kFluxPrev;
             // Peak gate on sub and low only (45% of the 8 s decaying
             // peak, power vs power — BeatTracker's form).
-            const bool gated = (b <= 1) && ms < peak_[b] * 0.45;
+            // v0.28.1: the SUB band's gate peak adapts (see the
+            // candidate classification below) — scored probe F4
+            // showed the flat gate losing 24 of 47 kicks on
+            // verse/chorus material, because a quiet verse can never
+            // reach 45% of the chorus's peak.
+            if (b == 0 && adaptValid0_)
+                peakAdapt0_ += (peak_[0] - peakAdapt0_) * (1.0 - std::exp(-blockSec / 20.0));
+            const double gatePeak = (b == 0 && adaptValid0_) ? std::min(peak_[0], peakAdapt0_) : peak_[b];
+            const bool gated = (b <= 1) && ms < gatePeak * 0.45;
+            // Shadow candidate (sub only): a transient clearing a
+            // STRONGER flux bar (x3.2 vs the x2.2 fire bar) but
+            // stopped by the peak gate is remembered, not fired.
+            // 250 ms later it is classified: a kick is a burst, so
+            // the band statistic must have fallen under 40% of the
+            // candidate value; a kick-like candidate lowers the
+            // adaptive peak to its own level (+ headroom), and the
+            // NEXT verse kick passes the real gate. Sustained bass
+            // fails the burst test and never lowers anything.
+            if (b == 0) {
+                if (pendCand0_ && now - pendCandT0_ >= 0.25) {
+                    pendCand0_ = false;
+                    if (ms < pendCandMs0_ * 0.40) {
+                        const double cand = pendCandMs0_ * 2.55;
+                        if (!adaptValid0_ || cand < peakAdapt0_) peakAdapt0_ = cand;
+                        adaptValid0_ = true;
+                    }
+                }
+                if (!pendCand0_ && gated && elapsed_ > 0.6 && ms > kFloor[0]
+                    && baseline_[0] > 1e-12 && ms > baseline_[0] * 3.2
+                    && sinceOnset_[0] > kRefractory[0]) {
+                    pendCand0_ = true; pendCandT0_ = now; pendCandMs0_ = ms;
+                }
+            }
             if (elapsed_ > 0.6 && ms > kFloor[b] && (ratioHit || fluxHit) && !gated
                 && sinceOnset_[b] > kRefractory[b]) {
                 double strength = std::clamp((ms / baseline_[b] - ratioThresh) / 5.0 + 0.45, 0.0, 1.0);
@@ -205,6 +243,9 @@ private:
     double lastOnsetSec_[kBands] = {};
     uint64_t count_[kBands] = {};
     float thresholdScale_[kBands] = { 1.f, 1.f, 1.f, 1.f, 1.f };
+    // v0.28.1: sub-band adaptive gate peak + shadow candidate state
+    double peakAdapt0_ = 0; bool adaptValid0_ = false;
+    double pendCandT0_ = 0, pendCandMs0_ = 0; bool pendCand0_ = false;
     int fill_ = 0;
     double elapsed_ = 0;
     uint64_t samples_ = 0;
