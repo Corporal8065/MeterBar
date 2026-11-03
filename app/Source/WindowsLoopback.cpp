@@ -40,7 +40,52 @@
  #include <functiondiscoverykeys_devpkey.h>
  #include <ksmedia.h>
  #include <cstdio>
- // Completion handler for ActivateAudioInterfaceAsync, structured
+ // =====================================================================
+// FIX ROUND 2 DIAGNOSTIC INSTRUMENTATION (compile-time switch
+// METERBAR_FIXROUND2_DIAG, set by the root CMake option of the same
+// name; default OFF). Release builds compile every MB_DIAG block out
+// and are behaviour-identical to shipped v0.28.3. A diagnostic build
+// writes extra lines to the EXISTING capture log
+// (Documents\MeterBar\capture-log.txt, via Impl::appendCaptureLog) so
+// field evidence stays "send one file": capture-session counter,
+// per-app select sequence, capture thread ids at session start/end,
+// the CoCreateFreeThreadedMarshaler HRESULT (round-2 candidate 4),
+// and heap canaries bracketing the activation params blob and the
+// handler's result storage (candidates 1/2/3 — see PARAMS_AUDIT.md).
+// Nothing runs in the packet loop. The ONE activation-path change:
+// in a diagnostic build the params blob lives in a heap guard block
+// instead of on the stack, because a canary needs an owned
+// allocation to watch; the activation calls and their timing are
+// unchanged.
+#if defined(METERBAR_FIXROUND2_DIAG) && METERBAR_FIXROUND2_DIAG
+#define MB_DIAG 1
+#else
+#define MB_DIAG 0
+#endif
+#if MB_DIAG
+namespace diag {
+inline std::atomic<unsigned long> g_sessions{ 0 };  // per-app capture sessions begun
+inline std::atomic<unsigned long> g_selects{ 0 };   // per-app selects this run
+inline std::atomic<bool> g_markerWritten{ false };  // DIAGNOSTIC marker: once per process
+inline constexpr unsigned long kCanaryPre  = 0xD1A60001ul;
+inline constexpr unsigned long kCanaryPost = 0xD1A60002ul;
+struct ParamsGuard {
+    volatile unsigned long pre = kCanaryPre;
+    AUDIOCLIENT_ACTIVATION_PARAMS params{};
+    volatile unsigned long post = kCanaryPost;
+};
+inline bool paramsIntact(const ParamsGuard* g) {
+    return g != nullptr && g->pre == kCanaryPre && g->post == kCanaryPost;
+}
+// The latest session's guard block is DELIBERATELY LEAKED (never
+// deleted): a late write from a previous activation then lands in
+// memory this process still owns, and the NEXT select detects it
+// via the canaries instead of corrupting a live allocation.
+inline std::atomic<ParamsGuard*> g_lastParamsGuard{ nullptr };
+inline const char* intactWord(bool ok) { return ok ? "INTACT" : "*** BROKEN ***"; }
+} // namespace diag
+#endif
+// Completion handler for ActivateAudioInterfaceAsync, structured
  // after Microsoft's ApplicationLoopback sample. It answers the
  // IAgileObject IID in QueryInterface (the activation API requires
  // an agile handler) without inheriting a declared IAgileObject
@@ -74,7 +119,16 @@
  namespace {
  class ActivateHandler final : public IActivateAudioInterfaceCompletionHandler {
  public:
-     HANDLE done = nullptr; HRESULT result = E_FAIL; IUnknown* device = nullptr;
+ #if MB_DIAG
+    volatile unsigned long resultGuardPre_ = diag::kCanaryPre; // diag: canary before result storage
+#endif
+    HANDLE done = nullptr; HRESULT result = E_FAIL; IUnknown* device = nullptr;
+#if MB_DIAG
+    volatile unsigned long resultGuardPost_ = diag::kCanaryPost; // diag: canary after result storage
+    HRESULT ftmHr_ = E_UNEXPECTED; // diag: CoCreateFreeThreadedMarshaler result (candidate 4)
+    std::atomic<int> resultGuardAtCompletion_{ -1 }; // diag: -1 unchecked, 1 intact, 0 broken
+    bool resultGuardsIntact() const { return resultGuardPre_ == diag::kCanaryPre && resultGuardPost_ == diag::kCanaryPost; }
+#endif
      ActivateHandler() {
          done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
          // v0.28.3 (Store-Spotify crash round; see DUMP_ANALYSIS in
@@ -97,7 +151,11 @@
          // FTM makes the claim true. Best-effort: if FTM creation
          // fails we proceed without it (QI for IMarshal then fails
          // politely and COM marshals us the slow, safe way).
-         CoCreateFreeThreadedMarshaler(static_cast<IUnknown*>(static_cast<IActivateAudioInterfaceCompletionHandler*>(this)), &ftm_);
+ #if MB_DIAG
+        ftmHr_ = CoCreateFreeThreadedMarshaler(static_cast<IUnknown*>(static_cast<IActivateAudioInterfaceCompletionHandler*>(this)), &ftm_);
+#else
+        CoCreateFreeThreadedMarshaler(static_cast<IUnknown*>(static_cast<IActivateAudioInterfaceCompletionHandler*>(this)), &ftm_);
+#endif
      }
      ~ActivateHandler() { if (done) CloseHandle(done); if (device) device->Release(); if (ftm_) ftm_->Release(); }
      STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
@@ -120,6 +178,9 @@
          // completion wins; later ones are acknowledged and ignored.
          if (completed_.exchange(true)) return S_OK;
          if (op) op->GetActivateResult(&result, &device);
+#if MB_DIAG
+         resultGuardAtCompletion_.store(resultGuardsIntact() ? 1 : 0);
+#endif
          if (done) SetEvent(done);
          Release(); // the RESERVED reference (see contract above) —
                     // last member access in this callback; the
@@ -147,6 +208,9 @@
  } // namespace
  struct WindowsLoopback::Impl {
      meterbar::BoundedThread th; std::atomic<bool> run{false}; std::atomic<double> sr{48000}; Callback cb;
+#if MB_DIAG
+    std::atomic<DWORD> diagSpawnerTid_{ 0 }; // diag: thread that called startProcessLoopback
+#endif
      std::string wantName; // v0.9: capture THIS output device (empty = default)
      std::string wantId;   // v0.13: capture THIS endpoint ID (wins over the name when set)
      std::string wantExe;  // v0.27.0 (item 8): capture THIS application's process tree only (processMode)
@@ -549,6 +613,37 @@
      //    in AudioEngine::pushStereo (serialised producers).
      void loopProcessGuarded() {
          CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#if MB_DIAG
+         const unsigned long diagSession = ++diag::g_sessions;
+         const unsigned long diagSelect = ++diag::g_selects;
+         if (!diag::g_markerWritten.exchange(true))
+             appendCaptureLog("DIAGNOSTIC BUILD 0.28.3-diag1 \u2014 fix-round-2 instrumentation, NOT a release build");
+         { char db[256]; std::snprintf(db, sizeof db,
+             "DIAG session %lu begin: per-app select #%lu this run, capture thread %lu, spawned from thread %lu",
+             diagSession, diagSelect, (unsigned long)GetCurrentThreadId(),
+             (unsigned long)diagSpawnerTid_.load());
+           appendCaptureLog(db); }
+         if (auto* prevGuard = diag::g_lastParamsGuard.load()) {
+             char db[192]; std::snprintf(db, sizeof db,
+                 "DIAG session %lu: previous session params canary %s (checked at next select)",
+                 diagSession, diag::intactWord(diag::paramsIntact(prevGuard)));
+             appendCaptureLog(db);
+         }
+         // Session-end line on EVERY exit path below. If session N's
+         // end line appears AFTER session N+1's begin line, a leaked
+         // previous capture thread overlapped the new session —
+         // the candidate-1 overlap proof.
+         struct DiagSessionEnd {
+             Impl* self; unsigned long session; const diag::ParamsGuard* guard = nullptr;
+             ~DiagSessionEnd() {
+                 char db[224]; std::snprintf(db, sizeof db,
+                     "DIAG session %lu end: capture thread %lu, params canary %s",
+                     session, (unsigned long)GetCurrentThreadId(),
+                     guard ? diag::intactWord(diag::paramsIntact(guard)) : "n/a (no activation attempted)");
+                 self->appendCaptureLog(db);
+             }
+         } diagEnd{ this, diagSession };
+#endif
          const std::string label = wantLabel.empty() ? exeLabel(wantExe) : wantLabel;
          if (!processLoopbackSupported()) {
              setStatus(label + " — per-app capture needs Windows 11");
@@ -584,7 +679,19 @@
                  appendCaptureLog(label + " — target is a packaged (Microsoft Store) app: " + narrow(std::wstring(fam, famLen > 0 ? famLen - 1 : 0)));
              CloseHandle(hp);
          }
+#if MB_DIAG
+         // Diagnostic build ONLY: the params blob lives in a heap
+         // guard block bracketed by canaries (the release build
+         // keeps the canonical stack construction — PARAMS_AUDIT
+         // B-9/B-10). The guard is published to g_lastParamsGuard
+         // and deliberately leaked at session end (see the diag
+         // namespace note) so the next select can re-check it.
+         auto* paramsGuard = new diag::ParamsGuard();
+         diagEnd.guard = paramsGuard;
+         AUDIOCLIENT_ACTIVATION_PARAMS& params = paramsGuard->params;
+#else
          AUDIOCLIENT_ACTIVATION_PARAMS params = {};
+#endif
          params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
          params.ProcessLoopbackParams.TargetProcessId = pid;
          params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
@@ -592,7 +699,17 @@
          prop.vt = VT_BLOB;
          prop.blob.cbSize = sizeof(params);
          prop.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
+#if MB_DIAG
+         diag::g_lastParamsGuard.store(paramsGuard);
+#endif
          auto* handler = new ActivateHandler();
+#if MB_DIAG
+         { char db[192]; std::snprintf(db, sizeof db,
+             "DIAG session %lu: CoCreateFreeThreadedMarshaler hr=0x%08lx (%s)",
+             diagSession, (unsigned long)handler->ftmHr_,
+             SUCCEEDED(handler->ftmHr_) ? "FTM engaged" : "FTM FAILED \u2014 handler unbacked");
+           appendCaptureLog(db); }
+#endif
          handler->AddRef(); // the RESERVED reference (contract above):
                             // released by ActivateCompleted itself,
                             // or by us if the call below fails.
@@ -600,6 +717,12 @@
          HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                                                   __uuidof(IAudioClient), &prop, handler, &op);
          PropVariantClear(&prop);
+#if MB_DIAG
+         { char db[192]; std::snprintf(db, sizeof db,
+             "DIAG session %lu: params canary after ActivateAudioInterfaceAsync + PropVariantClear: %s",
+             diagSession, diag::intactWord(diag::paramsIntact(paramsGuard)));
+           appendCaptureLog(db); }
+#endif
          if (FAILED(hr) || !op) {
              setStatus(hrText("ActivateAudioInterfaceAsync", hr));
              handler->Release(); // reserved (the callback never fires)
@@ -617,6 +740,12 @@
              // balances any late-arriving device. Deliberate leak
              // rather than use-after-free.
              setStatus(label + " — activation timed out");
+#if MB_DIAG
+             { char db[224]; std::snprintf(db, sizeof db,
+                 "DIAG session %lu: activation TIMEOUT (5 s) \u2014 handler abandoned per leak contract; params canary %s",
+                 diagSession, diag::intactWord(diag::paramsIntact(paramsGuard)));
+               appendCaptureLog(db); }
+#endif
              handler->Release(); // creator reference only
              CoUninitialize(); return;
          }
@@ -624,6 +753,16 @@
          // final. (The callback's reserved Release may land before
          // or after our reads — the creator reference keeps the
          // object alive until we release it below.)
+#if MB_DIAG
+         { char db[288]; const int gc = handler->resultGuardAtCompletion_.load();
+           std::snprintf(db, sizeof db,
+             "DIAG session %lu: activation completed \u2014 result canary in callback %s, result canary at waiter %s, params canary %s",
+             diagSession,
+             gc < 0 ? "unchecked" : diag::intactWord(gc == 1),
+             diag::intactWord(handler->resultGuardsIntact()),
+             diag::intactWord(diag::paramsIntact(paramsGuard)));
+           appendCaptureLog(db); }
+#endif
          IAudioClient* client = nullptr;
          if (SUCCEEDED(handler->result) && handler->device)
              handler->device->QueryInterface(__uuidof(IAudioClient), (void**)&client);
@@ -733,6 +872,9 @@
      Impl* im = impl_;
      im->th.start([im]{ im->loop(); }); return true; }
  bool WindowsLoopback::startProcessLoopback(Callback cb, const std::string& exeNameUtf8, const std::string& labelUtf8) { stop(); impl_ = new Impl(); impl_->cb = std::move(cb); impl_->wantExe = exeNameUtf8; impl_->wantLabel = labelUtf8; impl_->processMode = true; impl_->run = true;
+#if MB_DIAG
+    impl_->diagSpawnerTid_.store(GetCurrentThreadId());
+#endif
      Impl* im = impl_;
      im->th.start([im]{ im->loopEntry(); }); return true; }
  bool WindowsLoopback::isProcessRunning(const std::string& exeNameUtf8) {

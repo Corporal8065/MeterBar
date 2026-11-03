@@ -8,6 +8,20 @@ cmake_minimum_required(VERSION 3.22)
 # they were guaranteed to drift; do not add a seventh. Bump it here,
 # only here.
 project(MeterBar VERSION 0.28.3 LANGUAGES C CXX)
+# FIX ROUND 2 (2026-11-03) — DIAGNOSTIC BUILD SWITCH. Default OFF:
+# a build without this option is byte-for-byte the shipped v0.28.3
+# configuration. ON: the version STRING gains the "-diag1" suffix
+# (project VERSION stays numeric 0.28.3 — the CI version gate
+# requires X.Y.Z) and the METERBAR_FIXROUND2_DIAG compile definition
+# enables the capture-log instrumentation in WindowsLoopback.cpp
+# (session/select counters, thread ids, FTM HRESULT, heap canaries).
+# Diagnostic builds are evidence-gathering tools, never releases.
+option(METERBAR_FIXROUND2_DIAG "Fix-round-2 diagnostic instrumentation build" OFF)
+set(METERBAR_VERSION_SUFFIX "")
+if(METERBAR_FIXROUND2_DIAG)
+  set(METERBAR_VERSION_SUFFIX "-diag1")
+  add_compile_definitions(METERBAR_FIXROUND2_DIAG=1)
+endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/app/MeterBarVersion.h.in
                ${CMAKE_BINARY_DIR}/generated/MeterBarVersion.h)
 # v0.15 distribution: link the MSVC runtime STATICALLY (/MT release,

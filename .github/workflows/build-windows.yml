@@ -44,7 +44,9 @@ jobs:
           }
 
       - name: Configure (JUCE is fetched by CMake — no git needed for it)
-        run: cmake -S . -B build-app -DMETERBAR_BUILD_APP=ON -A x64
+        # DIAG BRANCH ONLY (diag/fix-round-2): enable the fix-round-2
+        # diagnostic instrumentation. This line must NEVER reach main.
+        run: cmake -S . -B build-app -DMETERBAR_BUILD_APP=ON -DMETERBAR_FIXROUND2_DIAG=ON -A x64
 
       - name: Build Release
         run: cmake --build build-app --config Release
