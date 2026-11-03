@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <set>
 #include <meterbar/BoundedThread.hpp> // v0.20.2: bounded capture-thread stop (freeze fix)
 // v0.14 ROOT-CAUSE FIX — read this before ever touching the guard again.
 // This translation unit deliberately includes NO JUCE header (std-only),
@@ -115,24 +116,133 @@
      std::string wantName; // v0.9: capture THIS output device (empty = default)
      std::string wantId;   // v0.13: capture THIS endpoint ID (wins over the name when set)
      std::string wantExe;  // v0.27.0 (item 8): capture THIS application's process tree only (processMode)
+     std::string wantLabel; // v0.27.2: display label override (e.g. "Spotify (Spicetify)"); empty = derive from wantExe
      bool processMode = false;
-     // v0.27.0 (item 8): PID of a running process by executable name
-     // (case-insensitive), 0 when absent. Toolhelp snapshot — the
-     // documented way to enumerate processes by image name.
-     static DWORD findProcessId(const std::wstring& exeLower) {
+     // ---- v0.27.2: persistent capture log --------------------------
+     // The v0.27.1 field crash (2026-11-02) produced a WER dump whose
+     // delivered copy was truncated — every thread stack sat beyond
+     // EOF — so the failure left almost no evidence. This log is the
+     // durable substitute: the last ~50 timestamped capture
+     // status/stage lines, written next to the app's settings
+     // (Documents\MeterBar\capture-log.txt, the folder above
+     // Presets). Appended on status transitions only — never in the
+     // packet loop — so the file IO cost is a few writes per source
+     // switch. Best-effort throughout: any failure is silent.
+     static std::wstring captureLogPathW() {
+         wchar_t home[MAX_PATH] = {};
+         const DWORD n = GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+         if (n == 0 || n >= MAX_PATH) return {};
+         return std::wstring(home, n) + L"\\Documents\\MeterBar\\capture-log.txt";
+     }
+     static std::string captureLogPathStr() { return narrow(captureLogPathW()); }
+     static void appendCaptureLog(const std::string& line) {
+         static std::mutex logLock;
+         std::lock_guard<std::mutex> g(logLock);
+         const std::wstring wpath = captureLogPathW();
+         if (wpath.empty()) return;
+         CreateDirectoryW(wpath.substr(0, wpath.find_last_of(L'\\')).c_str(), nullptr); // no-op when it exists
+         SYSTEMTIME st; GetLocalTime(&st);
+         char ts[32];
+         std::snprintf(ts, sizeof ts, "%04d-%02d-%02d %02d:%02d:%02d ",
+                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+         std::string all;
+         if (FILE* f = _wfopen(wpath.c_str(), L"rb")) {
+             char chunk[4096]; size_t r;
+             while ((r = std::fread(chunk, 1, sizeof chunk, f)) > 0) all.append(chunk, r);
+             std::fclose(f);
+         }
+         std::vector<std::string> lines;
+         for (size_t pos = 0; pos < all.size();) {
+             const size_t nl = all.find('\n', pos);
+             std::string one = all.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+             if (!one.empty() && one.back() == '\r') one.pop_back();
+             if (!one.empty()) lines.push_back(one);
+             if (nl == std::string::npos) break;
+             pos = nl + 1;
+         }
+         lines.push_back(std::string(ts) + line);
+         while (lines.size() > 50) lines.erase(lines.begin());
+         if (FILE* f = _wfopen(wpath.c_str(), L"wb")) {
+             for (auto& l : lines) { std::fwrite(l.data(), 1, l.size(), f); std::fputc('\n', f); }
+             std::fclose(f);
+         }
+     }
+     // ---- v0.27.2: per-app process resolution ----------------------
+     // v0.27.0/v0.27.1 activated against the FIRST process in the
+     // Toolhelp snapshot with a matching exe name. Under Spicetify
+     // (and Chromium-style app layouts generally) the app runs as a
+     // FAMILY of same-named processes — bootstrap, GPU, storage,
+     // renderer, audio service — and the first snapshot entry can
+     // be a transient child whose process tree does NOT contain
+     // the audio-rendering processes, or which exits mid-
+     // activation; the 2026-11-02 field crash was a heap
+     // corruption (0xC0000374) detected on this path. The resolver
+     // enumerates ALL matches with full paths + parent PIDs,
+     // prefers the candidate group's TREE ROOT (the audio tree
+     // hangs off it — INCLUDE_TARGET_PROCESS_TREE from the root
+     // covers every renderer), tie-breaks by owning a visible
+     // top-level window, and reports the candidate set + choice
+     // for the capture log.
+     struct ProcInfo { DWORD pid = 0; DWORD parentPid = 0; std::wstring path; };
+     static std::vector<ProcInfo> enumerateProcesses(const std::wstring& exeLower) {
+         std::vector<ProcInfo> out;
          HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-         if (snap == INVALID_HANDLE_VALUE) return 0;
+         if (snap == INVALID_HANDLE_VALUE) return out;
          PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
-         DWORD pid = 0;
          if (Process32FirstW(snap, &pe)) {
              do {
-                 std::wstring name = pe.szExeFile;
-                 for (auto& c : name) c = towlower(c);
-                 if (name == exeLower) { pid = pe.th32ProcessID; break; }
+                 if (lower(std::wstring(pe.szExeFile)) != exeLower) continue;
+                 ProcInfo info; info.pid = pe.th32ProcessID; info.parentPid = pe.th32ParentProcessID;
+                 if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, info.pid)) {
+                     wchar_t buf[1024]; DWORD n = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+                     if (QueryFullProcessImageNameW(h, 0, buf, &n)) info.path.assign(buf, n);
+                     CloseHandle(h);
+                 }
+                 out.push_back(info);
              } while (Process32NextW(snap, &pe));
          }
          CloseHandle(snap);
-         return pid;
+         return out;
+     }
+     static BOOL CALLBACK collectWindowPid(HWND hwnd, LPARAM lp) {
+         auto* pids = reinterpret_cast<std::set<DWORD>*>(lp);
+         if (!IsWindowVisible(hwnd)) return TRUE;
+         if (GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
+         DWORD pid = 0; GetWindowThreadProcessId(hwnd, &pid);
+         if (pid) pids->insert(pid);
+         return TRUE;
+     }
+     // Returns the chosen process (pid 0 when none) and fills
+     // `describe` with a one-line account of the candidate set and
+     // the choice, for the capture log.
+     static ProcInfo resolveTargetProcess(const std::wstring& exeLower, std::string& describe) {
+         const auto cands = enumerateProcesses(exeLower);
+         if (cands.empty()) { describe = "no matching process"; return {}; }
+         std::set<DWORD> candPids;
+         for (auto& c : cands) candPids.insert(c.pid);
+         std::vector<ProcInfo> roots;
+         for (auto& c : cands) if (!candPids.count(c.parentPid)) roots.push_back(c);
+         const auto& pool = roots.empty() ? cands : roots;
+         std::set<DWORD> windowPids;
+         EnumWindows(collectWindowPid, reinterpret_cast<LPARAM>(&windowPids));
+         const ProcInfo* chosen = nullptr;
+         for (auto& c : pool) if (windowPids.count(c.pid) && (!chosen || c.pid < chosen->pid)) chosen = &c;
+         const bool byWindow = chosen != nullptr;
+         if (!chosen) { chosen = &pool[0]; for (auto& c : pool) if (c.pid < chosen->pid) chosen = &c; }
+         std::string pidList;
+         for (auto& c : cands) {
+             char b[24]; std::snprintf(b, sizeof b, "%lu", (unsigned long)c.pid);
+             if (!pidList.empty()) pidList += ", ";
+             pidList += b;
+         }
+         char buf[1024];
+         std::snprintf(buf, sizeof buf, "%zu candidate(s) [pid %s]; chose pid %lu (%s)%s, path %s",
+                       cands.size(), pidList.c_str(), (unsigned long)chosen->pid,
+                       roots.empty() ? "lowest pid, no tree root found" : "tree root",
+                       byWindow ? ", owns a window" : "",
+                       chosen->path.empty() ? "?" : narrow(chosen->path).c_str());
+         describe = buf;
+         return *chosen;
      }
      static std::string exeLabel(const std::string& exe) { // "Spotify.exe" -> "Spotify" for status lines
          std::string s = exe;
@@ -149,8 +259,11 @@
      // thread — v0.12: guard them with a mutex (the v0.11 code raced plain
      // std::strings across the two threads).
      std::mutex diagLock; std::string activeName, activeId, pickHow, fmtLabel, status{"not started"};
+     std::string targetDesc; // v0.27.2: "pid <n>, <full exe path>" of the resolved per-app target
      enum class Fmt { F32, I16, I24, I32 }; Fmt fmtKind = Fmt::F32; int bytesPerSample = 4;
-     void setStatus(const std::string& s) { std::lock_guard<std::mutex> g(diagLock); status = s; }
+     // v0.27.2: every status transition is also appended to the
+     // persistent capture log (see appendCaptureLog above).
+     void setStatus(const std::string& s) { std::lock_guard<std::mutex> g(diagLock); status = s; appendCaptureLog(s); }
      static std::string hrText(const char* stage, HRESULT hr) {
          char buf[96]; std::snprintf(buf, sizeof buf, "%s failed (0x%08lx)", stage, (unsigned long)hr);
          return buf;
@@ -389,15 +502,38 @@
      //    reads handler state again.
      //  - OS GATE: processLoopbackSupported() runs first.
      //  - Every exit path sets status before returning.
+     //
+     // v0.27.2 (hotfix — v0.27.1 crashed again in the field; the
+     // WER dump, see DUMP_ANALYSIS in the round folder, proved a
+     // heap corruption 0xC0000374, not an access violation):
+     //  - RESOLUTION: the target PID comes from
+     //    resolveTargetProcess (tree root of the exe's process
+     //    family), not the first snapshot match — see the resolver
+     //    comment. The candidate set + choice go to the capture
+     //    log; the chosen pid + path ride the status surfaces.
+     //  - The ingest side of the heap-corruption surface is closed
+     //    in AudioEngine::pushStereo (serialised producers).
      void loopProcessGuarded() {
          CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-         const std::string label = exeLabel(wantExe);
+         const std::string label = wantLabel.empty() ? exeLabel(wantExe) : wantLabel;
          if (!processLoopbackSupported()) {
              setStatus(label + " — per-app capture needs Windows 11");
              CoUninitialize(); return;
          }
-         const DWORD pid = findProcessId(lower(widen(wantExe)));
-         if (pid == 0) { setStatus(label + " — not running"); CoUninitialize(); return; }
+         // v0.27.2: resolve the target process (resolver above) and
+         // leave the whole decision in the capture log; the chosen
+         // pid + path then ride the status surfaces, so any failure
+         // from here on is diagnosable from the status alone.
+         std::string resolveWhy;
+         const ProcInfo target = resolveTargetProcess(lower(widen(wantExe)), resolveWhy);
+         appendCaptureLog(label + " resolve: " + resolveWhy);
+         if (target.pid == 0) { setStatus(label + " — not running"); CoUninitialize(); return; }
+         const DWORD pid = target.pid;
+         std::string targetText;
+         { char tb[64]; std::snprintf(tb, sizeof tb, "pid %lu, ", (unsigned long)pid);
+           targetText = std::string(tb) + (target.path.empty() ? std::string("path unavailable") : narrow(target.path)); }
+         { std::lock_guard<std::mutex> g(diagLock); targetDesc = targetText; }
+         setStatus(label + " — target " + targetText);
          AUDIOCLIENT_ACTIVATION_PARAMS params = {};
          params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
          params.ProcessLoopbackParams.TargetProcessId = pid;
@@ -448,7 +584,7 @@
                                        : label + " — activation failed");
              CoUninitialize(); return;
          }
-         { std::lock_guard<std::mutex> g(diagLock); activeName = label + " (process loopback)"; pickHow = "process loopback"; }
+         { std::lock_guard<std::mutex> g(diagLock); activeName = label + " (process loopback, " + targetText + ")"; pickHow = "process loopback"; }
          // Canonical fixed format (see header note): float 48 kHz
          // stereo, with the engine converting the tree's mix.
          WAVEFORMATEX fmt = {};
@@ -546,11 +682,11 @@
      // `this` could then run the NEW Impl's loop on the old thread.
      Impl* im = impl_;
      im->th.start([im]{ im->loop(); }); return true; }
- bool WindowsLoopback::startProcessLoopback(Callback cb, const std::string& exeNameUtf8) { stop(); impl_ = new Impl(); impl_->cb = std::move(cb); impl_->wantExe = exeNameUtf8; impl_->processMode = true; impl_->run = true;
+ bool WindowsLoopback::startProcessLoopback(Callback cb, const std::string& exeNameUtf8, const std::string& labelUtf8) { stop(); impl_ = new Impl(); impl_->cb = std::move(cb); impl_->wantExe = exeNameUtf8; impl_->wantLabel = labelUtf8; impl_->processMode = true; impl_->run = true;
      Impl* im = impl_;
      im->th.start([im]{ im->loopEntry(); }); return true; }
  bool WindowsLoopback::isProcessRunning(const std::string& exeNameUtf8) {
-     return Impl::findProcessId(Impl::lower(Impl::widen(exeNameUtf8))) != 0;
+     return !Impl::enumerateProcesses(Impl::lower(Impl::widen(exeNameUtf8))).empty();
  }
  void WindowsLoopback::stop() { if (impl_) { impl_->run = false;
      // v0.20.2 BOUNDED STOP (freeze fix, audit suspect 1): the capture
@@ -623,14 +759,18 @@
  long long WindowsLoopback::packetsReceived() const { return impl_ ? impl_->packets.load() : 0; }
  std::string WindowsLoopback::formatInfo() const { if (!impl_) return {}; std::lock_guard<std::mutex> g(impl_->diagLock); return impl_->fmtLabel; }
  std::string WindowsLoopback::statusInfo() const { if (!impl_) return "not started"; std::lock_guard<std::mutex> g(impl_->diagLock); return impl_->status; }
+ std::string WindowsLoopback::targetInfo() const { if (!impl_) return {}; std::lock_guard<std::mutex> g(impl_->diagLock); return impl_->targetDesc; }
+ std::string WindowsLoopback::captureLogPath() { return Impl::captureLogPathStr(); }
  float WindowsLoopback::peakSeen() const { return impl_ ? impl_->peakSeen.load() : 0.f; }
 #else
  struct WindowsLoopback::Impl {};
  std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpoints() { return {}; }
  std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpointsCached(bool) { return {}; }
  bool WindowsLoopback::start(Callback, const std::string&, const std::string&) { return false; }
- bool WindowsLoopback::startProcessLoopback(Callback, const std::string&) { return false; }
+ bool WindowsLoopback::startProcessLoopback(Callback, const std::string&, const std::string&) { return false; }
  bool WindowsLoopback::isProcessRunning(const std::string&) { return false; }
+ std::string WindowsLoopback::targetInfo() const { return {}; }
+ std::string WindowsLoopback::captureLogPath() { return {}; }
  void WindowsLoopback::stop() {}
  bool WindowsLoopback::isRunning() const { return false; }
  double WindowsLoopback::sampleRate() const { return 48000; }

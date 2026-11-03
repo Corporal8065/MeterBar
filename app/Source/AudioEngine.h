@@ -73,8 +73,13 @@ public:
             // fallback to the system mix). System keeps the endpoint
             // loopback below. Changing source restarts capture here,
             // cleanly, like every other source switch.
+            // v0.27.2: value 3 is the Spicetify entry — the same
+            // Spotify.exe and the same process resolver, with the
+            // label making the patched-client setup explicit in the
+            // status line and the capture log.
             if (state.appSource == 1) loopback.startProcessLoopback(cb, "Spotify.exe");
             else if (state.appSource == 2) loopback.startProcessLoopback(cb, "TIDAL.exe");
+            else if (state.appSource == 3) loopback.startProcessLoopback(cb, "Spotify.exe", "Spotify (Spicetify)");
             else // Capture the CHOSEN output device — by endpoint ID when known
                  // (v0.13), by friendly name as fallback (empty = default output).
                 loopback.start(cb, state.outputDeviceName, state.outputDeviceId);
@@ -86,6 +91,26 @@ public:
     // layer for multichannel input; stereo path uses pair 0), trim, then fan-out.
     void pushStereo(const float* L, const float* R, int n, double sr) {
         if (paused.load()) return;
+        // v0.27.2 INGEST SERIALISATION: everything below mutates
+        // shared engine state (scratchL/scratchR, the SPSC ring,
+        // the caption tap, the beat trackers) written for ONE
+        // producer at a time — but a source switch can briefly run
+        // TWO: WindowsLoopback::stop() is bounded (500 ms), and a
+        // capture thread that outlives it is deliberately leaked;
+        // when its blocked WASAPI call returns it can deliver one
+        // more block while the NEW source's capture thread is
+        // already inside this function. Two producers interleaving
+        // resize/write on the same vectors corrupts the heap — the
+        // exact failure class (0xC0000374) the 2026-11-02 v0.27.1
+        // crash dump proved. Serialise at this single choke point:
+        // every producer (device callback, both loopback loops,
+        // test tone) passes through here, and the held work per
+        // block is a copy plus fixed analysis, so contention is
+        // negligible. Lock order: ingestLock is taken alone here —
+        // feedRecorder takes recPtrLock INSIDE it, never the
+        // reverse (stopRecording runs on the UI thread without
+        // ingestLock), so no cycle exists.
+        const juce::ScopedLock ingestGuard(ingestLock);
         // v0.23.0 Live Captions tap: PRE-TRIM samples (spec 2.2) —
         // MeterBar's default +10.18 dB trim is a metering preference
         // and must not clip speech on its way to ASR. Sibling fan-out
@@ -150,16 +175,29 @@ public:
     // v0.27.0 (item 8): the Settings source-state line for the
     // per-app sources — "Spotify — running" / "Spotify — not
     // running" / the capture thread's own status when it differs.
+    // v0.27.2: the resolved target (pid + exe path) rides the line
+    // once known, and the capture log's location is named, so a
+    // failure is diagnosable from this line alone.
     juce::String appSourceState() {
-        if (state.appSource == 1 || state.appSource == 2) {
-            const char* exe = state.appSource == 1 ? "Spotify.exe" : "TIDAL.exe";
-            const char* label = state.appSource == 1 ? "Spotify" : "Tidal";
+        if (state.appSource >= 1 && state.appSource <= 3) {
+            const char* exe = state.appSource == 2 ? "TIDAL.exe" : "Spotify.exe";
+            const char* label = state.appSource == 1 ? "Spotify"
+                              : state.appSource == 2 ? "Tidal" : "Spotify (Spicetify)";
+            juce::String line;
             auto st = loopback.statusInfo();
             if (!WindowsLoopback::isProcessRunning(exe))
-                return juce::String(label) + " — not running (MeterBar hears silence until it starts)";
-            if (!st.empty() && st != "not started" && st != "running")
-                return juce::String(label) + " — " + juce::String(st);
-            return juce::String(label) + " — running (process loopback, this app only)";
+                line = juce::String(label) + " — not running (MeterBar hears silence until it starts)";
+            else if (!st.empty() && st != "not started" && st != "running")
+                line = juce::String(label) + " — " + juce::String(st);
+            else
+                line = juce::String(label) + " — running (process loopback, this app only)";
+            auto tgt = loopback.targetInfo();
+            if (!tgt.empty() && line.indexOf(juce::String(tgt)) < 0)
+                line += " · target " + juce::String(tgt);
+            auto logPath = WindowsLoopback::captureLogPath();
+            if (!logPath.empty())
+                line += " · capture log: " + juce::String(logPath);
+            return line;
         }
         return "System — endpoint loopback (everything the chosen output plays)";
     }
@@ -313,5 +351,6 @@ private:
     juce::CriticalSection recPtrLock; // guards recorder_ hand-off between feeder threads and the UI thread
     std::atomic<bool> recording_{false};
     juce::CriticalSection loudLock;
+    juce::CriticalSection ingestLock; // v0.27.2: serialises pushStereo producers (see pushStereo)
     std::vector<float> scratchL, scratchR;
 };

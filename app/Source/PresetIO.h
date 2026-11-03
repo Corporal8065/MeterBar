@@ -35,7 +35,7 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("timeSig", s.beatTimeSignature); // v0.26.0: 0 = 4/4, 1 = 3/4, 2 = 6/8
     set("animeClicks", s.animeClickSounds); set("mascotFlex", s.mascotFlex); set("sixthOct", s.spectrumSixthOctave); // v0.16
     set("audioSource", juce::String(s.audioSource)); set("audioDevice", juce::String(s.audioDeviceName));
-    set("appSource", s.appSource); // v0.27.0 (item 8): 0 System / 1 Spotify / 2 Tidal
+    set("appSource", s.appSource); // v0.27.0 (item 8): 0 System / 1 Spotify / 2 Tidal; v0.27.2: 3 Spotify (Spicetify)
     set("outputDevice", juce::String(s.outputDeviceName));
     set("outputDeviceId", juce::String(s.outputDeviceId)); // v0.13
     set("trimDb", s.trimDb); set("routingPair", s.routingPair); set("routingCh1", s.routingCh1); set("routingCh2", s.routingCh2);
@@ -88,7 +88,7 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.beatTimeSignature = gi("timeSig", s.beatTimeSignature); // v0.26.0 (absent in old presets -> recipe default 4/4)
     s.mascotFlex = gf("mascotFlex", s.mascotFlex); s.spectrumSixthOctave = gb("sixthOct", s.spectrumSixthOctave); // v0.16
     s.audioSource = g("audioSource").toString().toStdString(); s.audioDeviceName = g("audioDevice").toString().toStdString();
-    { int as = gi("appSource", s.appSource); s.appSource = as < 0 ? 0 : as > 2 ? 2 : as; } // v0.27.0 (absent in old presets -> System)
+    { int as = gi("appSource", s.appSource); s.appSource = as < 0 ? 0 : as > 3 ? 3 : as; } // v0.27.0 (absent in old presets -> System); v0.27.2: 3 admitted
     s.outputDeviceName = g("outputDevice").toString().toStdString();
     s.outputDeviceId = g("outputDeviceId").toString().toStdString(); // v0.13 (absent in old presets -> name fallback still works)
     s.trimDb = gf("trimDb", s.trimDb); s.routingPair = gi("routingPair", s.routingPair);

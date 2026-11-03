@@ -33,10 +33,25 @@ public:
     // running or activation fails, NO audio is captured (silence)
     // and statusInfo() says why ("Spotify — not running"); there is
     // deliberately NO fallback to system audio.
-    bool startProcessLoopback(Callback cb, const std::string& exeNameUtf8);
+    // v0.27.2: labelUtf8 optionally overrides the display label
+    // ("Spotify (Spicetify)") — the Spicetify-patched client is the
+    // same Spotify.exe, resolved by the same resolver; the separate
+    // picker entry exists so the resolution + labelling are explicit
+    // for that setup.
+    bool startProcessLoopback(Callback cb, const std::string& exeNameUtf8,
+                              const std::string& labelUtf8 = "");
     // Is a process with this executable name currently running?
     // (Settings shows the source state from this + statusInfo().)
     static bool isProcessRunning(const std::string& exeNameUtf8);
+    // v0.27.2: the process the resolver chose for the active per-app
+    // capture, "pid <n>, <full exe path>" — empty until a target is
+    // resolved. Rides the Settings source-state line so a failure is
+    // diagnosable from the status alone.
+    std::string targetInfo() const;
+    // v0.27.2: path of the persistent capture log (last ~50
+    // timestamped status/stage lines, next to the app's settings):
+    // Documents\MeterBar\capture-log.txt. Empty on non-Windows.
+    static std::string captureLogPath();
     void stop();
     bool isRunning() const;
     double sampleRate() const;

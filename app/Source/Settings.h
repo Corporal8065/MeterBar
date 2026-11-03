@@ -202,7 +202,11 @@ public:
             // ONLY that app (Windows per-app process loopback), and
             // silence while it is not running. Applies whenever the
             // Sound Source below is an output device.
-            combo("Capture Source", {"System (all audio)","Spotify only","Tidal only"}, st->appSource,
+            // v0.27.2: "Spotify (Spicetify) only" is APPENDED
+            // (index 3) so persisted values 0/1/2 keep their
+            // meaning — same Spotify.exe, same resolver, explicit
+            // label for the patched client.
+            combo("Capture Source", {"System (all audio)","Spotify only","Tidal only","Spotify (Spicetify) only"}, st->appSource,
                   [&](int v){ st->appSource = v; if (onSourceChanged) onSourceChanged(); });
             if (appSourceStatus) note(appSourceStatus());
             soundSourceCombo();
