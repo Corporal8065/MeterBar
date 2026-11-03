@@ -38,12 +38,37 @@
  #include <functiondiscoverykeys_devpkey.h>
  #include <ksmedia.h>
  #include <cstdio>
- // v0.27.0 (item 8): completion handler for ActivateAudioInterfaceAsync,
- // structured after Microsoft's ApplicationLoopback sample. It answers
- // the IAgileObject IID in QueryInterface (the activation API requires
- // an agile handler) without inheriting a declared IAgileObject type —
- // that interface adds no methods beyond IUnknown, so returning this
- // object's handler pointer for its IID is exact.
+ // Completion handler for ActivateAudioInterfaceAsync, structured
+ // after Microsoft's ApplicationLoopback sample. It answers the
+ // IAgileObject IID in QueryInterface (the activation API requires
+ // an agile handler) without inheriting a declared IAgileObject
+ // type — that interface adds no methods beyond IUnknown, so
+ // returning this object's handler pointer for its IID is exact.
+ //
+ // v0.27.1 OWNERSHIP CONTRACT (the v0.27.0 accounting balanced only
+ // if the activation API happened to AddRef the handler the way the
+ // code assumed, and its 5 s timeout path read handler->result /
+ // handler->device and Released the handler while the async
+ // operation could still deliver ActivateCompleted into the freed
+ // object — the field crash on selecting Spotify, 2026-11-02):
+ //  - refs_ starts at 1: the CREATOR reference, owned by
+ //    loopProcessGuarded, released by it exactly once.
+ //  - Before ActivateAudioInterfaceAsync, the creator takes a
+ //    second, RESERVED reference for the operation. It is released
+ //    exactly once: by ActivateCompleted itself, as its last act,
+ //    after SetEvent — or by the creator if the activation call
+ //    fails synchronously (the callback can then never fire).
+ //  - The reserved reference keeps the object alive until the
+ //    callback has fully run in EVERY interleaving, including a
+ //    callback that arrives after the creator timed out and left:
+ //    it then self-deletes inside that final Release, and the
+ //    activated device (if the late activation succeeded) is
+ //    released by the destructor. Nobody touches the handler after
+ //    releasing the creator reference. If the callback somehow
+ //    never fires, the handler leaks — deliberately, the same
+ //    leak-don't-free-under-a-live-thread pattern as Impl::stop().
+ //  - GetActivateResult's device reference is owned by the handler
+ //    and balanced exactly once, by the destructor.
  namespace {
  class ActivateHandler final : public IActivateAudioInterfaceCompletionHandler {
  public:
@@ -63,6 +88,9 @@
      STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* op) override {
          if (op) op->GetActivateResult(&result, &device);
          if (done) SetEvent(done);
+         Release(); // the RESERVED reference (see contract above) —
+                    // last member access in this callback; the
+                    // object may delete itself here.
          return S_OK;
      }
  private:
@@ -310,16 +338,51 @@
          cap->Release(); client->Release(); CoTaskMemFree(fmt);
          dev->Release(); en->Release(); CoUninitialize();
      }
+     // Process loopback (AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_
+     // LOOPBACK) exists only on Windows 11 / Windows Server 2022 —
+     // build 20348+. RtlGetVersion reports the TRUE build (the
+     // version APIs lie to unmanifested callers). v0.27.1: gate on
+     // it BEFORE any activation machinery is touched; an unproven
+     // build counts as unsupported.
+     static bool processLoopbackSupported() {
+         using RtlGetVersionFn = LONG (WINAPI*)(OSVERSIONINFOW*);
+         OSVERSIONINFOW vi = {}; vi.dwOSVersionInfoSize = sizeof(vi);
+         auto fn = reinterpret_cast<RtlGetVersionFn>(
+             GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+         if (!fn || fn(&vi) != 0) return false;
+         if (vi.dwMajorVersion != 10) return vi.dwMajorVersion > 10;
+         return vi.dwBuildNumber >= 20348;
+     }
      // v0.27.0 (item 8): PER-APP capture (Microsoft's
      // ApplicationLoopback sample structure). Find the app's PID,
      // ActivateAudioInterfaceAsync on the process-loopback virtual
-     // device with INCLUDE_TARGET_PROCESS_TREE, then the same
-     // Initialize(LOOPBACK) + capture-client path as the endpoint
-     // loop. ANY failure leaves the meters silent with the reason
-     // in status — never a fallback to system audio, never a crash.
-     void loopProcess() {
+     // device with INCLUDE_TARGET_PROCESS_TREE, then Initialize +
+     // the capture-client path. ANY failure leaves the meters
+     // silent with the reason in status — never a fallback to
+     // system audio, never a crash.
+     //
+     // v0.27.1 (hotfix — crashes on selecting Spotify in the field):
+     //  - FORMAT: the canonical sample does NOT GetMixFormat the
+     //    process-loopback virtual device. It requests a FIXED
+     //    format (IEEE float, 48 kHz, stereo, 32-bit) and lets
+     //    AUTOCONVERTPCM resample the target tree's mix into it.
+     //    v0.27.0 Initialized with the virtual device's own mix
+     //    format and LOOPBACK alone — replaced by the canonical
+     //    form below; sr/fmt state comes from the fixed format.
+     //  - HANDLER: ActivateHandler's ownership contract (above)
+     //    now keeps the handler alive until the completion callback
+     //    has fully run, in every interleaving; the 5 s timeout
+     //    path below releases only the creator reference and never
+     //    reads handler state again.
+     //  - OS GATE: processLoopbackSupported() runs first.
+     //  - Every exit path sets status before returning.
+     void loopProcessGuarded() {
          CoInitializeEx(nullptr, COINIT_MULTITHREADED);
          const std::string label = exeLabel(wantExe);
+         if (!processLoopbackSupported()) {
+             setStatus(label + " — per-app capture needs Windows 11");
+             CoUninitialize(); return;
+         }
          const DWORD pid = findProcessId(lower(widen(wantExe)));
          if (pid == 0) { setStatus(label + " — not running"); CoUninitialize(); return; }
          AUDIOCLIENT_ACTIVATION_PARAMS params = {};
@@ -331,33 +394,83 @@
          prop.blob.cbSize = sizeof(params);
          prop.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
          auto* handler = new ActivateHandler();
+         handler->AddRef(); // the RESERVED reference (contract above):
+                            // released by ActivateCompleted itself,
+                            // or by us if the call below fails.
          IActivateAudioInterfaceAsyncOperation* op = nullptr;
          HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                                                   __uuidof(IAudioClient), &prop, handler, &op);
          PropVariantClear(&prop);
-         if (FAILED(hr) || !op) { setStatus(hrText("ActivateAudioInterfaceAsync", hr)); handler->Release(); CoUninitialize(); return; }
-         WaitForSingleObject(handler->done, 5000);
+         if (FAILED(hr) || !op) {
+             setStatus(hrText("ActivateAudioInterfaceAsync", hr));
+             handler->Release(); // reserved (the callback never fires)
+             handler->Release(); // creator
+             CoUninitialize(); return;
+         }
+         const DWORD waitRc = WaitForSingleObject(handler->done, 5000);
          op->Release();
+         if (waitRc != WAIT_OBJECT_0) {
+             // Timeout (or wait failure): the callback may STILL
+             // arrive. Release ONLY the creator reference and never
+             // touch the handler, its result, or its device again —
+             // the reserved reference keeps the handler alive until
+             // the callback's own final Release, and ~ActivateHandler
+             // balances any late-arriving device. Deliberate leak
+             // rather than use-after-free.
+             setStatus(label + " — activation timed out");
+             handler->Release(); // creator reference only
+             CoUninitialize(); return;
+         }
+         // The callback has run to its SetEvent; result/device are
+         // final. (The callback's reserved Release may land before
+         // or after our reads — the creator reference keeps the
+         // object alive until we release it below.)
          IAudioClient* client = nullptr;
          if (SUCCEEDED(handler->result) && handler->device)
              handler->device->QueryInterface(__uuidof(IAudioClient), (void**)&client);
-         handler->Release();
-         if (!client) { setStatus(label + " — activation failed"); CoUninitialize(); return; }
+         const HRESULT actHr = handler->result;
+         handler->Release(); // creator reference — last touch
+         if (!client) {
+             setStatus(actHr != E_FAIL ? hrText("ActivateCompleted", actHr)
+                                       : label + " — activation failed");
+             CoUninitialize(); return;
+         }
          { std::lock_guard<std::mutex> g(diagLock); activeName = label + " (process loopback)"; pickHow = "process loopback"; }
-         WAVEFORMATEX* fmt = nullptr;
-         hr = client->GetMixFormat(&fmt);
-         if (FAILED(hr) || !fmt) { setStatus(hrText("GetMixFormat", hr)); client->Release(); CoUninitialize(); return; }
-         sr.store(fmt->nSamplesPerSec); detectFormat(fmt);
-         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 10000000, 0, fmt, nullptr);
-         if (FAILED(hr)) { setStatus(hrText("Initialize", hr)); CoTaskMemFree(fmt); client->Release(); CoUninitialize(); return; }
+         // Canonical fixed format (see header note): float 48 kHz
+         // stereo, with the engine converting the tree's mix.
+         WAVEFORMATEX fmt = {};
+         fmt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+         fmt.nChannels = 2;
+         fmt.nSamplesPerSec = 48000;
+         fmt.wBitsPerSample = 32;
+         fmt.nBlockAlign = (WORD)(fmt.nChannels * fmt.wBitsPerSample / 8);
+         fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
+         fmt.cbSize = 0;
+         sr.store((double)fmt.nSamplesPerSec); detectFormat(&fmt);
+         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                 AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                                     | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                                 10000000, 0, &fmt, nullptr);
+         if (FAILED(hr)) { setStatus(hrText("Initialize", hr)); client->Release(); CoUninitialize(); return; }
+         const int ch = fmt.nChannels; const int bps = bytesPerSample;
+         const double rate = sr.load();
+         // Stride contract: the decode loop walks frames of
+         // ch * bytesPerSample bytes; that MUST equal the format's
+         // nBlockAlign, or every frame pointer after the first
+         // reads across frame boundaries. Bail to status, no Start.
+         if (bps <= 0 || (int)fmt.nBlockAlign != ch * bps) {
+             char buf[128];
+             std::snprintf(buf, sizeof buf, "capture stride mismatch (nBlockAlign %lu, channels %d, bytes/sample %d)",
+                           (unsigned long)fmt.nBlockAlign, ch, bps);
+             setStatus(buf); client->Release(); CoUninitialize(); return;
+         }
          IAudioCaptureClient* cap = nullptr;
          hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&cap);
-         if (FAILED(hr) || !cap) { setStatus(hrText("GetService", hr)); CoTaskMemFree(fmt); client->Release(); CoUninitialize(); return; }
+         if (FAILED(hr) || !cap) { setStatus(hrText("GetService", hr)); client->Release(); CoUninitialize(); return; }
          hr = client->Start();
-         if (FAILED(hr)) { setStatus(hrText("Start", hr)); cap->Release(); CoTaskMemFree(fmt); client->Release(); CoUninitialize(); return; }
+         if (FAILED(hr)) { setStatus(hrText("Start", hr)); cap->Release(); client->Release(); CoUninitialize(); return; }
          setStatus("running");
-         const int ch = fmt->nChannels; const int bps = bytesPerSample;
-         const double rate = sr.load();
+         const UINT32 maxFrames = (UINT32)(rate * 2); // 2 s in one packet is not a packet — a broken client, bail
          bool done = false;
          while (run.load() && !done) {
              UINT32 packet = 0;
@@ -368,6 +481,7 @@
                  BYTE* data = nullptr; UINT32 frames = 0; DWORD flags = 0;
                  hr = cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
                  if (FAILED(hr)) { setStatus(hrText("GetBuffer", hr)); done = true; break; }
+                 if (frames > maxFrames) { setStatus("capture packet size invalid"); done = true; break; }
                  if (frames > 0 && cb) {
                      packets.fetch_add(1);
                      std::vector<float> L(frames), R(frames);
@@ -375,7 +489,7 @@
                      float localPeak = 0.f;
                      for (UINT32 i = 0; i < frames; ++i) {
                          if (silent) { L[i] = 0; R[i] = 0; continue; }
-                         BYTE* framePtr = data + (size_t)i * ch * bps;
+                         BYTE* framePtr = data + (size_t)i * fmt.nBlockAlign;
                          L[i] = readSample(framePtr);
                          R[i] = readSample(framePtr + (ch > 1 ? bps : 0));
                          localPeak = std::max({localPeak, std::abs(L[i]), std::abs(R[i])});
@@ -390,8 +504,26 @@
              }
          }
          client->Stop();
-         cap->Release(); client->Release(); CoTaskMemFree(fmt);
+         // status keeps whatever the loop last recorded (same
+         // convention as the endpoint loop).
+         cap->Release(); client->Release();
          CoUninitialize();
+     }
+     // v0.27.1 belt and braces: NOTHING inside the per-app path —
+     // including an access violation inside a WASAPI / driver call —
+     // may take the process down. A fault lands here as a status
+     // line and silent meters instead. (MSVC: SEH, which also
+     // catches the AV class; other compilers: C++ exceptions.)
+     void loopProcess() {
+ #if defined(_MSC_VER)
+         __try { loopProcessGuarded(); }
+         __except (EXCEPTION_EXECUTE_HANDLER) {
+             setStatus("per-app capture stopped (internal fault)");
+         }
+ #else
+         try { loopProcessGuarded(); }
+         catch (...) { setStatus("per-app capture stopped (internal fault)"); }
+ #endif
      }
      void loopEntry() { if (processMode) loopProcess(); else loop(); }
  };
