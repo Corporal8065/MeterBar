@@ -18,6 +18,7 @@
 #include "Captions/CaptionController.h" // v0.23.0: Live Captions (MeterBar only)
 #include "Captions/CaptionStrip.h"      // v0.24.0: docked caption strip
 #include <meterbar/WindowGeom.hpp>      // v0.24.0: caption homing / dock growth (pure core)
+#include <meterbar/Performance.hpp>     // v0.28.2: Performance Mode effective limits + Auto latch (pure core)
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
 // the pair's PresetState::moduleFlex weights (their sum is preserved, so
@@ -156,6 +157,19 @@ public:
     }
 };
 
+// v0.28.2 (addendum, Jackson 2026-11-03): a DocumentWindow whose X
+// HIDES it. The Debug window used a stock juce::DocumentWindow, whose
+// default closeButtonPressed() does nothing — the X was dead and the
+// only way out was re-opening the hamburger menu and toggling "Show
+// Debug Window" back off. The menu item reads isVisible() when the
+// menu is built, so its tick follows the X with no extra wiring.
+// (SettingsWindow in Settings.h already overrides it the same way.)
+class HideOnCloseWindow : public juce::DocumentWindow {
+public:
+    using juce::DocumentWindow::DocumentWindow;
+    void closeButtonPressed() override { setVisible(false); }
+};
+
 class MainComponent : public juce::Component, private juce::Timer {
 public:
     MainComponent();
@@ -172,6 +186,9 @@ private:
     void prepareFrame();
     void layoutModules();
     void applyTheme(); void applyFps(); void rebuildSettings();
+    meterbar::EffectiveLimits perfLimits(); // v0.28.2: mode + Auto latch + user settings -> effective per-frame limits (Performance.hpp)
+    void loadPerfPersist();                 // v0.28.2: re-arm the Auto latch from Documents/MeterBar/perf-auto.json (a stepped-down session starts stepped down)
+    void savePerfPersist(bool steppedDown); // v0.28.2: write/clear that file (called on latch trip and on any explicit mode change)
     void showHamburgerMenu();
     // v0.22.0: the Preset and Reposition dropdowns are SUBMENUS of
     // the hamburger menu now (their toolbar buttons are gone); the
@@ -276,10 +293,19 @@ private:
     double cachedLoudIntegrated_ = -120.0; long long lastLoudIntegratedMs_ = 0; // drag-lag fix: 4 Hz throttle cache (prepareFrame)
     Theme theme = themeByName("Midnight Kids");
     std::unique_ptr<SettingsWindow> settingsWin;
-    std::unique_ptr<juce::DocumentWindow> debugWin; juce::Label debugLabel;
+    std::unique_ptr<HideOnCloseWindow> debugWin; juce::Label debugLabel; // v0.28.2: HideOnCloseWindow — the X hides (see class note)
     int debugEpsCount = -1; juce::int64 lastEpsCheckMs = 0; // v0.15 item 8: render-endpoint count shown in Debug (refreshed ~2 s)
     std::unique_ptr<juce::FileChooser> chooser;
     double uiFpsMeasured = 0; juce::int64 lastFrameMs = 0; int clipCounter = 1;
+    // v0.28.2 PERFORMANCE MODE (Auto): the latch + the last mode the
+    // latch was fed under (a mode change resets it — the latch is a
+    // per-session, per-mode-choice decision), the frame counter the
+    // scope-pitch throttle divides, and the cached scope frequency
+    // served between throttled pitch runs.
+    meterbar::PerfAutoLatch perfAuto_;
+    int perfModeShadow_ = 0;
+    long long perfFrame_ = 0;
+    float cachedScopeFreq_ = 0;
     juce::File recordingFile_; // v0.21.4: the take currently being written (the Recordings menu omits it)
     // v0.24.0: the docked caption strip (child component; content is
     // plain strings pulled from the controller each tick, so member

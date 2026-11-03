@@ -30,6 +30,7 @@
 #include "../dsp/include/meterbar/Captions.hpp"
 #include "../dsp/include/meterbar/BeatTrack.hpp"
 #include "../dsp/include/meterbar/Undertow.hpp"
+#include "../dsp/include/meterbar/Performance.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -2490,6 +2491,113 @@ int main() {
             CHECK(memA * 0.85f >= 0.10f);        // new stack: visible over the black base
             CHECK(memA * 0.30f * 0.82f < 0.10f); // old stack: under the floor — the bug, in numbers
         }
+    }
+
+    // === v0.28.2 — Performance Mode (low-end laptop round, scope B:
+    // toggle + Auto). Every effective limit is pinned here; the app
+    // side carries no policy of its own. ===
+    {
+        // Default recipe: performanceMode is APPENDED; the default
+        // is AUTO (2) — the urgent 2026-11-03 change: on Jackson's
+        // laptop the app out-lags Settings itself within ~10 s, so
+        // the rescue cannot wait for a click. Auto starts at Full.
+        PresetState p; CHECK(p.performanceMode == 2);
+        // The core's Full caps ARE the Undertow model's own constants.
+        CHECK(kPerfFullSwarmCap == UndertowModel::kSwarmCap);
+        CHECK(kPerfFullDustCap == UndertowModel::kDustCap);
+        // --- Full: the user's own settings pass through unchanged ---
+        { auto e = effectiveLimits(false, 60, true, true);
+          CHECK(!e.lowActive); CHECK(e.fpsCap == 60);
+          CHECK(e.bloomQuarter && e.bloomEighth);
+          CHECK(e.vizMaxW == 480 && e.vizMaxH == 270);
+          CHECK(e.scopePitchEvery == 1);
+          CHECK(e.swarmCap == 240 && e.dustCap == 60); }
+        { auto e = effectiveLimits(false, 120, false, true);
+          CHECK(e.fpsCap == 120); CHECK(!e.bloomQuarter && e.bloomEighth); }
+        { auto e = effectiveLimits(false, 0, true, false);
+          CHECK(e.fpsCap == 60); } // unset reads as the historical 60
+        // --- Low-End: exactly the contract's caps ---
+        { auto e = effectiveLimits(true, 60, true, true);
+          CHECK(e.lowActive); CHECK(e.fpsCap == 30);
+          CHECK(!e.bloomQuarter && !e.bloomEighth);
+          CHECK(e.vizMaxW == 320 && e.vizMaxH == 180);
+          CHECK(e.scopePitchEvery == 3);
+          CHECK(e.swarmCap == 120 && e.dustCap == 30); }
+        { auto e = effectiveLimits(true, 120, true, true); CHECK(e.fpsCap == 30); }
+        { auto e = effectiveLimits(true, 15, true, true); CHECK(e.fpsCap == 15); } // never raises a lower user limit
+        // --- mode resolution ---
+        CHECK(!perfLowActive(0, true));   // Full ignores the latch
+        CHECK(perfLowActive(1, false));   // Low-End is immediate
+        CHECK(!perfLowActive(2, false));  // Auto before the latch
+        CHECK(perfLowActive(2, true));    // Auto after the latch
+        CHECK(!perfLowActive(7, true));   // unknown persisted value -> Full
+        // --- visualizer layer size under the caps ---
+        { int w, h; auto f = effectiveLimits(false, 60, true, true);
+          perfVizLayerSize(2200, 340, f, w, h); CHECK(w == 480 && h == 170);
+          auto l = effectiveLimits(true, 60, true, true);
+          perfVizLayerSize(2200, 340, l, w, h); CHECK(w == 320 && h == 170);
+          perfVizLayerSize(400, 100, l, w, h);  CHECK(w == 200 && h == 50); }
+        // --- scope pitch cadence ---
+        { auto f = effectiveLimits(false, 60, true, true);
+          CHECK(perfScopeCaptureDue(0, f) && perfScopeCaptureDue(1, f) && perfScopeCaptureDue(2, f));
+          auto l = effectiveLimits(true, 60, true, true);
+          CHECK(perfScopeCaptureDue(0, l)); CHECK(!perfScopeCaptureDue(1, l));
+          CHECK(!perfScopeCaptureDue(2, l)); CHECK(perfScopeCaptureDue(3, l));
+          CHECK(perfScopeCaptureDue(6, l)); }
+        // --- Auto latch: 3 s of CONTINUOUS sag under 85% of target ---
+        { PerfAutoLatch a;
+          for (int i = 0; i < 100; ++i) a.update(59.0, 60.0, 0.1); // healthy: never
+          CHECK(!a.latched()); CHECK(a.sagSeconds() == 0);
+          for (int i = 0; i < 29; ++i) a.update(40.0, 60.0, 0.1);  // 2.9 s of sag: not yet
+          CHECK(!a.latched());
+          a.update(60.0, 60.0, 0.1);                              // one good frame resets the sag
+          for (int i = 0; i < 29; ++i) a.update(40.0, 60.0, 0.1);
+          CHECK(!a.latched());
+          a.update(40.0, 60.0, 0.2);                              // crosses 3.0 s continuous
+          CHECK(a.latched());
+          for (int i = 0; i < 600; ++i) a.update(30.0, 30.0, 0.1); // session latch: no step-up, no flap
+          CHECK(a.latched());
+          a.reset(); CHECK(!a.latched()); }
+        { PerfAutoLatch a; // persisted step-down: forceLatched re-arms
+          a.forceLatched();                      // it at the next launch
+          CHECK(a.latched()); CHECK(perfLowActive(2, a.latched()));
+          for (int i = 0; i < 600; ++i) a.update(30.0, 30.0, 0.1); // clean Low-End frames never release it
+          CHECK(a.latched()); }
+        { PerfAutoLatch a; // unwarm EMA samples are ignored
+          for (int i = 0; i < 100; ++i) a.update(0.0, 60.0, 0.1);
+          CHECK(!a.latched()); }
+        // --- Undertow runtime caps bind in the model itself ---
+        { UndertowModel m; CHECK(m.swarmCap() == 240 && m.dustCap() == 60);
+          m.setSwarmCap(9999); CHECK(m.swarmCap() == 240);
+          m.setDustCap(-5);    CHECK(m.dustCap() == 0);
+          m.setSwarmCap(120); m.setDustCap(30);
+          CHECK(m.swarmCap() == 120 && m.dustCap() == 30);
+          FiveBandLevels lv; for (int b = 0; b < 5; ++b) lv.band[b] = 0.8f;
+          UndertowOnsetFeed none;
+          int maxAlive = 0;
+          for (int i = 0; i < 600; ++i) {
+              UndertowBeatFeed bf; bf.locked = true; bf.confidence = 0.9f; bf.bpm = 100.f;
+              bf.secondsToNextBeat = 0.3f; bf.nextIsDownbeat = (i % 60) == 0;
+              bf.countInBar = (i % 4) + 1; bf.beatsPerBar = 4;
+              bf.trackerNowSec = i / 60.0; bf.lastGridBeatSec = i / 60.0;
+              m.update(1.f / 60.f, lv, -8.f, bf, none);
+              int alive = 0; for (auto& d : m.swarm()) if (d.alive) ++alive;
+              if (alive > maxAlive) maxAlive = alive;
+          }
+          std::printf("v0.28.2 undertow caps: max swarm alive=%d (cap 120), dust=%d (cap 30)\n", maxAlive, m.dustCount());
+          CHECK(maxAlive <= 120); CHECK(maxAlive > 30); // the cap binds and the swarm still lives
+          CHECK(m.dustCount() <= 30); }
+        { UndertowModel m; // the same loud feed at Full caps: dust runs past the Low-End cap
+          FiveBandLevels lv; for (int b = 0; b < 5; ++b) lv.band[b] = 0.8f;
+          UndertowOnsetFeed none;
+          for (int i = 0; i < 120; ++i) {
+              UndertowBeatFeed bf; bf.locked = true; bf.confidence = 0.9f; bf.bpm = 100.f;
+              bf.secondsToNextBeat = 0.3f; bf.countInBar = (i % 4) + 1; bf.beatsPerBar = 4;
+              bf.trackerNowSec = i / 60.0; bf.lastGridBeatSec = i / 60.0;
+              m.update(1.f / 60.f, lv, -8.f, bf, none);
+          }
+          std::printf("v0.28.2 undertow full: dust=%d (must exceed the Low-End cap 30)\n", m.dustCount());
+          CHECK(m.dustCount() > 30); }
     }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);

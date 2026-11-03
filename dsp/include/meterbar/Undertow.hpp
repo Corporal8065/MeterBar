@@ -407,6 +407,17 @@ public:
     float pulseTau_[5] = { kUndertowKickReleaseTau, 0.055f, 0.045f, 0.035f, 0.028f }; // per-band pulse release τ (element table)
     bool preArmEnabled = true;
 
+    // v0.28.2 PERFORMANCE MODE: runtime caps for the swarm spawn
+    // target and the presence-dust count. Defaults ARE the historical
+    // constants (kSwarmCap / kDustCap), so Full quality is unchanged;
+    // the app sets the halved Low-End values from Performance.hpp's
+    // EffectiveLimits. Values clamp into [0, kCap]. Excess live swarm
+    // dots are not killed — spawning simply stops until they age out.
+    void setSwarmCap(int cap) { swarmCap_ = cap < 0 ? 0 : cap > kSwarmCap ? kSwarmCap : cap; }
+    void setDustCap(int cap) { dustCap_ = cap < 0 ? 0 : cap > kDustCap ? kDustCap : cap; }
+    int swarmCap() const { return swarmCap_; }
+    int dustCap() const { return dustCap_; }
+
     void setSafeRects(const std::vector<UndertowSafeRect>& r) { safe_ = r; }
     void setKickTau(float tauSec) { pulseTau_[0] = tauSec < 0.040f ? 0.040f : tauSec > 0.120f ? 0.120f : tauSec; }
 
@@ -747,7 +758,7 @@ private:
             int target = (int)std::lround(220.f * densityDrive_ * habitScale_);
             const int others = kOrbCount + dustCount_ + countTicks();
             if (target > kDotTarget - others) target = std::max(0, kDotTarget - others);
-            if (target > kSwarmCap) target = kSwarmCap;
+            if (target > swarmCap_) target = swarmCap_; // v0.28.2: runtime cap (default == kSwarmCap)
             int alive = 0; for (auto& p : swarm_) if (p.alive) ++alive;
             int spawnBudget = 8; // per frame — fast fill without a pop-in frame
             for (auto& p : swarm_) {
@@ -803,7 +814,8 @@ private:
         if (still_) dustCount_ = 8;
         else {
             int n = 6 + (int)std::lround(lv.band[4] * 54.f);
-            dustCount_ = n < 6 ? 6 : n > kDustCap ? kDustCap : n;
+            dustCount_ = n < 6 ? 6 : n > dustCap_ ? dustCap_ : n; // v0.28.2: runtime cap (default == kDustCap)
+            if (dustCount_ > dustCap_) dustCount_ = dustCap_;    // caps below the 6 floor still bind
         }
         dustAlpha_ = lv.band[4] * 0.18f * (drop_ ? 0.5f : 1.f);
     }
@@ -937,6 +949,8 @@ private:
     int pendingTicks_ = 0;
     float tickBudget_ = 0;
     int dustCount_ = 0;
+    int swarmCap_ = kSwarmCap; // v0.28.2: runtime caps (see setSwarmCap/setDustCap)
+    int dustCap_ = kDustCap;
     float dustAlpha_ = 0;
     uint32_t dustEpoch_ = 0;
     std::vector<UndertowSafeRect> safe_;

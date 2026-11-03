@@ -40,6 +40,7 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("outputDeviceId", juce::String(s.outputDeviceId)); // v0.13
     set("trimDb", s.trimDb); set("routingPair", s.routingPair); set("routingCh1", s.routingCh1); set("routingCh2", s.routingCh2);
     set("vsync", s.vsync); set("fps", s.fpsLimit);
+    set("perfMode", s.performanceMode); // v0.28.2: 0 Full / 1 Low-End / 2 Auto
     set("pinned", s.pinned); set("stick", s.stick); set("showToolbar", s.showToolbar); set("showHint", s.showRepositionHint);
     set("reserveSpace", s.reserveScreenSpace); // v0.18
     set("linkEnabled", s.linkEnabled); // v0.20.0 (k)
@@ -96,6 +97,7 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.trimDb = gf("trimDb", s.trimDb); s.routingPair = gi("routingPair", s.routingPair);
     s.routingCh1 = gi("routingCh1", s.routingCh1); s.routingCh2 = gi("routingCh2", s.routingCh2);
     s.vsync = gb("vsync", s.vsync); s.fpsLimit = gi("fps", s.fpsLimit);
+    { int pm = gi("perfMode", s.performanceMode); s.performanceMode = pm < 0 ? 0 : pm > 2 ? 0 : pm; } // v0.28.2 (absent in old presets -> Full; out-of-range -> Full)
     s.pinned = gb("pinned", s.pinned); s.stick = gb("stick", s.stick);
     s.reserveScreenSpace = gb("reserveSpace", s.reserveScreenSpace); // v0.18 (absent in old presets -> default off)
     s.linkEnabled = gb("linkEnabled", s.linkEnabled); // v0.20.0 (k) (absent -> OFF)

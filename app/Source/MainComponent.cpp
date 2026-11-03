@@ -122,7 +122,12 @@ MainComponent::MainComponent() {
     // Screen Space" item; engine.state.reserveScreenSpace is
     // unchanged, so existing users keep it.
     burgerBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showHamburgerMenu(); };
-    settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true); };
+    settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true);
+        // v0.28.2: this click's own mouse-down capture is still held
+        // by the BAR's window while onClick runs (JUCE releases it in
+        // the peer's mouse-up path, after dispatch) — free it now so
+        // opening Settings can never inherit a live capture.
+        settingsPalette::releaseCaptureIfHeldBy(this); settingsPalette::resetMouseSources(); };
     pauseBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); engine.paused = !engine.paused.load(); pauseBtn.setButtonText(engine.paused ? juce::String::fromUTF8(meterbar::glyphPlayUtf8()) : juce::String::fromUTF8(meterbar::glyphPauseUtf8())); }; // v0.22.0: glyph swap replaces the Pause/Resume text swap; v0.22.2: explicit UTF-8 bytes (see meterbar/Glyphs.hpp)
     recBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleRecord(); };
     // v0.19.2: the update indicator lives in the toolbar but starts
@@ -165,9 +170,10 @@ MainComponent::MainComponent() {
     settingsWin->content.onArrange = [this]{ doArrangeWindows(); };   // v0.18: Settings > Window buttons
     settingsWin->content.onRestore = [this]{ doRestoreWindows(); };   // v0.18
     settingsWin->content.build();
-    debugWin = std::make_unique<juce::DocumentWindow>("MeterBar Debug", juce::Colour(0xff231f31), juce::DocumentWindow::closeButton);
+    debugWin = std::make_unique<HideOnCloseWindow>("MeterBar Debug", juce::Colour(0xff231f31), juce::DocumentWindow::closeButton); // v0.28.2: X hides the window (stock DocumentWindow's X did nothing)
     debugLabel.setFont(12.5f); // v0.13: endpoint IDs are long — smaller font + wider window keeps them on one line
     debugWin->setContentNonOwned(&debugLabel, true); debugWin->setSize(470, 262); debugWin->setUsingNativeTitleBar(true);
+    loadPerfPersist(); // v0.28.2: BEFORE the first applyFps — a persisted stepped-down Auto starts at the Low-End cap from frame one
     engine.applySource(); applyTheme(); applyFps();
     // v0.23.0: Live Captions initialise AFTER the first applySource
     // (the controller reads the engine's caption epoch/source) and
@@ -243,7 +249,43 @@ void MainComponent::adjustMascotFlex(int dxPx) {
     }
     layoutModules(); repaint();
 }
-void MainComponent::applyFps() { int fps = engine.state.fpsLimit; startTimerHz(fps > 0 ? fps : 60); }
+// v0.28.2 PERFORMANCE MODE: all policy lives in the core
+// (meterbar/Performance.hpp); here we only resolve mode + latch.
+meterbar::EffectiveLimits MainComponent::perfLimits() {
+    auto& st = engine.state;
+    if (st.performanceMode != perfModeShadow_) { // an explicit mode choice is the ONLY step-up path: it re-arms Auto and clears the persisted latch
+        perfModeShadow_ = st.performanceMode;
+        perfAuto_.reset();
+        savePerfPersist(false);
+    }
+    return meterbar::effectiveLimits(
+        meterbar::perfLowActive(st.performanceMode, perfAuto_.latched()),
+        st.fpsLimit, st.undertowBloomQuarter, st.undertowBloomEighth);
+}
+// v0.28.2: the Auto latch's persistence (CaptionSettings' idiom —
+// a small JSON file under Documents/MeterBar). Written when the
+// latch trips; cleared on any explicit Performance Mode change.
+namespace { juce::File perfPersistFile() {
+    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+               .getChildFile("MeterBar").getChildFile("perf-auto.json");
+} }
+void MainComponent::loadPerfPersist() {
+    perfModeShadow_ = engine.state.performanceMode; // adopt, don't "change"
+    const auto f = perfPersistFile();
+    if (!f.existsAsFile()) return;
+    const auto v = juce::JSON::parse(f.loadFileAsString());
+    if (v.isObject() && (bool)v.getProperty("steppedDown", false))
+        perfAuto_.forceLatched();
+}
+void MainComponent::savePerfPersist(bool steppedDown) {
+    const auto f = perfPersistFile();
+    f.getParentDirectory().createDirectory();
+    juce::DynamicObject::Ptr o = new juce::DynamicObject();
+    o->setProperty("schema", 1);
+    o->setProperty("steppedDown", steppedDown);
+    f.replaceWithText(juce::JSON::toString(juce::var(o), true));
+}
+void MainComponent::applyFps() { int fps = perfLimits().fpsCap; startTimerHz(fps > 0 ? fps : 60); }
 // v0.18 RESERVE SCREEN SPACE (Jackson's ask): while the toggle is ON and
 // the bar sits flush at a monitor edge, register the window as a
 // Windows AppBar so the OS shrinks that monitor's work area and maximised
@@ -366,7 +408,17 @@ void MainComponent::doArrangeWindows() {
     screenSpace.arrange(nullptr, meterbar::ReserveEdge::Top, 0); // stub: records the honest "unavailable" status
 }
 void MainComponent::doRestoreWindows() { screenSpace.restore(); }
-void MainComponent::rebuildSettings() { settingsWin->content.build(); }
+void MainComponent::rebuildSettings() {
+    // v0.28.2 SETTINGS MOUSE CONFINEMENT: build() destroys and
+    // recreates EVERY Settings control. While the window is VISIBLE
+    // a control may hold a live drag/capture (slider, scrollbar,
+    // combo) — destroying it mid-gesture orphans exactly the capture
+    // state the confinement feeds on. A re-open while visible now
+    // just brings the window to the front; the rebuild still happens
+    // on every open-from-hidden, which is the normal flow.
+    if (settingsWin->isVisible()) return;
+    settingsWin->content.build();
+}
 void MainComponent::paint(juce::Graphics& g) {
     // v0.13: background fills honour the Background Opacity setting; at 1.0
     // (default) this paints exactly as before, below 1.0 the desktop shows
@@ -785,8 +837,10 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
         else
             g.fillAll(juce::Colours::black);
     }
-    const int iw = juce::jlimit(1, 480, bounds.getWidth() / 2);
-    const int ih = juce::jlimit(1, 270, bounds.getHeight() / 2);
+    // v0.28.2 PERFORMANCE MODE: the layer caps come from the core
+    // limits (Full: the historical 480x270; Low-End: 320x180).
+    int iw, ih;
+    meterbar::perfVizLayerSize(bounds.getWidth(), bounds.getHeight(), perfLimits(), iw, ih);
     if (!vizCache.isValid() || vizCache.getWidth() != iw || vizCache.getHeight() != ih) {
         vizCache = juce::Image(juce::Image::RGB, iw, ih, true);
         vizBlurFrame_ = 0; // v0.23.1: layer resized — force a blur recompute below (frame counter reset)
@@ -949,12 +1003,17 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
         const bool groupedU = group != own;
         const float bgOpU = juce::jlimit(0.15f, 1.0f, engine.state.backgroundOpacity);
         const float washOpU = groupedU ? bgOpU : 1.0f;
-        if ((utBloomFrame_++ % 2) == 0) rebuildUndertowBloom(iw, ih); // <=30 Hz (DESIGN §(d))
-        if (engine.state.undertowBloomQuarter && vizBloomQ.isValid()) {
+        // v0.28.2 PERFORMANCE MODE: the effective bloom switches are
+        // the core limits' — under Low-End both scales are off, so
+        // the dual convolution rebuild is skipped entirely, not just
+        // its composite.
+        const auto plU = perfLimits();
+        if (plU.bloomQuarter || plU.bloomEighth) { if ((utBloomFrame_++ % 2) == 0) rebuildUndertowBloom(iw, ih); } // <=30 Hz (DESIGN §(d))
+        if (plU.bloomQuarter && vizBloomQ.isValid()) {
             g.setOpacity(0.45f * washOpU);
             g.drawImage(vizBloomQ, bounds.toFloat());
         }
-        if (engine.state.undertowBloomEighth && vizBloomE.isValid()) {
+        if (plU.bloomEighth && vizBloomE.isValid()) {
             g.setOpacity(0.30f * washOpU);
             g.drawImage(vizBloomE, bounds.toFloat());
         }
@@ -1051,7 +1110,18 @@ void MainComponent::timerCallback() {
     // ~4x/sec timer poll of syncScreenSpace() was the flicker's engine;
     // the reservation is event-driven now (see syncScreenSpace).
     if (lastFrameMs) { double inst = 1000.0 / std::max<juce::int64>(1, now - lastFrameMs); uiFpsMeasured = 0.9 * uiFpsMeasured + 0.1 * inst; }
+    // v0.28.2 PERFORMANCE MODE (Auto): feed the core latch the
+    // measured fps against the user's own target. On the frame it
+    // trips, retime the UI timer to the Low-End cap at once; the
+    // latch then holds for the session (Performance.hpp).
+    if (engine.state.performanceMode == 2 && lastFrameMs) {
+        const double dt = (double)std::max<juce::int64>(1, now - lastFrameMs) / 1000.0;
+        const bool was = perfAuto_.latched();
+        perfAuto_.update(uiFpsMeasured, engine.state.fpsLimit > 0 ? engine.state.fpsLimit : 60, dt);
+        if (!was && perfAuto_.latched()) { savePerfPersist(true); applyFps(); } // v0.28.2: the step-down persists — next launch starts stepped down
+    }
     lastFrameMs = now;
+    ++perfFrame_;
     if (!engine.paused.load()) prepareFrame();
     repaint();
     // v0.12: the Rec button mirrors the engine every frame — a recording can
@@ -1100,6 +1170,7 @@ void MainComponent::timerCallback() {
             "\nBuffers received: " + juce::String(engine.buffersReceived.load()) +
             "\nRing frames: " + juce::String(engine.ring.totalWritten()) +
             "\nUI fps: " + juce::String(uiFpsMeasured, 1) + " (limit " + juce::String(engine.state.fpsLimit) + ", VSync " + (engine.state.vsync ? "on" : "off") + ")" +
+            "\nPerformance: " + juce::String(engine.state.performanceMode == 1 ? "Low-End" : engine.state.performanceMode == 2 ? (perfAuto_.latched() ? "Auto (stepped down)" : "Auto") : "Full") + " (effective fps cap " + juce::String(perfLimits().fpsCap) + ")" +
             "\nFFT size: " + juce::String(engine.state.fftSize) + "  Paused: " + (engine.paused ? "yes" : "no") +
             "\nLoudness (engine): " + juce::String(engine.loudnessValue(), 1) + "  Peak lin: " + juce::String(engine.peakValue(), 3) +
             "\nLoopback wanted: " + engine.loopbackWantedName() +
@@ -1167,8 +1238,11 @@ void MainComponent::prepareFrame() {
         frame.beatCounts.assign(counts, counts + nb);
         frame.beatDownbeat = engine.beatDownbeatCount();
     }
-    frame.waveSecPerColumn = 1.0f / ((float)std::max(1, st.fpsLimit) * (float)std::max(1, (int)std::lround(1 + st.linkedSpeed)));
-    frame.sgSecPerRow = 1.0f / ((float)std::max(1, st.fpsLimit) * std::max(0.1f, st.linkedSpeed) * 0.2f);
+    // v0.28.2: overlay timebases run at the EFFECTIVE frame rate
+    // (the Low-End cap genuinely slows the timer, so the beat-age
+    // mapping must slow with it; in Full this is st.fpsLimit itself).
+    frame.waveSecPerColumn = 1.0f / ((float)std::max(1, perfLimits().fpsCap) * (float)std::max(1, (int)std::lround(1 + st.linkedSpeed)));
+    frame.sgSecPerRow = 1.0f / ((float)std::max(1, perfLimits().fpsCap) * std::max(0.1f, st.linkedSpeed) * 0.2f);
     // Loudness + stereo + scope
     frame.loudDb = engine.loudnessValue(); frame.peakLin = engine.peakValue();
     // v0.16 loudness pack readouts (integrated is gated BS.1770; true peak
@@ -1213,7 +1287,17 @@ void MainComponent::prepareFrame() {
     frame.stereo = se.analyse(bufL.data() + need - sn, bufR.data() + need - sn, sn);
     frame.latestL.assign(bufL.end() - 2048, bufL.end()); frame.latestR.assign(bufR.end() - 2048, bufR.end());
     if (scopeSamples != lastScopeSamples) { scope.prepare(scopeSamples); lastScopeSamples = scopeSamples; }
-    float f = 0; scope.capture(bufL.data() + (need - scopeSamples), scopeSamples, st.scopeTrigger, f, frame.sampleRate);
+    // v0.28.2 PERFORMANCE MODE: under Low-End limits the pitch
+    // autocorrelation (the expensive half of capture in Pitch mode)
+    // runs every 3rd frame; between runs the engine's buffer and the
+    // cached frequency are served as-is. Full quality: every frame,
+    // exactly as before.
+    float f = cachedScopeFreq_;
+    if (st.scopeTrigger != meterbar::ScopeTrigger::Pitch
+        || meterbar::perfScopeCaptureDue(perfFrame_, perfLimits())) {
+        scope.capture(bufL.data() + (need - scopeSamples), scopeSamples, st.scopeTrigger, f, frame.sampleRate);
+        cachedScopeFreq_ = f;
+    }
     frame.scopeBuf = scope.buffer(); frame.scopeFreq = f;
     // v0.20.0 (item i): the scope's Multi display is a TRUE 3-band
     // split of the captured buffer (core splitScopeBands) — computed
@@ -1304,6 +1388,7 @@ void MainComponent::prepareFrame() {
                 addSafe({ b.getX(), b.getBottom() - 13, b.getWidth(), 13 });
             }
             undertow_.setSafeRects(safeU);
+            { auto pl = perfLimits(); undertow_.setSwarmCap(pl.swarmCap); undertow_.setDustCap(pl.dustCap); } // v0.28.2: Performance Mode caps (Full values == the model's own constants)
             undertow_.preArmEnabled = st.undertowPreArm;
             undertow_.setKickTau(st.undertowKickTauMs / 1000.f);
             meterbar::UndertowBeatFeed bf; engine.undertowBeatFeed(bf);
@@ -1377,9 +1462,19 @@ juce::PopupMenu MainComponent::buildPresetSubMenu(std::vector<juce::File>& files
     return m;
 }
 void MainComponent::doTopBottom(bool top) {
-    auto disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+    // v0.28.2 ADDENDUM (Jackson, 2026-11-03: Reposition must stretch
+    // to the full width of THE SCREEN THE BAR IS ON): resolve the
+    // display from the window's current rect, not always the primary
+    // display. Full-width + userArea semantics are otherwise the
+    // historical behaviour here. Primary remains the fallback if the
+    // current rect resolves to no display.
+    auto* w = findParentComponentOfClass<juce::DocumentWindow>();
+    const auto curRect = w ? w->getBounds() : getScreenBounds();
+    auto& displays = juce::Desktop::getInstance().getDisplays();
+    auto disp = displays.getDisplayForRect(curRect);
+    if (!disp) disp = displays.getPrimaryDisplay();
     if (!disp) return; auto ua = disp->userArea;
-    if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) {
+    if (w) {
         w->setBounds(ua.getX(), top ? ua.getY() : ua.getBottom() - getHeight(), ua.getWidth(), getHeight());
     }
     syncScreenSpace(); // v0.18: docking to the top is what arms the reservation (v0.18.1: the window's moved/resized events feed it too)
@@ -1573,7 +1668,8 @@ void MainComponent::showHamburgerMenu() {
         auto& s = engine.state;
         if (r == idAbout) juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "MeterBar",
             "MeterBar " + kVersion + "\nA compact audio metering bar: Spectrum, Spectrogram, Waveform,\nLoudness, Stereometer, Oscilloscope.\nBuilt with JUCE + a custom DSP core.\nMade with JUCE (juce.com) — free-license attribution.");
-        else if (r == idOpenSettings) { rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true); }
+        else if (r == idOpenSettings) { rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true);
+            settingsPalette::releaseCaptureIfHeldBy(this); settingsPalette::resetMouseSources(); } // v0.28.2: same capture hygiene as the toolbar path
         else if (r == idSrcTone) { s.audioSource = "Test Tone"; engine.applySource(); }
         else if (r >= idInDevBase && r < idInDevBase + inNames.size()) setDeviceByName(true, inNames[r - idInDevBase]);
         else if (r >= idOutDevBase && r < idOutDevBase + outNames.size()) setDeviceByName(false, outNames[r - idOutDevBase]);

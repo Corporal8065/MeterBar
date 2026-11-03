@@ -5,6 +5,7 @@
 #include "ColorMap.hpp"
 #include "Loudness.hpp"
 #include "Modules.hpp"
+#include "Performance.hpp"
 namespace meterbar {
 enum class BackgroundStyle { CleanDark, MidnightKids, Flat, Pastel }; // v0.16 (Pastel appended for the Anime theme)
 // Every user setting in SPEC §2–§7, with SPEC defaults. The JUCE app maps this
@@ -110,6 +111,7 @@ struct PresetState {
     int routingCh1 = 0, routingCh2 = 1;
     // Performance (§7)
     bool vsync = true; int fpsLimit = 60; // 15/30/60/120
+    int performanceMode = 2;               // v0.28.2 (APPENDED — no prior persisted meaning): 0 = Full, 1 = Low-End, 2 = Auto (starts Full, latches to Low-End after ~3 s of sustained fps sag, and a stepped-down session PERSISTS — the next launch starts stepped down; Performance.hpp). DEFAULT IS AUTO (urgent change, Jackson's field evidence 2026-11-03 ~11:28 PT: on his laptop the app is too laggy after ~10 s to even open Settings, so a mode that must be switched on FROM Settings can never rescue that machine; Auto needs no one's click. His desktop never sags, so Auto there simply stays at Full.)
     // Layout (v0.15): relative widths of the 6 modules in display order
     // (Spectrogram, Waveform, Loudness, Stereometer, Oscilloscope, Spectrum),
     // adjusted by dragging the dividers between modules. Persisted in presets.

@@ -51,6 +51,48 @@ namespace settingsPalette {
         (void) c;
 #endif
     }
+    // v0.28.2 SETTINGS MOUSE CONFINEMENT (recurrence filed 2026-10-29,
+    // again 2026-11-03 on the laptop): while Settings is in front the
+    // cursor can end up owned by a window the user is not interacting
+    // with, and only Alt-Tab frees it. There is no ClipCursor/grab
+    // call anywhere in the app; JUCE's Win32 peer SetCapture()s the
+    // top-level HWND on every mouse-down and releases it from that
+    // same peer's mouse-up path (releaseCaptureIfNecessary) — so a
+    // capture whose mouse-up is dispatched to a DIFFERENT window
+    // (the bar, a combo popup) or whose owning control is destroyed
+    // mid-gesture is never released, and the orphaned capture is the
+    // confinement. This helper releases the capture IF AND ONLY IF
+    // the given component's own window holds it — it can never steal
+    // another app's or another window's live capture. Called at the
+    // Settings session boundaries (window shown/hidden, and by
+    // MainComponent right after opening Settings, for the bar's own
+    // window — the settings click's mouse-down capture is still held
+    // while its onClick runs).
+    inline void releaseCaptureIfHeldBy(juce::Component* c) {
+#if defined(_WIN32)
+        if (c == nullptr) return;
+        if (auto* peer = c->getPeer()) {
+            if (auto* hwnd = (HWND) peer->getNativeHandle()) {
+                if (GetCapture() == hwnd) ReleaseCapture();
+            }
+        }
+#else
+        (void) c;
+#endif
+    }
+    // The platform-neutral half of the same neutralisation: kill any
+    // unbounded-mouse-movement mode (JUCE sliders can enable it in
+    // velocity drags; while on, the source warps/offsets the cursor)
+    // and make sure no cursor is left hidden.
+    inline void resetMouseSources() {
+        auto& desktop = juce::Desktop::getInstance();
+        for (int i = 0; i < desktop.getNumMouseSources(); ++i) {
+            if (auto* ms = desktop.getMouseSource(i)) {
+                if (ms->isUnboundedMouseMovementEnabled()) ms->enableUnboundedMouseMovement(false);
+                ms->revealCursor();
+            }
+        }
+    }
 } // namespace settingsPalette
 // Scoped LookAndFeel for the Settings window ONLY (the main bar keeps
 // stock JUCE behaviour — this is set on the Settings content + its
@@ -227,6 +269,20 @@ public:
             toggle("VSync (default on)", st->vsync, [&](bool b){ st->vsync = b; });
             combo("FPS Limit", {"15","30","60","120"}, st->fpsLimit == 15 ? 0 : st->fpsLimit == 30 ? 1 : st->fpsLimit == 60 ? 2 : 3,
                   [&](int v){ st->fpsLimit = v == 0 ? 15 : v == 1 ? 30 : v == 2 ? 60 : 120; if (onFpsChanged) onFpsChanged(); });
+            // v0.28.2: Performance Mode (Jackson's low-end laptop
+            // round, scope B). Full = your settings exactly.
+            // Low-End = FPS capped at 30, Undertow bloom off,
+            // visualizer layer capped at 320x180, scope pitch every
+            // 3rd frame, Undertow swarm/dust halved. Auto (the
+            // default) = starts Full and steps down to Low-End if
+            // the measured UI fps sags under 85% of the limit for
+            // 3 s — and STAYS down: the step-down is saved, so the
+            // next launch starts stepped down too. Picking Full or
+            // Low-End here is the deliberate step back up: it clears
+            // the saved step-down.
+            combo("Performance Mode", {"Full","Low-End","Auto"}, st->performanceMode,
+                  [&](int v){ st->performanceMode = v; if (onFpsChanged) onFpsChanged(); });
+            note("Default is Auto: on a fast PC it never steps down and nothing changes. On a slow laptop it rescues itself within seconds, no Settings trip needed. Your own FPS Limit still applies underneath — Low-End never raises it, only caps it at 30.");
         });
         panel("About", nullptr, [&]{
             note("MeterBar v" + juce::String(meterbar::kVersionString) + " — audio meters that dock to any screen edge.");
@@ -431,6 +487,14 @@ public:
     // under the default Windows light app mode, in every theme.
     void visibilityChanged() override {
         juce::DocumentWindow::visibilityChanged();
+        // v0.28.2: at BOTH session boundaries, neutralise any orphaned
+        // mouse capture / unbounded mode / hidden cursor (see
+        // releaseCaptureIfHeldBy). On show this frees a capture the
+        // opening click left on this window; on hide it frees whatever
+        // an in-Settings gesture orphaned, instead of the confinement
+        // lingering until an Alt-Tab forces the same release.
+        settingsPalette::releaseCaptureIfHeldBy(this);
+        settingsPalette::resetMouseSources();
         if (isVisible()) settingsPalette::applyDarkTitleBar(this);
     }
     void closeButtonPressed() override { setVisible(false); }
