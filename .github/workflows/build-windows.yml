@@ -102,6 +102,12 @@ jobs:
           name: MeterBar-Setup-${{ steps.ver.outputs.version }}
           path: dist/MeterBar-Setup.exe
 
+      - name: Upload staged app exe as a workflow artifact (diag branch only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeterBar-exe-diag1
+          path: dist/MeterBar.exe
+
       - name: Publish the installer on the version tag's GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
