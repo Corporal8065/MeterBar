@@ -26,6 +26,17 @@ public:
     // device shows up; repeat consumers use the cache.
     static std::vector<EndpointInfo> enumerateRenderEndpointsCached(bool forceRefresh = false);
     bool start(Callback cb, const std::string& deviceNameUtf8 = "", const std::string& deviceIdUtf8 = "");
+    // v0.27.0 (item 8): PER-APP process-loopback capture — hear ONLY
+    // the named application's process tree (e.g. "Spotify.exe",
+    // "TIDAL.exe") via ActivateAudioInterfaceAsync on
+    // VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK. If the process is not
+    // running or activation fails, NO audio is captured (silence)
+    // and statusInfo() says why ("Spotify — not running"); there is
+    // deliberately NO fallback to system audio.
+    bool startProcessLoopback(Callback cb, const std::string& exeNameUtf8);
+    // Is a process with this executable name currently running?
+    // (Settings shows the source state from this + statusInfo().)
+    static bool isProcessRunning(const std::string& exeNameUtf8);
     void stop();
     bool isRunning() const;
     double sampleRate() const;

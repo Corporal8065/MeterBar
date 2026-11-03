@@ -206,10 +206,15 @@ public:
         bool fired = false;
         // Warm-up: no firing in the first 0.6 s — the baseline is still
         // converging toward steady material and would false-fire on it.
-        const bool ratioHit = ms > baseline_ * 1.95;
-        const bool fluxHit = ms > baseline_ * 1.45 && prevMs_ > 0 && ms > prevMs_ * 1.7;
-        if (elapsed_ > 0.6 && ms > 1e-6 && baseline_ > 1e-9 && (ratioHit || fluxHit) && sinceOnset_ > 0.150) {
-            double strength = std::clamp((ms / baseline_ - 1.95) / 5.0 + 0.45, 0.0, 1.0);
+        // v0.27.0 (item 16): pulse sensitivity raised again at
+        // Jackson's word — ratio bar 1.95 -> 1.82, flux bars
+        // 1.45/1.70 -> 1.35/1.58, refractory 150 -> 135 ms. The
+        // absolute floor + warm-up still keep silence and steady
+        // tones silent (the suite pins both).
+        const bool ratioHit = ms > baseline_ * 1.82;
+        const bool fluxHit = ms > baseline_ * 1.35 && prevMs_ > 0 && ms > prevMs_ * 1.58;
+        if (elapsed_ > 0.6 && ms > 1e-6 && baseline_ > 1e-9 && (ratioHit || fluxHit) && sinceOnset_ > 0.135) {
+            double strength = std::clamp((ms / baseline_ - 1.82) / 5.0 + 0.45, 0.0, 1.0);
             if (fluxHit && strength < 0.4) strength = 0.4; // a sharp attack reads even inside loud material
             pulse_ = std::max(pulse_, (float)strength);
             sinceOnset_ = 0; fired = true; ++onsetCount_;

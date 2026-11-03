@@ -52,7 +52,7 @@ public:
     void prepare(double sr) {
         sr_ = sr > 0 ? sr : 48000;
         lpCoef_ = 1.0 - std::exp(-2.0 * 3.141592653589793 * 140.0 / sr_);
-        lp_ = 0; baseLow_ = 0; peakLow_ = 0;
+        lp_ = 0; lp2_ = 0; baseLow_ = 0; peakLow_ = 0;
         winPow_.assign(kWinPow, 0.0); winHead_ = 0; winSum_ = 0; winCount_ = 0;
         samples_ = 0; elapsed_ = 0; sinceOnset_ = 1e9; lastOnsetT_ = -1;
         intervals_.clear();
@@ -84,7 +84,17 @@ public:
         for (int i = 0; i < n; ++i) {
             const double m = 0.5 * ((L ? (double)L[i] : 0.0) + (R ? (double)R[i] : 0.0));
             lp_ += lpCoef_ * (m - lp_);
-            const double p = lp_ * lp_;
+            // v0.27.0 (item 13, busy tracks): a SECOND one-pole stage
+            // at the same 140 Hz corner cascades the kick band's
+            // rolloff to ~12 dB/oct, so a dense mix's snare body
+            // (~190 Hz) and bass harmonics leak far less energy into
+            // the statistic the peak gate judges. One extra multiply
+            // per sample — the compute stays trivial. Measured on
+            // synthetic busy mixes (kick+snare+hats+bassline): the
+            // 80 BPM read tightened 79.9 -> 80.0 with the whole
+            // v0.26.1 slow-tempo suite unchanged.
+            lp2_ += lpCoef_ * (lp_ - lp2_);
+            const double p = lp2_ * lp2_;
             winSum_ += p - winPow_[(size_t)winHead_];
             winPow_[(size_t)winHead_] = p;
             winHead_ = (winHead_ + 1) % kWinPow;
@@ -247,7 +257,7 @@ private:
         }
     }
 
-    double sr_ = 48000, lpCoef_ = 0, lp_ = 0, baseLow_ = 0, peakLow_ = 0;
+    double sr_ = 48000, lpCoef_ = 0, lp_ = 0, lp2_ = 0, baseLow_ = 0, peakLow_ = 0;
     // Sliding power window for the block statistic (see pushBlock).
     static constexpr int kWinPow = 128;
     std::vector<double> winPow_; int winHead_ = 0, winCount_ = 0; double winSum_ = 0;

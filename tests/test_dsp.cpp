@@ -1881,6 +1881,143 @@ int main() {
         }
     }
 
+    // === v0.27.0 ===
+    // --- BeatTracker on BUSY tracks (item 13): kick + snare +
+    // hats + bassline at ~80 / ~100 / ~128 BPM must read the TRUE
+    // tempo. The v0.27.0 cascaded kick-band lowpass (two one-pole
+    // stages at 140 Hz) isolates the kick from the snare's low
+    // body and the bassline's harmonics in a dense mix.
+    {
+        const double sr = 48000; const int blk = 256;
+        std::vector<float> L(blk), R(blk);
+        auto feedBusy = [&](BeatTracker& tr, double bpm, double secs) {
+            const double period = 60.0 / bpm;
+            double tNow = 0; int blocks = (int)std::lround(secs * sr / blk);
+            auto env = [](double lt, double dur, double atk) {
+                if (lt < 0 || lt >= dur) return 0.0;
+                return lt < atk ? 0.5 - 0.5 * std::cos(M_PI * lt / atk)
+                                : std::pow(1.0 - (lt - atk) / (dur - atk), 1.6);
+            };
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) {
+                    double tt = tNow + (double)i / sr;
+                    double v = 0.008 * std::sin(2 * M_PI * 440.0 * tt);
+                    double klt = std::fmod(tt - 0.35, period); if (klt < 0) klt += period;
+                    v += 0.85 * std::sin(2 * M_PI * 55.0 * klt) * env(klt, 0.28, 0.004);   // kick, every beat
+                    double barPos = std::fmod(tt / period, 4.0);
+                    double slt = (barPos - 1.0) * period; if (barPos < 1.0) slt = (barPos + 3.0) * period;
+                    double slt2 = (barPos - 3.0) * period; if (barPos < 3.0) slt2 = (barPos + 1.0) * period;
+                    double sEnv = env(slt, 0.16, 0.002) + env(slt2, 0.16, 0.002);
+                    v += 0.55 * std::sin(2 * M_PI * 190.0 * tt) * sEnv + 0.30 * std::sin(2 * M_PI * 1800.0 * tt) * sEnv; // snare 2 & 4
+                    double hlt = std::fmod(tt - 0.35, period / 2); if (hlt < 0) hlt += period / 2;
+                    v += 0.22 * std::sin(2 * M_PI * 8000.0 * tt) * env(hlt, 0.05, 0.001);  // hats, eighths
+                    int step = (int)std::floor((tt - 0.35) / (period / 2));
+                    double bf = (step % 4 == 0) ? 55.0 : (step % 4 == 2) ? 65.4 : 49.0;
+                    v += 0.42 * std::sin(2 * M_PI * bf * tt) * env(hlt, period / 2 * 0.9, 0.01); // bassline, eighths
+                    L[(size_t)i] = (float)v; R[(size_t)i] = (float)v;
+                }
+                tr.pushBlock(L.data(), R.data(), blk);
+                tNow += blk / sr;
+            }
+        };
+        for (double bpm : { 80.0, 100.0, 128.0 }) {
+            BeatTracker tr; tr.prepare(sr);
+            feedBusy(tr, bpm, 24.0);
+            std::printf("beattrack busy %.0f: locked=%d read=%.1f onsets=%llu\n",
+                        bpm, (int)tr.locked(), tr.bpm(), (unsigned long long)tr.onsetCount());
+            CHECK(tr.locked());
+            CHECK(tr.bpm() > bpm * 0.94 && tr.bpm() < bpm * 1.06);
+        }
+    }
+    // --- BeatPulse sensitivity (item 16): a hit at energy ratio
+    // ~1.9 over the baseline fires (the v0.26.x bar was 1.95).
+    {
+        const double sr = 48000; const int blk = 256;
+        std::vector<float> L(blk), R(blk);
+        BeatPulse bp; bp.prepare(sr);
+        auto pushAmp = [&](float amp, int blocks) {
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < blk; ++i) { double ph = 2 * M_PI * 440.0 * (b * blk + i) / sr; L[i] = (float)(amp * std::sin(ph)); R[i] = L[i]; }
+                bp.pushBlock(L.data(), R.data(), blk);
+            }
+        };
+        pushAmp(0.5f, (int)(2.0 * sr / blk));
+        uint64_t before = bp.onsetCount();
+        for (int h = 0; h < 4; ++h) { pushAmp(0.69f, 1); pushAmp(0.5f, (int)(0.45 * sr / blk)); } // ms ratio ~1.90
+        std::printf("beatpulse v0.27 sensitivity: onsets = %llu (need >= 3)\n", (unsigned long long)(bp.onsetCount() - before));
+        CHECK(bp.onsetCount() - before >= 3);
+    }
+    // --- Field v0.27.0: stereo lookback + size scale (item 9),
+    // more bubbles, screen bursts (item 10), sub body inertia
+    // (item 17), bridge state (item 20), sub band honesty.
+    {
+        VisualizerSettings vs;
+        CHECK(VisualizerField::kFieldTarget > 150);      // MORE bubbles than v0.26.x's 150
+        VisualizerField fld;
+        const float bands[3] = { 0.6f, 0.5f, 0.4f };
+        for (int i = 0; i < 90; ++i) fld.update(1.f / 60.f, bands, vs, 0.f, 0.f, 0.9f, 0.f);
+        CHECK(fld.widthLookback() > 0.7f);               // the lookback holds the wide image
+        CHECK(fld.sizeScale() > 1.2f);                   // and bubbles swell with it
+        CHECK((int)fld.particles().size() == VisualizerField::kFieldTarget);
+        bool huesDiffer = false;                          // different colours by default: per-dot jitter spreads hues
+        if (fld.particles().size() > 10) {
+            auto c0 = fld.colorFor(fld.particles()[0], vs);
+            for (size_t i = 1; i < fld.particles().size(); ++i) {
+                auto c = fld.colorFor(fld.particles()[i], vs);
+                if (c.r != c0.r || c.g != c0.g || c.b != c0.b) { huesDiffer = true; break; }
+            }
+        }
+        CHECK(huesDiffer);
+        // Sub body: heavy + slow — a 0.25 s blast of sub barely
+        // moves it; 3 s of sustained sub swells it; silence lets
+        // it settle back down slowly (not instantly).
+        VisualizerField sub;
+        const float noBands[3] = { 0, 0, 0 };
+        for (int i = 0; i < 15; ++i) sub.update(1.f / 60.f, noBands, vs, 0.f, 0.f, 0.f, 1.0f);
+        const float afterBlast = sub.subLevel();
+        for (int i = 0; i < 180; ++i) sub.update(1.f / 60.f, noBands, vs, 0.f, 0.f, 0.f, 1.0f);
+        const float afterSustain = sub.subLevel();
+        for (int i = 0; i < 30; ++i) sub.update(1.f / 60.f, noBands, vs, 0.f, 0.f, 0.f, 0.0f);
+        const float afterHalfSec = sub.subLevel();
+        std::printf("subbody: blast=%.3f sustain=%.3f release0.5s=%.3f\n", afterBlast, afterSustain, afterHalfSec);
+        CHECK(afterBlast < 0.35f);                       // inertia: no snap
+        CHECK(afterSustain > 0.8f);                      // sustained sub swells it
+        CHECK(afterHalfSec > 0.4f && afterHalfSec < afterSustain); // slow release
+        // Screen bursts: transients in exactly 2 bands fire 3
+        // bursts of different colours with random transparency.
+        VisualizerField fb;
+        const float calm[3] = { 0.1f, 0.1f, 0.1f };
+        for (int i = 0; i < 30; ++i) fb.update(1.f / 30.f, calm, vs);
+        const float twoBand[3] = { 0.95f, 0.9f, 0.1f };
+        fb.update(1.f / 30.f, twoBand, vs);
+        std::printf("screenbursts: n=%d\n", (int)fb.screenBursts().size());
+        CHECK(fb.screenBursts().size() == 3);
+        if (fb.screenBursts().size() == 3) {
+            auto& b0 = fb.screenBursts()[0]; auto& b1 = fb.screenBursts()[1]; auto& b2 = fb.screenBursts()[2];
+            CHECK(std::abs(b0.hue - b1.hue) > 0.15f && std::abs(b1.hue - b2.hue) > 0.15f); // different colours
+            CHECK(b0.alpha >= 0.2f && b0.alpha <= 0.8f && b1.alpha >= 0.2f && b1.alpha <= 0.8f); // random transparency in range
+        }
+        // Bridge: wide + mid/high present + low/sub ~zero, held.
+        VisualizerField br;
+        const float bridgeBands[3] = { 0.02f, 0.5f, 0.45f };
+        for (int i = 0; i < 12; ++i) br.update(1.f / 60.f, bridgeBands, vs, 0.f, 0.f, 0.9f, 0.0f);
+        CHECK(!br.bridgeActive());                      // not yet — the condition must SUSTAIN
+        for (int i = 0; i < 60; ++i) br.update(1.f / 60.f, bridgeBands, vs, 0.f, 0.f, 0.9f, 0.0f);
+        CHECK(br.bridgeActive());
+        const float bassyBands[3] = { 0.7f, 0.5f, 0.45f };
+        for (int i = 0; i < 30; ++i) br.update(1.f / 60.f, bassyBands, vs, 0.f, 0.f, 0.9f, 0.0f);
+        CHECK(!br.bridgeActive());                      // bass back -> bridge state ends
+        // Sub band honesty: energy at 30 Hz reads; at 200 Hz doesn't.
+        {
+            std::vector<float> db(513, -70.f);
+            db[1] = -10.f; // bin 1 = 46.9 Hz centre, span 23-70 Hz: the only bin with under-45 Hz content at this FFT size
+            CHECK(subBandEnergy(db, 1024, 48000.0) > 0.8f);
+            std::vector<float> db2(513, -70.f);
+            for (int b = 1; b < 513; ++b) { double f = b * 48000.0 / 1024; if (f > 150.0 && f < 300.0) db2[(size_t)b] = -10.f; }
+            CHECK(subBandEnergy(db2, 1024, 48000.0) < 0.05f);
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

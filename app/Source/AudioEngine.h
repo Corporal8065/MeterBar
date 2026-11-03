@@ -66,9 +66,18 @@ public:
             if (dev) { activeSampleRate = dev->getCurrentSampleRate(); loudness.prepare(activeSampleRate.load()); }
             deviceManager.addAudioCallback(this);
         } else if (state.audioSource == "System Loopback") {
-            // Capture the CHOSEN output device — by endpoint ID when known
-            // (v0.13), by friendly name as fallback (empty = default output).
-            loopback.start([this](const float* L, const float* R, int n, double sr){ pushStereo(L, R, n, sr); }, state.outputDeviceName, state.outputDeviceId);
+            auto cb = [this](const float* L, const float* R, int n, double sr){ pushStereo(L, R, n, sr); };
+            // v0.27.0 (item 8): per-app sources — Spotify / Tidal are
+            // captured by PROCESS loopback (only that app's process
+            // tree is heard; silence while it is not running, never a
+            // fallback to the system mix). System keeps the endpoint
+            // loopback below. Changing source restarts capture here,
+            // cleanly, like every other source switch.
+            if (state.appSource == 1) loopback.startProcessLoopback(cb, "Spotify.exe");
+            else if (state.appSource == 2) loopback.startProcessLoopback(cb, "TIDAL.exe");
+            else // Capture the CHOSEN output device — by endpoint ID when known
+                 // (v0.13), by friendly name as fallback (empty = default output).
+                loopback.start(cb, state.outputDeviceName, state.outputDeviceId);
         } else { // Test Tone
             startTestTone();
         }
@@ -114,6 +123,7 @@ public:
     int beatCountInBar() { return beatTracker.countInBar(); }
     float beatDownbeatEnv() { return beatTracker.downbeatEnv(); }
     float beatGridEnv() { return beatTracker.beatEnv(); } // v0.26.1: any grid beat (the scope's plain beat dot)
+    float beatPhaseValue() { return beatTracker.beatPhase(); } // v0.27.0 (item 13): grid phase 0..1 for the scope's BPM-matched marker
     int collectBeats(float maxAge, float* ages, int* counts, int maxOut) {
         return beatTracker.collectRecentBeats(maxAge, ages, counts, maxOut);
     }
@@ -137,6 +147,22 @@ public:
     long long loopbackPackets() { return loopback.packetsReceived(); }
     juce::String loopbackFormat() { return juce::String(loopback.formatInfo()); }
     juce::String loopbackStatus() { return juce::String(loopback.statusInfo()); }
+    // v0.27.0 (item 8): the Settings source-state line for the
+    // per-app sources — "Spotify — running" / "Spotify — not
+    // running" / the capture thread's own status when it differs.
+    juce::String appSourceState() {
+        if (state.appSource == 1 || state.appSource == 2) {
+            const char* exe = state.appSource == 1 ? "Spotify.exe" : "TIDAL.exe";
+            const char* label = state.appSource == 1 ? "Spotify" : "Tidal";
+            auto st = loopback.statusInfo();
+            if (!WindowsLoopback::isProcessRunning(exe))
+                return juce::String(label) + " — not running (MeterBar hears silence until it starts)";
+            if (!st.empty() && st != "not started" && st != "running")
+                return juce::String(label) + " — " + juce::String(st);
+            return juce::String(label) + " — running (process loopback, this app only)";
+        }
+        return "System — endpoint loopback (everything the chosen output plays)";
+    }
     float loopbackPeak() { return loopback.peakSeen(); }
     double loudnessValue() { const juce::ScopedLock sl(loudLock); return loudness.valueFor(state.loudnessMode); }
     float peakValue() { const juce::ScopedLock sl(loudLock); return loudness.peak(); }

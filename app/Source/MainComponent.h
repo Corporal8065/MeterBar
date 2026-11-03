@@ -101,10 +101,35 @@ public:
 // face); if neither exists at runtime the default sans is used,
 // which is the pre-fix behaviour. Applied per button, so every
 // other button (Update! included) keeps the existing font.
-// v0.26.1: now derives from PoppedButtonLookAndFeel, so the
-// glyphs get the text pop with the same draw.
-class IconButtonLookAndFeel : public PoppedButtonLookAndFeel {
+// v0.27.0 (item 6, Jackson's correction): the icon GLYPHS are
+// emoji — they must NOT be doubled ("the emoji text did not need
+// doubling — it was good as it was"). This class therefore derives
+// from LookAndFeel_V4 DIRECTLY again and draws its button text
+// plainly, once, exactly as the stock V4 does; only the FONT (the
+// emoji typeface below) is overridden. Word buttons keep the pop
+// via PoppedButtonLookAndFeel.
+class IconButtonLookAndFeel : public juce::LookAndFeel_V4 {
 public:
+    void drawButtonText(juce::Graphics& g, juce::TextButton& button,
+                        bool /*shouldDrawButtonAsHighlighted*/, bool /*shouldDrawButtonAsDown*/) override {
+        juce::Font font(getTextButtonFont(button, button.getHeight()));
+        g.setFont(font);
+        const auto colour = button.findColour(button.getToggleState() ? juce::TextButton::textColourOnId
+                                                                      : juce::TextButton::textColourOffId)
+                              .withMultipliedAlpha(button.isEnabled() ? 1.0f : 0.5f);
+        const int yIndent = juce::jmin(4, button.proportionOfHeight(0.3f));
+        const int cornerSize = juce::jmin(button.getHeight(), button.getWidth()) / 2;
+        const int fontHeight = juce::roundToInt(font.getHeight() * 0.6f);
+        const int leftIndent = juce::jmin(fontHeight, 2 + cornerSize / (button.isConnectedOnLeft() ? 4 : 2));
+        const int rightIndent = juce::jmin(fontHeight, 2 + cornerSize / (button.isConnectedOnRight() ? 4 : 2));
+        const int textWidth = button.getWidth() - leftIndent - rightIndent;
+        if (textWidth > 0) {
+            g.setColour(colour);
+            g.drawFittedText(button.getButtonText(),
+                             juce::Rectangle<int>(leftIndent, yIndent, textWidth, button.getHeight() - yIndent * 2),
+                             juce::Justification::centred, 2, 1.0f);
+        }
+    }
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override {
         const float h = juce::jmin(16.0f, (float)buttonHeight * 0.62f);
         // Drag-lag fix (2026-10-31): findAllTypefaceNames() enumerates the

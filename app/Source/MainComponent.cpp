@@ -157,6 +157,7 @@ MainComponent::MainComponent() {
     settingsWin->content.deviceManager = &engine.deviceManager;
     settingsWin->content.onChanged = [this]{ linkBgEffectShadow_ = -1; applyTheme(); layoutModules(); repaint(); syncScreenSpace(); linkClient_.notifyLocalSettings(); }; // v0.2.1: bg publish feed (was missing). Drag-lag fix: any LOCAL settings change drops the adopted-effect shadow — local intent wins and MeterBar publishes its true values again
     settingsWin->content.onSourceChanged = [this]{ engine.applySource(); };
+    settingsWin->content.appSourceStatus = [this]{ return engine.appSourceState(); }; // v0.27.0 (item 8)
     settingsWin->content.onFpsChanged = [this]{ applyFps(); };
     settingsWin->content.onBgLinkToggled = [this]{ linkClient_.notifyBgLinkChanged(); }; // v0.21.3
     settingsWin->content.onArrange = [this]{ doArrangeWindows(); };   // v0.18: Settings > Window buttons
@@ -663,28 +664,61 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
             // v0.25.0 FIELD: the vortex dots, drawn through the
             // exact same dot path (and the same half-res + blur
             // envelope) as Bubbles.
-            // v0.26.0: each dot's TAIL ghosts draw first (oldest
-            // ghost first), smaller and dimmer, brightening with
-            // the field's pulse — the tail pulses with the
-            // transients, per Jackson's ask.
+            // v0.27.0 (item 10): SCREEN BURSTS first (under the
+            // dots) — three different-colour soft discs with their
+            // own random transparency when a frame's transients
+            // sat in ~2 bands (core VisualizerField decides).
+            for (auto& sb : vizField.screenBursts()) {
+                const float env = std::sin(3.14159265f * juce::jlimit(0.f, 1.f, sb.age / std::max(0.01f, sb.life)));
+                auto bc = meterbar::vizHsvToRgb(sb.hue, vs.saturation, 0.85f);
+                ig.setColour(juce::Colour(bc.r, bc.g, bc.b).withAlpha(sb.alpha * env * vizField.visibility()));
+                float bx, by;
+                meterbar::fieldToLocal(fm, sb.x, sb.y, bx, by);
+                const float br = sb.radius * (float)iw * 0.5f;
+                ig.fillEllipse(bx - br, by - br, br * 2.f, br * 2.f);
+            }
+            // v0.27.0 (item 17): the SUB BODY — one big, heavy,
+            // slow object low in the field that plays only when
+            // the sub plays. Its radius and glow ride the core's
+            // inertial spring level (never the raw band), drawn
+            // as a deep-coloured mass with a brighter rim.
+            if (vizField.subLevel() > 0.03f) {
+                const float sl = juce::jlimit(0.f, 1.f, vizField.subLevel());
+                float sx, sy;
+                meterbar::fieldToLocal(fm, 0.5f, 0.88f, sx, sy);
+                const float sr2 = (0.05f + 0.13f * sl) * (float)iw;
+                auto sc = meterbar::vizHsvToRgb(vs.baseHue + 0.55f, juce::jmin(1.f, vs.saturation + 0.1f), 0.30f + 0.45f * sl);
+                ig.setColour(juce::Colour(sc.r, sc.g, sc.b).withAlpha(0.55f * sl * vizField.visibility()));
+                ig.fillEllipse(sx - sr2, sy - sr2, sr2 * 2.f, sr2 * 2.f);
+                ig.setColour(juce::Colour(sc.r, sc.g, sc.b).brighter(0.6f).withAlpha(0.8f * sl * vizField.visibility()));
+                ig.drawEllipse(sx - sr2, sy - sr2, sr2 * 2.f, sr2 * 2.f, 1.5f + 2.5f * sl);
+            }
+            // v0.27.0 (item 12): each dot's TAIL is one continuous
+            // TAPERED STREAK along its motion path — a polyline
+            // through the 4 trail stamps + the head, stroked in
+            // segments of decreasing width and brightness (thick
+            // at the head, thinning to the oldest point). NOT
+            // ghost balls (the v0.26.0 render Jackson replaced).
+            const float sizeScale = vizField.sizeScale(); // v0.27.0 (item 9): stereo-image bubble size
             for (auto& p : vizField.particles()) {
+                float px, py;
+                meterbar::fieldToLocal(fm, p.x, p.y, px, py);
+                const float r = p.size * 1.35f * sizeScale;
+                if (!meterbar::fieldDotVisible(px, py, r, iw, ih)) continue; // another bar's slice of the field
                 if (p.trailSet) {
-                    for (int k = 1; k >= 0; --k) {
-                        auto tc = vizField.trailColorFor(p, vs, k);
+                    // points oldest -> head
+                    float xs[5], ys[5];
+                    for (int k = 0; k < 4; ++k) meterbar::fieldToLocal(fm, p.trailX[3 - k], p.trailY[3 - k], xs[k], ys[k]);
+                    xs[4] = px; ys[4] = py;
+                    for (int sgm = 0; sgm < 4; ++sgm) {
+                        auto tc = vizField.trailColorFor(p, vs, 3 - sgm);
                         ig.setColour(juce::Colour(tc.r, tc.g, tc.b));
-                        float tx, ty;
-                        meterbar::fieldToLocal(fm, p.trailX[k], p.trailY[k], tx, ty);
-                        const float tr = p.size * 1.35f * (0.82f - 0.20f * (float)k);
-                        if (!meterbar::fieldDotVisible(tx, ty, tr, iw, ih)) continue;
-                        ig.fillEllipse(tx - tr, ty - tr, tr * 2.f, tr * 2.f);
+                        const float wdt = r * (0.35f + 0.55f * (float)sgm / 3.f); // tapers toward the tail tip
+                        ig.drawLine(xs[sgm], ys[sgm], xs[sgm + 1], ys[sgm + 1], wdt);
                     }
                 }
                 auto c = vizField.colorFor(p, vs);
                 ig.setColour(juce::Colour(c.r, c.g, c.b));
-                float px, py;
-                meterbar::fieldToLocal(fm, p.x, p.y, px, py);
-                const float r = p.size * 1.35f;
-                if (!meterbar::fieldDotVisible(px, py, r, iw, ih)) continue; // another bar's slice of the field
                 ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
             }
         } else {
@@ -733,14 +767,32 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
         }
     }
     // v0.25.1: grouped, the wash + crisp passes ride the shared
-    // opacity (the twins' composite); ungrouped this is v0.21.5's
-    // exact composite (wash at full, crisp at 0.30).
+    // opacity (the twins' composite); ungrouped the wash is full
+    // and the crisp pass sits at 0.30.
+    // v0.27.0 (item 11): FOGGY GLASS — the blur's strength now
+    // falls off RADIALLY: the wash composites at reduced strength
+    // across the whole frame, then the centre region composites
+    // AGAIN at full strength, so the middle reads as thick fog
+    // diffusing toward clearer edges. The crisp pass is drawn
+    // scaled ~4% up about the centre — a small radial displacement
+    // of the background sampling that reads as slight refraction
+    // through the fogged layer. The convolution itself is still
+    // the quarter-res kernel above (performance approach kept).
     const bool grouped = group != own;
     const float bgOp = juce::jlimit(0.15f, 1.0f, engine.state.backgroundOpacity);
-    if (grouped) g.setOpacity(bgOp);
+    const float washOp = grouped ? bgOp : 1.0f;
+    g.setOpacity(0.55f * washOp);
     g.drawImage(vizBlur, bounds.toFloat());
+    g.setOpacity(washOp);
+    {
+        const int cw = juce::roundToInt(bounds.getWidth() * 0.55f), chh = juce::roundToInt(bounds.getHeight() * 0.55f);
+        const int dx = (bounds.getWidth() - cw) / 2, dy = (bounds.getHeight() - chh) / 2;
+        const int sw = juce::roundToInt(vizBlur.getWidth() * 0.55f), sh = juce::roundToInt(vizBlur.getHeight() * 0.55f);
+        const int sx = (vizBlur.getWidth() - sw) / 2, sy = (vizBlur.getHeight() - sh) / 2;
+        g.drawImage(vizBlur, dx, dy, cw, chh, sx, sy, sw, sh);
+    }
     g.setOpacity(grouped ? 0.30f * bgOp : 0.30f); // v0.21.5: crisp pass backed off further (was 0.45) so the wash, not the dots, is what reads
-    g.drawImage(vizCache, bounds.toFloat());
+    g.drawImage(vizCache, bounds.toFloat().expanded(bounds.getWidth() * 0.02f, bounds.getHeight() * 0.02f)); // v0.27.0: refraction displacement
     g.setOpacity(1.0f);
     g.setColour(juce::Colours::black.withAlpha(0.18f)); // v0.20.3: dark scrim — the moodier tone
     g.fillRect(bounds);
@@ -858,6 +910,7 @@ void MainComponent::prepareFrame() {
     // displays mark beats without asserting beat 1. The scope's
     // dot takes the any-beat envelope instead of the downbeat one.
     frame.beatPulseEnv = engine.beatGridEnv();
+    frame.beatPhase = engine.beatPhaseValue(); // v0.27.0 (item 13)
     {
         float ages[64]; int counts[64];
         const int nb = engine.collectBeats(30.f, ages, counts, 64);
@@ -946,9 +999,13 @@ void MainComponent::prepareFrame() {
         // v0.26.0: the Field also hears the beat — the grid's
         // downbeat envelope once it locks, the Beat Pulse envelope
         // until then — so its objects impulse on the downbeats.
+        // v0.27.0: it also hears the STEREO IMAGE (width, item 9)
+        // and the TRUE SUB energy (bins under ~45 Hz, item 17).
         else if (st.visualizerStyle == 2) vizField.update(dt, e.data(), vs, latestBalance_,
                                                           engine.beatLocked() ? engine.beatDownbeatEnv()
-                                                                              : engine.beatLevel() * 0.8f);
+                                                                              : engine.beatLevel() * 0.8f,
+                                                          juce::jlimit(0.f, 1.f, frame.stereo.widthPct / 100.f),
+                                                          meterbar::subBandEnergy(frame.spectrumDb, st.fftSize, frame.sampleRate));
         else visualizer.update(dt, e.data(), vs, latestBalance_);
     }
 }

@@ -465,19 +465,36 @@ struct VizFieldDot {
     float size = 2;
     int band = 1;    // the band that feeds this dot (palette + orbit speed)
     int vortex = 0;  // the vortex it orbits
-    // v0.26.0: the TAIL — the dot's positions ~45 ms and ~90 ms
-    // ago, rendered behind it as fading ghosts that brighten with
-    // the field's pulse envelope (Jackson: "a tail coming from it
-    // that also pulses with the transients"). trailSet is false
-    // until the first trail shift stamps them.
-    float trailX[2] = { 0, 0 }, trailY[2] = { 0, 0 };
+    float hueT = 0;  // v0.27.0 (item 9): per-dot hue jitter — the field's
+                     // dots wear DIFFERENT colours by default instead of
+                     // one hue per band; set at spawn from the RNG stream.
+    // v0.26.0: the TAIL — the dot's recent positions, rendered
+    // behind it as ONE continuous tapered streak along the motion
+    // path (v0.27.0, item 12: longer history — 4 stamps ~45 ms
+    // apart — and the app strokes a polyline through them instead
+    // of drawing ghost balls). trailSet is false until the first
+    // trail shift stamps them.
+    float trailX[4] = { 0, 0, 0, 0 }, trailY[4] = { 0, 0, 0, 0 };
     bool trailSet = false;
+};
+
+// v0.27.0 (item 10): a SCREEN BURST — when a frame's transients sit
+// predominantly in ~2 of the 3 bands, three of these fire at once:
+// large soft discs at scattered positions, each a DIFFERENT colour,
+// each with its own random transparency, prevalent across the whole
+// screen for ~1 s. Pure data; the app renders them under the dots.
+struct VizScreenBurst {
+    float x = 0.5f, y = 0.5f;   // unit-square centre
+    float radius = 0.3f;        // unit-space radius
+    float hue = 0.f;            // absolute hue 0..1
+    float alpha = 0.5f;         // this burst's own peak transparency
+    float age = 0, life = 1;    // seconds
 };
 
 class VisualizerField {
 public:
     static constexpr int kVortices = 4;
-    static constexpr int kFieldTarget = 150;
+    static constexpr int kFieldTarget = 260; // v0.27.0 (item 9): MORE bubbles in the function (was 150)
     static constexpr int kFieldHardCap = 400;
 
     // beatEnv (v0.26.0): the beat grid's downbeat envelope 0..1
@@ -485,14 +502,57 @@ public:
     // back to BeatPulse's level until the grid locks). Defaulted
     // so existing callers — and the whole pre-v0.26 behaviour —
     // are untouched when no beat is fed.
+    // v0.27.0: stereoWidth (item 9 — the stereo IMAGE, 0..1 from
+    // StereoFrame::widthPct/100) and subEnergy (item 17 — true
+    // sub-band energy 0..1, bins under ~45 Hz; see subBandEnergy)
+    // join the feed, both defaulted so older callers are untouched.
     void update(float dt, const float bandEnergy[3], const VisualizerSettings& st,
-                float stereoBalance = 0.f, float beatEnv = 0.f) {
+                float stereoBalance = 0.f, float beatEnv = 0.f,
+                float stereoWidth = 0.f, float subEnergy = 0.f) {
         if (dt <= 0) return;
         time_ += dt;
         {
             float b = stereoBalance < -1.f ? -1.f : stereoBalance > 1.f ? 1.f : stereoBalance;
             float a = 8.f * dt; if (a > 1.f) a = 1.f;
             balance_ += (b - balance_) * a;
+        }
+        // --- v0.27.0 (item 9): STEREO-IMAGE LOOKBACK — a short
+        // rolling history (~1.5 s at frame cadence) of the stereo
+        // width; its mean drives bubble SIZE (sizeScale()) and the
+        // cluster intensity in valueFor(). A quick lookback, not an
+        // instant read, so one wide hit swells the field briefly
+        // instead of strobing it.
+        {
+            const float w = stereoWidth < 0.f ? 0.f : stereoWidth > 1.f ? 1.f : stereoWidth;
+            widthHist_[widthHead_] = w;
+            widthHead_ = (widthHead_ + 1) % kWidthHist;
+            if (widthCount_ < kWidthHist) ++widthCount_;
+            float sum = 0; for (int i = 0; i < widthCount_; ++i) sum += widthHist_[i];
+            widthAvg_ = widthCount_ > 0 ? sum / (float)widthCount_ : 0.f;
+        }
+        // --- v0.27.0 (item 17): the SUB BODY — a separate heavy
+        // object with bass-like physics: a soft spring with real
+        // inertia (low stiffness, near-critical damping), so it
+        // swells slowly under sustained sub and settles slowly when
+        // the sub leaves. It never snaps to the instantaneous level.
+        {
+            const float target = subEnergy < 0.f ? 0.f : subEnergy > 1.f ? 1.f : subEnergy;
+            const float acc = (target - subLevel_) * 7.0f - subVel_ * 3.4f;
+            subVel_ += acc * dt;
+            subLevel_ += subVel_ * dt;
+            if (subLevel_ < 0.f) { subLevel_ = 0.f; if (subVel_ < 0.f) subVel_ = 0.f; }
+            if (subLevel_ > 1.2f) { subLevel_ = 1.2f; if (subVel_ > 0.f) subVel_ = 0.f; }
+        }
+        // --- v0.27.0 (item 20): BRIDGE detector — high stereo
+        // width + mid/high energy present + low/sub energy near
+        // zero, sustained ~0.4 s, switches the field to its bridge
+        // state (palette shift in colorFor) while it holds.
+        {
+            const bool cond = widthAvg_ > 0.45f
+                && (bandEnergy[1] + bandEnergy[2]) > 0.30f
+                && bandEnergy[0] < 0.10f && subLevel_ < 0.10f;
+            bridgeHold_ = cond ? bridgeHold_ + dt : 0.f;
+            bridgeActive_ = bridgeHold_ > 0.4f;
         }
         {   // the particle engine's activity gate, same constants
             const float frame = std::max({ bandEnergy[0], bandEnergy[1], bandEnergy[2] });
@@ -524,6 +584,35 @@ public:
         }
         const float beat = beatEnv < 0.f ? 0.f : beatEnv > 1.f ? 1.f : beatEnv;
         if (beat * 0.9f > pulse_) pulse_ = beat * 0.9f;
+        // --- v0.27.0 (item 10): transients predominantly in ~2
+        // bands (exactly two bands' transient envelopes hot, the
+        // third quiet) fire THREE screen bursts of different
+        // colours with random transparency. A 0.9 s refractory
+        // keeps a busy passage from strobing them.
+        burstCooldown_ -= dt;
+        for (auto& sb : screenBursts_) sb.age += dt;
+        screenBursts_.erase(std::remove_if(screenBursts_.begin(), screenBursts_.end(),
+                                           [](const VizScreenBurst& sb) { return sb.age >= sb.life; }),
+                            screenBursts_.end());
+        if (burstCooldown_ <= 0.f) {
+            int hot = 0; for (int b = 0; b < 3; ++b) if (trans_[b] > 0.55f) ++hot;
+            if (hot == 2) {
+                burstCooldown_ = 0.9f;
+                float cycle = 0.f;
+                if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
+                const float h0 = st.baseHue + cycle + next01() * 0.2f;
+                for (int k = 0; k < 3; ++k) {
+                    VizScreenBurst sb;
+                    sb.x = 0.12f + next01() * 0.76f;
+                    sb.y = 0.12f + next01() * 0.76f;
+                    sb.radius = 0.24f + next01() * 0.20f;
+                    sb.hue = h0 + (float)k / 3.f + (next01() - 0.5f) * 0.05f; // 3 distinct colours
+                    sb.alpha = 0.25f + next01() * 0.50f;                     // random transparency
+                    sb.age = 0; sb.life = 0.7f + next01() * 0.5f;
+                    screenBursts_.push_back(sb);
+                }
+            }
+        }
         // Downbeat IMPULSE (deliverable: field objects "speed up
         // or slow down and impulse with the downbeats"): on the
         // envelope's rising edge through 0.65, every dot takes a
@@ -545,7 +634,7 @@ public:
             const float dist = std::sqrt(dx * dx + dy * dy);
             if (dist < 0.015f || d.age > d.life) { d = spawnDot(bandEnergy); continue; }
             if (shiftTrail) {
-                d.trailX[1] = d.trailX[0]; d.trailY[1] = d.trailY[0];
+                for (int k = 3; k >= 1; --k) { d.trailX[k] = d.trailX[k - 1]; d.trailY[k] = d.trailY[k - 1]; }
                 d.trailX[0] = d.x; d.trailY[0] = d.y;
                 d.trailSet = true;
             }
@@ -580,6 +669,11 @@ public:
     }
 
     const std::vector<VizFieldDot>& particles() const { return dots_; }
+    const std::vector<VizScreenBurst>& screenBursts() const { return screenBursts_; } // v0.27.0 (item 10)
+    float widthLookback() const { return widthAvg_; }   // v0.27.0 (item 9): mean stereo width over the lookback
+    float sizeScale() const { return 0.80f + 0.60f * widthAvg_; } // v0.27.0 (item 9): bubble size from the stereo image
+    float subLevel() const { return subLevel_; }        // v0.27.0 (item 17): the sub body's spring level 0..~1
+    bool bridgeActive() const { return bridgeActive_; } // v0.27.0 (item 20)
     double time() const { return time_; }
     float visibility() const { // the family gate: full at 0.30, zero in silence
         const float v = activity_ / 0.30f;
@@ -594,27 +688,35 @@ public:
     VizRgb colorFor(const VizFieldDot& d, const VisualizerSettings& st) const {
         float cycle = 0.f;
         if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
-        const float h = st.baseHue + cycle + (float)(d.band) * 0.5f * st.paletteSpread;
+        // v0.27.0: per-dot hue jitter (item 9 — different colours by
+        // default) and the BRIDGE palette shift (item 20: +1/3 of
+        // the wheel while a bass-less wide passage holds).
+        const float h = st.baseHue + cycle + (float)(d.band) * 0.5f * st.paletteSpread
+                      + d.hueT * 0.25f + (bridgeActive_ ? 0.33f : 0.f);
         return vizHsvToRgb(h, st.saturation, valueFor(d) * (0.70f + 0.55f * pulse_));
     }
-    // A tail ghost's colour: same hue as its dot, dimmer the older
-    // the ghost, and brightened by pulse_ so the tail itself
-    // pulses with the transients.
+    // A tail segment's colour: same hue as its dot, dimmer the
+    // older the segment, and brightened by pulse_ so the tail
+    // itself pulses with the transients.
     VizRgb trailColorFor(const VizFieldDot& d, const VisualizerSettings& st, int k) const {
         float cycle = 0.f;
         if (st.cycleSeconds > 0.01f) cycle = (float)std::fmod(time_ / (double)st.cycleSeconds, 1.0);
-        const float h = st.baseHue + cycle + (float)(d.band) * 0.5f * st.paletteSpread;
-        const float ghost = 0.50f - 0.18f * (float)(k < 0 ? 0 : k > 1 ? 1 : k);
+        const float h = st.baseHue + cycle + (float)(d.band) * 0.5f * st.paletteSpread
+                      + d.hueT * 0.25f + (bridgeActive_ ? 0.33f : 0.f);
+        const float ghost = 0.55f - 0.11f * (float)(k < 0 ? 0 : k > 3 ? 3 : k);
         return vizHsvToRgb(h, st.saturation, valueFor(d) * ghost * (0.55f + 0.65f * pulse_));
     }
 
 private:
     // The dot's own brightness envelope (age fades x the silence
-    // gate), shared by colorFor and trailColorFor.
+    // gate), shared by colorFor and trailColorFor. v0.27.0 (item
+    // 9): the stereo-image lookback also drives the cluster
+    // intensity — a wide passage's clusters burn up to ~50%
+    // brighter than a mono one's.
     float valueFor(const VizFieldDot& d) const {
         const float fadeIn = d.age < 0.4f ? 0.4f + 0.6f * (d.age / 0.4f) : 1.f;
         const float fadeOut = d.age > d.life * 0.7f ? 1.f - (d.age - d.life * 0.7f) / (d.life * 0.3f + 1e-6f) : 1.f;
-        return (0.30f + 0.70f * fadeOut) * fadeIn * visibility();
+        return (0.30f + 0.70f * fadeOut) * fadeIn * visibility() * (0.75f + 0.50f * widthAvg_);
     }
     std::uint32_t rng_ = 0x27d4eb2fu;
     float next01() { // splitmix32, own stream (deterministic)
@@ -641,9 +743,11 @@ private:
         d.y = 0.08f + next01() * 0.84f;
         d.x = d.x < 0.02f ? 0.02f : d.x > 0.98f ? 0.98f : d.x;
         d.vx = 0; d.vy = 0;
-        d.age = 0; d.life = 2.5f + next01() * 3.f;
+        d.age = 0; d.life = 4.5f + next01() * 4.f; // v0.27.0 (item 12): bubbles live longer before disappearing (was 2.5-5.5 s)
         d.size = 1.4f + next01() * 2.0f;
-        d.trailSet = false; d.trailX[0] = d.trailX[1] = d.x; d.trailY[0] = d.trailY[1] = d.y;
+        d.hueT = next01(); // v0.27.0 (item 9): this dot's own colour jitter
+        d.trailSet = false;
+        for (int k = 0; k < 4; ++k) { d.trailX[k] = d.x; d.trailY[k] = d.y; }
         // Join the vortex nearest the birthplace (x-led: the
         // field positions are horizontal by design).
         int best = 0; float bestScore = 1e9f;
@@ -656,6 +760,14 @@ private:
         return d;
     }
     std::vector<VizFieldDot> dots_;
+    std::vector<VizScreenBurst> screenBursts_; // v0.27.0 (item 10)
+    float burstCooldown_ = 0;
+    static constexpr int kWidthHist = 90;      // v0.27.0 (item 9): ~1.5 s at 60 fps
+    float widthHist_[kWidthHist] = {};
+    int widthHead_ = 0, widthCount_ = 0;
+    float widthAvg_ = 0;
+    float subLevel_ = 0, subVel_ = 0;          // v0.27.0 (item 17): sub body spring state
+    float bridgeHold_ = 0; bool bridgeActive_ = false; // v0.27.0 (item 20)
     float activity_ = 0;
     float balance_ = 0;
     float smoothE_[3] = { 0, 0, 0 }; // v0.26.0: slow per-band level (transient reference)
@@ -683,5 +795,30 @@ inline std::array<float, 3> spectrumBandEnergies(const std::vector<float>& dbPer
     }
     for (int i = 0; i < 3; ++i) if (cnt[i] > 0) out[(size_t)i] = (float)(sum[i] / cnt[i]);
     return out;
+}
+
+// v0.27.0 (item 17): TRUE sub-band energy (0..1) — the mean level of
+// the FFT bins under 45 Hz ONLY, on the same -70..-6 dB window as
+// spectrumBandEnergies. This is the sub body's honest drive: at the
+// default 1024-point FFT / 48 kHz, bins 1 (46.9 Hz) sits just above
+// the line, so the helper reads bin 1's lower edge by including any
+// bin whose CENTRE is under 45 Hz plus, when no bin qualifies, the
+// first bin scaled by its under-45 fraction — never the whole low
+// band relabelled as "sub".
+inline float subBandEnergy(const std::vector<float>& dbPerBin, int fftSize, double sampleRate) {
+    if (dbPerBin.empty() || fftSize <= 0 || sampleRate <= 0) return 0.f;
+    double sum = 0; double wsum = 0;
+    for (size_t b = 1; b < dbPerBin.size(); ++b) { // skip DC
+        const double f = (double)b * sampleRate / fftSize;
+        const double binHz = sampleRate / fftSize;
+        // fraction of this bin's span lying under 45 Hz
+        double frac = (45.0 - (f - binHz * 0.5)) / binHz;
+        frac = frac < 0.0 ? 0.0 : frac > 1.0 ? 1.0 : frac;
+        if (frac <= 0.0) break; // bins ascend in frequency
+        float t = (dbPerBin[b] + 70.f) / 64.f;
+        t = t < 0.f ? 0.f : t > 1.f ? 1.f : t;
+        sum += t * frac; wsum += frac;
+    }
+    return wsum > 0 ? (float)(sum / wsum) : 0.f;
 }
 } // namespace meterbar

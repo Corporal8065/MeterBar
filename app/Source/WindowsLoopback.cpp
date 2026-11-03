@@ -33,13 +33,75 @@
  #include <windows.h>
  #include <mmdeviceapi.h>
  #include <audioclient.h>
+ #include <audioclientactivationparams.h> // v0.27.0 (item 8): AUDIOCLIENT_ACTIVATION_PARAMS / ActivateAudioInterfaceAsync
+ #include <tlhelp32.h>                     // v0.27.0 (item 8): process snapshot for the per-app PID lookup
  #include <functiondiscoverykeys_devpkey.h>
  #include <ksmedia.h>
  #include <cstdio>
+ // v0.27.0 (item 8): completion handler for ActivateAudioInterfaceAsync,
+ // structured after Microsoft's ApplicationLoopback sample. It answers
+ // the IAgileObject IID in QueryInterface (the activation API requires
+ // an agile handler) without inheriting a declared IAgileObject type —
+ // that interface adds no methods beyond IUnknown, so returning this
+ // object's handler pointer for its IID is exact.
+ namespace {
+ class ActivateHandler final : public IActivateAudioInterfaceCompletionHandler {
+ public:
+     HANDLE done = nullptr; HRESULT result = E_FAIL; IUnknown* device = nullptr;
+     ActivateHandler() { done = CreateEventW(nullptr, TRUE, FALSE, nullptr); }
+     ~ActivateHandler() { if (done) CloseHandle(done); if (device) device->Release(); }
+     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+         if (!ppv) return E_POINTER;
+         static const GUID kAgileObject = { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
+         if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler) || riid == kAgileObject) {
+             *ppv = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+         } else { *ppv = nullptr; return E_NOINTERFACE; }
+         AddRef(); return S_OK;
+     }
+     STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+     STDMETHODIMP_(ULONG) Release() override { ULONG r = --refs_; if (r == 0) delete this; return r; }
+     STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* op) override {
+         if (op) op->GetActivateResult(&result, &device);
+         if (done) SetEvent(done);
+         return S_OK;
+     }
+ private:
+     std::atomic<ULONG> refs_{ 1 };
+ };
+ } // namespace
  struct WindowsLoopback::Impl {
      meterbar::BoundedThread th; std::atomic<bool> run{false}; std::atomic<double> sr{48000}; Callback cb;
      std::string wantName; // v0.9: capture THIS output device (empty = default)
      std::string wantId;   // v0.13: capture THIS endpoint ID (wins over the name when set)
+     std::string wantExe;  // v0.27.0 (item 8): capture THIS application's process tree only (processMode)
+     bool processMode = false;
+     // v0.27.0 (item 8): PID of a running process by executable name
+     // (case-insensitive), 0 when absent. Toolhelp snapshot — the
+     // documented way to enumerate processes by image name.
+     static DWORD findProcessId(const std::wstring& exeLower) {
+         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+         if (snap == INVALID_HANDLE_VALUE) return 0;
+         PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
+         DWORD pid = 0;
+         if (Process32FirstW(snap, &pe)) {
+             do {
+                 std::wstring name = pe.szExeFile;
+                 for (auto& c : name) c = towlower(c);
+                 if (name == exeLower) { pid = pe.th32ProcessID; break; }
+             } while (Process32NextW(snap, &pe));
+         }
+         CloseHandle(snap);
+         return pid;
+     }
+     static std::string exeLabel(const std::string& exe) { // "Spotify.exe" -> "Spotify" for status lines
+         std::string s = exe;
+         if (s.size() > 4) {
+             std::string tail = s.substr(s.size() - 4);
+             for (auto& c : tail) c = (char)tolower((unsigned char)c);
+             if (tail == ".exe") s = s.substr(0, s.size() - 4);
+         }
+         return s;
+     }
      std::atomic<long long> packets{0};
      std::atomic<float> peakSeen{0.f};
      // Diagnostics are written by the capture thread and read by the UI
@@ -248,6 +310,90 @@
          cap->Release(); client->Release(); CoTaskMemFree(fmt);
          dev->Release(); en->Release(); CoUninitialize();
      }
+     // v0.27.0 (item 8): PER-APP capture (Microsoft's
+     // ApplicationLoopback sample structure). Find the app's PID,
+     // ActivateAudioInterfaceAsync on the process-loopback virtual
+     // device with INCLUDE_TARGET_PROCESS_TREE, then the same
+     // Initialize(LOOPBACK) + capture-client path as the endpoint
+     // loop. ANY failure leaves the meters silent with the reason
+     // in status — never a fallback to system audio, never a crash.
+     void loopProcess() {
+         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+         const std::string label = exeLabel(wantExe);
+         const DWORD pid = findProcessId(lower(widen(wantExe)));
+         if (pid == 0) { setStatus(label + " — not running"); CoUninitialize(); return; }
+         AUDIOCLIENT_ACTIVATION_PARAMS params = {};
+         params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+         params.ProcessLoopbackParams.TargetProcessId = pid;
+         params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+         PROPVARIANT prop; PropVariantInit(&prop);
+         prop.vt = VT_BLOB;
+         prop.blob.cbSize = sizeof(params);
+         prop.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
+         auto* handler = new ActivateHandler();
+         IActivateAudioInterfaceAsyncOperation* op = nullptr;
+         HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+                                                  __uuidof(IAudioClient), &prop, handler, &op);
+         PropVariantClear(&prop);
+         if (FAILED(hr) || !op) { setStatus(hrText("ActivateAudioInterfaceAsync", hr)); handler->Release(); CoUninitialize(); return; }
+         WaitForSingleObject(handler->done, 5000);
+         op->Release();
+         IAudioClient* client = nullptr;
+         if (SUCCEEDED(handler->result) && handler->device)
+             handler->device->QueryInterface(__uuidof(IAudioClient), (void**)&client);
+         handler->Release();
+         if (!client) { setStatus(label + " — activation failed"); CoUninitialize(); return; }
+         { std::lock_guard<std::mutex> g(diagLock); activeName = label + " (process loopback)"; pickHow = "process loopback"; }
+         WAVEFORMATEX* fmt = nullptr;
+         hr = client->GetMixFormat(&fmt);
+         if (FAILED(hr) || !fmt) { setStatus(hrText("GetMixFormat", hr)); client->Release(); CoUninitialize(); return; }
+         sr.store(fmt->nSamplesPerSec); detectFormat(fmt);
+         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 10000000, 0, fmt, nullptr);
+         if (FAILED(hr)) { setStatus(hrText("Initialize", hr)); CoTaskMemFree(fmt); client->Release(); CoUninitialize(); return; }
+         IAudioCaptureClient* cap = nullptr;
+         hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&cap);
+         if (FAILED(hr) || !cap) { setStatus(hrText("GetService", hr)); CoTaskMemFree(fmt); client->Release(); CoUninitialize(); return; }
+         hr = client->Start();
+         if (FAILED(hr)) { setStatus(hrText("Start", hr)); cap->Release(); CoTaskMemFree(fmt); client->Release(); CoUninitialize(); return; }
+         setStatus("running");
+         const int ch = fmt->nChannels; const int bps = bytesPerSample;
+         const double rate = sr.load();
+         bool done = false;
+         while (run.load() && !done) {
+             UINT32 packet = 0;
+             hr = cap->GetNextPacketSize(&packet);
+             if (FAILED(hr)) { setStatus(hrText("GetNextPacketSize", hr)); break; }
+             if (packet == 0) { Sleep(5); continue; }
+             while (packet > 0) {
+                 BYTE* data = nullptr; UINT32 frames = 0; DWORD flags = 0;
+                 hr = cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+                 if (FAILED(hr)) { setStatus(hrText("GetBuffer", hr)); done = true; break; }
+                 if (frames > 0 && cb) {
+                     packets.fetch_add(1);
+                     std::vector<float> L(frames), R(frames);
+                     const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+                     float localPeak = 0.f;
+                     for (UINT32 i = 0; i < frames; ++i) {
+                         if (silent) { L[i] = 0; R[i] = 0; continue; }
+                         BYTE* framePtr = data + (size_t)i * ch * bps;
+                         L[i] = readSample(framePtr);
+                         R[i] = readSample(framePtr + (ch > 1 ? bps : 0));
+                         localPeak = std::max({localPeak, std::abs(L[i]), std::abs(R[i])});
+                     }
+                     float prev = peakSeen.load();
+                     while (localPeak > prev && !peakSeen.compare_exchange_weak(prev, localPeak)) {}
+                     cb(L.data(), R.data(), (int)frames, rate);
+                 }
+                 cap->ReleaseBuffer(frames);
+                 hr = cap->GetNextPacketSize(&packet);
+                 if (FAILED(hr)) { setStatus(hrText("GetNextPacketSize", hr)); done = true; break; }
+             }
+         }
+         client->Stop();
+         cap->Release(); client->Release(); CoTaskMemFree(fmt);
+         CoUninitialize();
+     }
+     void loopEntry() { if (processMode) loopProcess(); else loop(); }
  };
  bool WindowsLoopback::start(Callback cb, const std::string& deviceNameUtf8, const std::string& deviceIdUtf8) { stop(); impl_ = new Impl(); impl_->cb = std::move(cb); impl_->wantName = deviceNameUtf8; impl_->wantId = deviceIdUtf8; impl_->run = true;
      // v0.20.2: the thread lambda captures the Impl POINTER, not `this`.
@@ -256,6 +402,12 @@
      // `this` could then run the NEW Impl's loop on the old thread.
      Impl* im = impl_;
      im->th.start([im]{ im->loop(); }); return true; }
+ bool WindowsLoopback::startProcessLoopback(Callback cb, const std::string& exeNameUtf8) { stop(); impl_ = new Impl(); impl_->cb = std::move(cb); impl_->wantExe = exeNameUtf8; impl_->processMode = true; impl_->run = true;
+     Impl* im = impl_;
+     im->th.start([im]{ im->loopEntry(); }); return true; }
+ bool WindowsLoopback::isProcessRunning(const std::string& exeNameUtf8) {
+     return Impl::findProcessId(Impl::lower(Impl::widen(exeNameUtf8))) != 0;
+ }
  void WindowsLoopback::stop() { if (impl_) { impl_->run = false;
      // v0.20.2 BOUNDED STOP (freeze fix, audit suspect 1): the capture
      // thread only observes run=false between WASAPI calls; a call
@@ -333,6 +485,8 @@
  std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpoints() { return {}; }
  std::vector<WindowsLoopback::EndpointInfo> WindowsLoopback::enumerateRenderEndpointsCached(bool) { return {}; }
  bool WindowsLoopback::start(Callback, const std::string&, const std::string&) { return false; }
+ bool WindowsLoopback::startProcessLoopback(Callback, const std::string&) { return false; }
+ bool WindowsLoopback::isProcessRunning(const std::string&) { return false; }
  void WindowsLoopback::stop() {}
  bool WindowsLoopback::isRunning() const { return false; }
  double WindowsLoopback::sampleRate() const { return 48000; }

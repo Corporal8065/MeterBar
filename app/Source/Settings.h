@@ -98,6 +98,7 @@ public:
     meterbar::PresetState* st = nullptr;
     juce::AudioDeviceManager* deviceManager = nullptr; // v0.8 device pickers
     std::function<void()> onChanged, onSourceChanged, onFpsChanged;
+    std::function<juce::String()> appSourceStatus; // v0.27.0 (item 8): live per-app source state line (wired by MainComponent)
     std::function<void()> onArrange, onRestore; // v0.18: Window panel buttons (wired by MainComponent)
     std::function<void()> onBgLinkToggled; // v0.21.3: "Link background" flipped (wired by MainComponent)
     SettingsContent() { setSize(760, 640); }
@@ -111,7 +112,10 @@ public:
         th_ = themeByName(juce::String(st->themeName));
         nextKind_ = 1; panel("Spectrogram", &st->spectrogramEnabled, [&]{
             combo("Orientation", {"Horizontal","Vertical"}, (int)st->spectrogramOrientation, [&](int v){ st->spectrogramOrientation = (meterbar::Orientation)v; });
-            slider("Fade", 0.0, 1.0, st->fade, [&](double v){ st->fade = (float)v; });
+            // v0.27.0 (item 14): the Fade slider is GONE — the
+            // spectrogram no longer fades older rows at all
+            // (Jackson's word). The stored `fade` preset field is
+            // ignored by the renderer from this version on.
             toggle("Loop (disabled — future)", st->loopEnabled, [](bool){}, true);
             slider("Linked Speed (0-10)", 0.0, 10.0, st->linkedSpeed, [&](double v){ st->linkedSpeed = (float)v; });
             note("Sections: Main / FFT (size+scale under Spectrum, linked) / Overlay (style under Spectrum).");
@@ -193,6 +197,14 @@ public:
             note("Arrange slides every other window on the bar's monitor into the space clear of the bar's docked edge — maximised windows included (they are un-maximised, fitted, and Restore puts them back maximised). Restore puts every window back where it was. The Debug window's 'Screen space' line shows the current state, including which edge is reserved. On non-Windows builds these do nothing.");
         });
         panel("Audio Source", nullptr, [&]{
+            // v0.27.0 (item 8): the capture-source control — System
+            // hears the whole endpoint mix; Spotify / Tidal hear
+            // ONLY that app (Windows per-app process loopback), and
+            // silence while it is not running. Applies whenever the
+            // Sound Source below is an output device.
+            combo("Capture Source", {"System (all audio)","Spotify only","Tidal only"}, st->appSource,
+                  [&](int v){ st->appSource = v; if (onSourceChanged) onSourceChanged(); });
+            if (appSourceStatus) note(appSourceStatus());
             soundSourceCombo();
             slider("Trim dB (-48..+48)", -48.0, 48.0, st->trimDb, [&](double v){ st->trimDb = (float)v; }); // v0.20.3: range doubled (Jackson's ask — a larger input trim)
             combo("Channel Pair", {"Pair 1 (ch 1-2)","Pair 2 (ch 3-4)","Pair 3 (ch 5-6)","Pair 4 (ch 7-8)"}, st->routingPair,

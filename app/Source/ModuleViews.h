@@ -30,6 +30,7 @@ struct AnalysisData {
     bool beatLocked = false; float beatBpm = 0; float beatConfidence = 0;
     int beatSig = 0; // beatSig: 0 = 4/4, 1 = 3/4, 2 = 6/8 (mirrors PresetState::beatTimeSignature)
     float beatPulseEnv = 0; // tracker envelope on ANY grid beat (scope dot)
+    float beatPhase = 0;    // v0.27.0 (item 13): position inside the current grid pulse, 0..1 (0 = on the beat) — the scope's phase marker locks to this
     std::vector<float> beatAges;
     float waveSecPerColumn = 0;              // waveform overlay timebase (seconds per history column)
     float sgSecPerRow = 0;                   // spectrogram overlay timebase (seconds per history row)
@@ -45,7 +46,10 @@ public:
     // v0.26.0: the Waveform view alone intercepts clicks — the
     // time-signature chip at its bottom-right is clickable (every
     // other view keeps the family's fall-through behaviour).
-    explicit ModuleView(Kind k) : kind(k) { setInterceptsMouseClicks(k == Kind::Waveform, false); setOpaque(false); }
+    // v0.27.0: the Spectrum view also intercepts now — for the
+    // hover-frequency readout (item 14); it still lets clicks fall
+    // through to children (none) the same way.
+    explicit ModuleView(Kind k) : kind(k) { setInterceptsMouseClicks(k == Kind::Waveform || k == Kind::Spectrum, false); setOpaque(false); }
     std::function<void()> onSigCycle; // v0.26.0: MainComponent wires the chip click (cycle 4/4 -> 3/4 -> 6/8)
     void mouseDown(const juce::MouseEvent& e) override {
         if (kind == Kind::Waveform && onSigCycle) {
@@ -53,6 +57,23 @@ public:
             if (sigChipRect(plot).contains(e.position)) onSigCycle();
         }
     }
+    // v0.27.0 (item 14): SPECTRUM HOVER — the exact frequency under
+    // the cursor, through the same xToFreq mapping the axis is
+    // drawn with (all three scales), shown by drawSpectrum.
+    void mouseMove(const juce::MouseEvent& e) override {
+        if (kind != Kind::Spectrum || !data || !data->st) return;
+        auto plot = getLocalBounds().toFloat().reduced(4).withTrimmedTop(14);
+        if (plot.contains(e.position)) {
+            const double sr = data->sampleRate > 0 ? data->sampleRate : 48000.0;
+            const double maxF = std::min(20000.0, sr * 0.5);
+            const float frac = juce::jlimit(0.f, 1.f, (e.position.x - plot.getX()) / std::max(1.f, plot.getWidth()));
+            hoverFreq_ = meterbar::SpectrumAnalyser::xToFreq(frac, 20.0, maxF, data->st->fftScale);
+            hoverPos_ = e.position;
+        } else hoverFreq_ = -1;
+        repaint();
+    }
+    void mouseExit(const juce::MouseEvent&) override { hoverFreq_ = -1; repaint(); }
+    double hoverFreq_ = -1; juce::Point<float> hoverPos_;
     // The chip's rect inside a plot area — shared by the waveform's
     // paint and its click test so the two can never drift apart.
     static juce::Rectangle<float> sigChipRect(juce::Rectangle<float> plot) {
@@ -112,7 +133,20 @@ public:
         g.setColour(acc); g.fillEllipse(hdr.getX() + 1, hdr.getCentreY() - 2.5f, 5.f, 5.f);
         g.setFont(juce::Font(10.f, juce::Font::bold));
         drawPoppedText(g, title.toUpperCase(), hdr.withTrimmedLeft(10), juce::Justification::topLeft, acc);
+        // v0.27.0 (item 19): the BPM sections of the WAVEFORM and
+        // OSCILLOSCOPE bump visually when the beat is believed to
+        // be there — the plot swells by up to ~1.5 px and the
+        // section border flares, both driven by the grid's
+        // any-beat envelope (fast attack in the tracker, ~100 ms
+        // decay), so the bump lands ON the beat and settles.
+        const float beatBump = (kind == Kind::Waveform || kind == Kind::Oscilloscope) && data->beatLocked
+            ? juce::jlimit(0.f, 1.f, data->beatPulseEnv) : 0.f;
+        if (beatBump > 0.01f) {
+            g.setColour(acc.withAlpha(0.30f * beatBump));
+            g.drawRoundedRectangle(r.reduced(0.5f), 6.f, 1.f + 1.6f * beatBump);
+        }
         auto plot = r.reduced(4).withTrimmedTop(14);
+        if (beatBump > 0.01f) plot = plot.expanded(1.5f * beatBump, 1.0f * beatBump);
         switch (kind) {
         case Kind::Spectrum: drawSpectrum(g, plot, st); break;
         case Kind::Spectrogram: drawSpectrogram(g, plot, st); break;
@@ -230,11 +264,43 @@ private:
             }
         }
         if (style == meterbar::PresetState::SpectrumStyle::Fft || style == meterbar::PresetState::SpectrumStyle::Both) {
-            g.setColour(th.moduleAccent((int)Kind::Spectrum)); g.strokePath(path, juce::PathStrokeType(1.2f));
+            // v0.27.0 (item 15): the FFT line is no longer stroked
+            // in ONE accent colour — it is drawn as per-pixel
+            // segments whose colour runs the rich multi-hue
+            // frequency ramp (violet lows -> teal -> green ->
+            // yellow -> orange -> red highs, the spectrumHeat
+            // palette by frequency), so the line beneath the fills
+            // is as colourful as the fills themselves.
+            auto& pts = path; (void)pts;
+            float prevX = 0, prevY = 0; bool havePrev = false;
+            for (int px = 0; px < W; ++px) {
+                const int bin = binAt[(size_t)px];
+                const float y = dbToY(drawnDb(bin), p); const float x = p.getX() + px;
+                if (havePrev) {
+                    auto hc = meterbar::spectrumColor(meterbar::SpectrumColorMode::Frequency,
+                                                      meterbar::spectrumLevelHeatT(drawnDb(bin)),
+                                                      W > 1 ? (float)px / (float)(W - 1) : 0.f);
+                    g.setColour(juce::Colour(hc.r, hc.g, hc.b));
+                    g.drawLine(prevX, prevY, x, y, 1.4f);
+                }
+                prevX = x; prevY = y; havePrev = true;
+            }
         }
         g.setFont(9.f);
         drawPoppedText(g, "20", p.removeFromBottom(10), juce::Justification::bottomLeft, th.dim);
         drawPoppedText(g, "20k", p, juce::Justification::bottomRight, th.dim);
+        // v0.27.0 (item 14): hover readout — a hairline at the
+        // cursor plus the EXACT frequency under it.
+        if (hoverFreq_ > 0) {
+            g.setColour(th.text.withAlpha(0.35f));
+            g.drawLine(hoverPos_.x, p.getY(), hoverPos_.x, p.getBottom(), 0.75f);
+            const juce::String ftxt = hoverFreq_ < 1000.0
+                ? juce::String((int)std::lround(hoverFreq_)) + " Hz"
+                : juce::String(hoverFreq_ / 1000.0, 2) + " kHz";
+            g.setFont(juce::Font(10.f, juce::Font::bold));
+            auto tr = juce::Rectangle<float>(juce::jmin(hoverPos_.x + 6.f, p.getRight() - 64.f), p.getY() + 2.f, 62.f, 13.f);
+            drawPoppedText(g, ftxt, tr, juce::Justification::topLeft, th.text);
+        }
     }
     // Level heat adapter (v0.14): the DSP spectrumHeat ramp — the full
     // palette (violet -> teal -> green -> yellow -> orange -> hot red) —
@@ -259,10 +325,13 @@ private:
     void drawSpectrogram(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
         auto* sg = data->spectrogram; if (!sg || sg->bins() == 0) return;
         bool vert = st.spectrogramOrientation == meterbar::Orientation::Vertical;
-        // v0.11: render into a half-res cached image, then one blit. The old
+        // v0.11: render into a cached image, then one blit. The old
         // per-cell fillRect storm (thousands per frame) could starve mouse
         // events during window moves on the UI thread.
-        int iw = std::max(1, (int)p.getWidth() / 2), ih = std::max(1, (int)p.getHeight() / 2);
+        // v0.27.0 (item 14): the cache is now FULL resolution (was
+        // half) — the direct BitmapData writes below made the extra
+        // cells cheap, and the spectrogram reads visibly finer.
+        int iw = std::max(1, (int)p.getWidth()), ih = std::max(1, (int)p.getHeight());
         bool freshCache = false;
         if (!sgCache.isValid() || sgCache.getWidth() != iw || sgCache.getHeight() != ih) {
             sgCache = juce::Image(juce::Image::RGB, iw, ih, true);
@@ -297,9 +366,11 @@ private:
         // heatColour is fully opaque and the cache is RGB, so a direct
         // write stores exactly the bytes the fill produced.
         const int headNow = sg->head();
+        // v0.27.0 (item 14): `fade` is no longer an input — the
+        // spectrogram does not fade older rows at all any more.
         const bool inputsChanged = freshCache || headNow != sgRenderedHead
             || sg->bins() != sgRenderedBins
-            || st.fade != sgRenderedFade || st.fftScale != sgRenderedScale
+            || st.fftScale != sgRenderedScale
             || vert != sgRenderedVert || srSg != sgRenderedSr
             || (int)st.colorMap != sgRenderedColorMap;
         if (inputsChanged) {
@@ -315,13 +386,15 @@ private:
                 // level sweeps the FULL selected colour map (quiet =
                 // cool end, loudest = red) — and the map lookup itself
                 // was fixed (it returned the map's first colour at every
-                // level below full scale; see ColorMap::at). Fade applies.
-                float t = juce::jlimit(0.f, 1.f, meterbar::spectrogramLevelT(db)
-                            * meterbar::SpectrogramHistory::fadeGain(age, sg->rows(), st.fade));
+                // level below full scale; see ColorMap::at).
+                // v0.27.0 (item 14): NO fade — a cell's colour is its
+                // level, at every age (Jackson removed the fade-away
+                // behaviour and its setting outright).
+                float t = juce::jlimit(0.f, 1.f, meterbar::spectrogramLevelT(db));
                 bd.setPixelColour(x, y, heatColour(data->cmap, t));
             }
             sgRenderedHead = headNow; sgRenderedBins = sg->bins();
-            sgRenderedFade = st.fade; sgRenderedScale = st.fftScale;
+            sgRenderedScale = st.fftScale;
             sgRenderedVert = vert; sgRenderedSr = srSg; sgRenderedColorMap = (int)st.colorMap;
         }
         g.drawImage(sgCache, p);
@@ -507,8 +580,15 @@ private:
             g.setColour(c.withAlpha(0.7f)); g.fillRect(x, y, ps, ps);
         }
         g.setFont(9.f);
-        drawPoppedText(g, "L", sq.withTrimmedLeft(3).withTrimmedTop(1), juce::Justification::topLeft, th.dim);
-        drawPoppedText(g, "R", sq.withTrimmedRight(3), juce::Justification::centredRight, th.dim);
+        // v0.27.0 (item 18): the CONVENTIONAL vectorscope label
+        // layout — L and R sit symmetric on the SAME baseline at
+        // the BOTTOM of the plot square (L bottom-left, R
+        // bottom-right), the way Ozone Imager / every standard
+        // goniometer marks its axes' channels. (Pre-fix, L sat
+        // top-left and R centred-right — two different baselines,
+        // which is what Jackson flagged.)
+        drawPoppedText(g, "L", juce::Rectangle<float>(sq.getX() + 3.f, sq.getBottom() - 11.f, 12.f, 10.f), juce::Justification::bottomLeft, th.dim);
+        drawPoppedText(g, "R", juce::Rectangle<float>(sq.getRight() - 15.f, sq.getBottom() - 11.f, 12.f, 10.f), juce::Justification::bottomRight, th.dim);
         g.setFont(10.f);
         // v0.16: width % joins the correlation readout under the vectorscope
         // (correlation itself landed in v0.15; both update live per frame).
@@ -533,6 +613,22 @@ private:
         g.setFont(9.f);
         drawPoppedText(g, juce::String((int)std::lround(data->beatBpm)) + " BPM",
                        row.withTrimmedLeft(9), juce::Justification::bottomLeft, th.dim);
+        // v0.27.0 (item 13): the scope is MATCHED to the BPM — a
+        // phase track runs along the readout row and its marker
+        // sweeps left->right in lockstep with the tracker grid's
+        // own beatPhase(), snapping back to the left edge exactly
+        // on each grid beat (where the dot above also fires). The
+        // scope window itself (10–200 ms) is shorter than a beat,
+        // so phase — not grid lines — is the honest lock display.
+        {
+            auto track = juce::Rectangle<float>(row.getX() + 52.f, row.getCentreY() - 1.f,
+                                                std::max(10.f, row.getWidth() - 56.f), 2.f);
+            g.setColour(th.grid.withAlpha(0.5f));
+            g.fillRect(track);
+            const float mx = track.getX() + juce::jlimit(0.f, 1.f, data->beatPhase) * track.getWidth();
+            g.setColour(th.accent.brighter(0.3f));
+            g.fillEllipse(mx - 2.5f, row.getCentreY() - 2.5f, 5.f, 5.f);
+        }
     }
     void drawScope(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
         auto& th = data->theme; int n = (int)data->scopeBuf.size(); if (n == 0) return;
