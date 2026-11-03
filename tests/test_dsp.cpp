@@ -31,6 +31,7 @@
 #include "../dsp/include/meterbar/BeatTrack.hpp"
 #include "../dsp/include/meterbar/Undertow.hpp"
 #include "../dsp/include/meterbar/Performance.hpp"
+#include "../dsp/include/meterbar/CrashWatch.hpp"
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -2598,6 +2599,48 @@ int main() {
           }
           std::printf("v0.28.2 undertow full: dust=%d (must exceed the Low-End cap 30)\n", m.dustCount());
           CHECK(m.dustCount() > 30); }
+    }
+
+    // === v0.28.3 — CrashWatch: crash-record naming + next-launch
+    // notice logic (family crash-log contract). The handler writes
+    // crash-YYYY-MM-DD_HHMMSS.txt (+ .dmp); a crash is UNSEEN until
+    // a "<name>.seen" sibling exists.
+    {
+        CrashTimeParts t; t.year = 2026; t.month = 11; t.day = 3; t.hour = 11; t.minute = 48; t.second = 6;
+        CHECK(crashFileStem(t) == "crash-2026-11-03_114806");
+        CHECK(crashTextName(t) == "crash-2026-11-03_114806.txt");
+        CHECK(crashDumpName(t) == "crash-2026-11-03_114806.dmp");
+        CrashTimeParts pad; pad.year = 2027; pad.month = 1; pad.day = 2; pad.hour = 3; pad.minute = 4; pad.second = 5;
+        CHECK(crashFileStem(pad) == "crash-2027-01-02_030405"); // zero padding everywhere
+        CHECK(isCrashTextName("crash-2026-11-03_114806.txt"));
+        CHECK(!isCrashTextName("crash-2026-11-03_114806.dmp"));
+        CHECK(!isCrashTextName("capture-log.txt"));
+        CHECK(!isCrashTextName("crash-2026-11-03_114806.txt.seen")); // the marker is not itself a crash
+        CHECK(seenMarkerFor("crash-2026-11-03_114806.txt") == "crash-2026-11-03_114806.txt.seen");
+        CHECK(isSeenMarkerName("crash-2026-11-03_114806.txt.seen"));
+        CHECK(!isSeenMarkerName("notes.txt.seen"));
+        // unseen: only crash .txt files lacking a .seen sibling, oldest first
+        auto unseen = unseenCrashes({ "capture-log.txt",
+                                      "crash-2026-11-03_114806.txt",
+                                      "crash-2026-11-02_090000.txt", "crash-2026-11-02_090000.txt.seen",
+                                      "crash-2026-11-03_120000.txt",
+                                      "crash-2026-11-03_114806.dmp", "perf-auto.json" });
+        CHECK(unseen.size() == 2);
+        if (unseen.size() == 2) { // guard: CHECK does not abort — never index an unchecked vector
+            CHECK(unseen[0] == "crash-2026-11-03_114806.txt");
+            CHECK(unseen[1] == "crash-2026-11-03_120000.txt");
+        }
+        CHECK(unseenCrashes({}).empty());
+        CHECK(unseenCrashes({ "crash-2026-11-03_114806.txt", "crash-2026-11-03_114806.txt.seen" }).empty());
+        // record text: carries version, windows, time, exception, snapshot
+        auto rec = crashRecordText("0.28.3", "10.0 build 26200", "2026-11-03_114806", 0xC0000374ul,
+                                   "0x00007fff00000000", "audio source: System Loopback (app source 3)\n");
+        CHECK(rec.find("app version: 0.28.3") != std::string::npos);
+        CHECK(rec.find("windows: 10.0 build 26200") != std::string::npos);
+        CHECK(rec.find("exception: 0xc0000374") != std::string::npos);
+        CHECK(rec.find("audio source: System Loopback") != std::string::npos);
+        auto recEmpty = crashRecordText("0.28.3", "10.0 build 26200", "2026-11-03_114806", 0ul, "0x0", "");
+        CHECK(recEmpty.find("(none recorded)") != std::string::npos);
     }
 
     std::printf("\n%d checks, %d failures\n", checks, failures);

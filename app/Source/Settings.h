@@ -291,6 +291,18 @@ public:
             gh->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
             gh->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
             gh->onClick = []{ juce::URL("https://github.com/Corporal8065/MeterBar").launchInDefaultBrowser(); };
+            // v0.28.3: Open Log Folder — the crash records (crash-*.txt
+            // + .dmp) and the capture log live in Documents\MeterBar.
+            // Also in the hamburger menu: a crash-recovery path must
+            // not depend on Settings alone (family crash-log contract).
+            auto* lf = add(new juce::TextButton("Open Log Folder"));
+            lf->setBounds(152, y_, 140, 22);
+            lf->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+            lf->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
+            lf->onClick = []{
+                auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
+                dir.createDirectory(); dir.startAsProcess();
+            };
             y_ += 26;
         });
         setSize(760, y_ + 8);

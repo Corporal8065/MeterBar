@@ -74,11 +74,36 @@
  class ActivateHandler final : public IActivateAudioInterfaceCompletionHandler {
  public:
      HANDLE done = nullptr; HRESULT result = E_FAIL; IUnknown* device = nullptr;
-     ActivateHandler() { done = CreateEventW(nullptr, TRUE, FALSE, nullptr); }
-     ~ActivateHandler() { if (done) CloseHandle(done); if (device) device->Release(); }
+     ActivateHandler() {
+         done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+         // v0.28.3 (Store-Spotify crash round; see DUMP_ANALYSIS in
+         // the round folder): aggregate the FREE-THREADED MARSHALER.
+         // Microsoft's canonical sample implements this handler as
+         // a WRL RuntimeClass, which carries an FTM — so its
+         // IAgileObject answer is BACKED: COM may hand the object
+         // across apartments without marshaling because the FTM
+         // guarantees the direct call is synchronisation-safe. Our
+         // hand-rolled handler answered IAgileObject WITHOUT an
+         // FTM (v0.27.0–v0.28.2): an agility claim the object did
+         // not back. Against a packaged (Microsoft Store) target
+         // the activation completion runs through deeper COM
+         // plumbing (the 2026-11-03 v0.28.2 dump shows interleaved
+         // combase frames around our handler's invocation), and the
+         // crash — heap corruption 0xC0000374 detected inside the
+         // activation machinery on this thread, in the completion
+         // window — is the shape an unbacked agility claim produces:
+         // unsynchronised cross-thread access to the handler. The
+         // FTM makes the claim true. Best-effort: if FTM creation
+         // fails we proceed without it (QI for IMarshal then fails
+         // politely and COM marshals us the slow, safe way).
+         CoCreateFreeThreadedMarshaler(static_cast<IUnknown*>(static_cast<IActivateAudioInterfaceCompletionHandler*>(this)), &ftm_);
+     }
+     ~ActivateHandler() { if (done) CloseHandle(done); if (device) device->Release(); if (ftm_) ftm_->Release(); }
      STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
          if (!ppv) return E_POINTER;
          static const GUID kAgileObject = { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
+         static const GUID kMarshal = { 0x00000003, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } }; // IID_IMarshal
+         if (riid == kMarshal && ftm_) return ftm_->QueryInterface(riid, ppv);
          if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler) || riid == kAgileObject) {
              *ppv = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
          } else { *ppv = nullptr; return E_NOINTERFACE; }
@@ -87,6 +112,12 @@
      STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
      STDMETHODIMP_(ULONG) Release() override { ULONG r = --refs_; if (r == 0) delete this; return r; }
      STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* op) override {
+         // v0.28.3: SINGLE-SHOT. A second invocation (re-entrant or
+         // duplicate delivery through the packaged-target plumbing)
+         // must neither overwrite result/device under the waiter
+         // nor consume the reserved reference twice. The first
+         // completion wins; later ones are acknowledged and ignored.
+         if (completed_.exchange(true)) return S_OK;
          if (op) op->GetActivateResult(&result, &device);
          if (done) SetEvent(done);
          Release(); // the RESERVED reference (see contract above) —
@@ -96,6 +127,8 @@
      }
  private:
      std::atomic<ULONG> refs_{ 1 };
+     std::atomic<bool> completed_{ false }; // v0.28.3: single-shot completion
+     IUnknown* ftm_ = nullptr;              // v0.28.3: aggregated free-threaded marshaler
  };
 #if defined(_MSC_VER)
  // v0.27.1: SEH guard as a FREE function — MSVC forbids __try in a
@@ -534,6 +567,22 @@
            targetText = std::string(tb) + (target.path.empty() ? std::string("path unavailable") : narrow(target.path)); }
          { std::lock_guard<std::mutex> g(diagLock); targetDesc = targetText; }
          setStatus(label + " — target " + targetText);
+         // v0.28.3: label a PACKAGED (Microsoft Store) target in the
+         // capture log. The 2026-11-03 field crash is against the
+         // Store Spotify package; a plain installer target and a
+         // packaged target take different plumbing inside Windows'
+         // activation, and until now the log could not say which
+         // one a given failure involved (the path hinted it, the
+         // package identity proves it). GetPackageFamilyName
+         // answers APPMODEL_ERROR_NO_PACKAGE for ordinary Win32
+         // processes and the family name for packaged ones.
+         if (HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+             wchar_t fam[512]; UINT32 famLen = (UINT32)(sizeof(fam) / sizeof(fam[0]));
+             const LONG prc = GetPackageFamilyName(hp, &famLen, fam);
+             if (prc == ERROR_SUCCESS)
+                 appendCaptureLog(label + " — target is a packaged (Microsoft Store) app: " + narrow(std::wstring(fam, famLen > 0 ? famLen - 1 : 0)));
+             CloseHandle(hp);
+         }
          AUDIOCLIENT_ACTIVATION_PARAMS params = {};
          params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
          params.ProcessLoopbackParams.TargetProcessId = pid;

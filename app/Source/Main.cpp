@@ -1,6 +1,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "MainComponent.h"
+#include "CrashHandler.h" // v0.28.3: hard-crash record (family crash-log contract)
 #include "MeterBarVersion.h" // v0.19: generated — single-source version (root CMakeLists project VERSION)
 #include <meterbar/WindowGeom.hpp> // v0.20.1: startup position clamp (family-wide off-screen guard)
 class MainWindow : public juce::DocumentWindow {
@@ -53,6 +54,12 @@ public:
     const juce::String getApplicationVersion() override { return meterbar::kVersionString; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
+        // v0.28.3: install the hard-crash handler FIRST — before the
+        // splash, the window, and any audio source starts — so a
+        // crash anywhere later in startup still leaves its record
+        // (crash-*.txt + .dmp in Documents\MeterBar). Windows-only;
+        // a no-op elsewhere (CrashHandler.h).
+        crashhandler::install(meterbar::kVersionString);
         // JUCE free-license attribution splash (v0.15 distribution): small,
         // brief, non-intrusive — shows "Made with JUCE" for ~1.5 s at
         // startup, click dismisses it sooner. The free JUCE license asks

@@ -1,6 +1,8 @@
 #include "MainComponent.h"
 #include <meterbar/WindowGeom.hpp> // v0.20.1: preset/startup position clamp
 #include <meterbar/Recordings.hpp> // v0.21.4: Recordings submenu model
+#include <meterbar/CrashWatch.hpp> // v0.28.3: crash-record naming/notice logic (core)
+#include "CrashHandler.h"          // v0.28.3: hard-crash handler (installed in Main.cpp)
 #if JUCE_WINDOWS
  #include <windows.h> // native window move (v0.11)
 #endif
@@ -9,6 +11,12 @@ using namespace meterbar;
 // CMakeLists project(VERSION) is the single source of truth. (Before
 // this it was a hard-coded "v1.0.0" literal here, one of six places.)
 static const juce::String kVersion = juce::String("v") + meterbar::kVersionString;
+// v0.28.3: the app's Documents folder — crash records, capture log,
+// presets and recordings all live here; "Open Log Folder" opens it.
+static juce::File meterBarDocsDir() {
+    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MeterBar");
+}
+static void openLogFolder() { auto dir = meterBarDocsDir(); dir.createDirectory(); dir.startAsProcess(); }
 MainComponent::MainComponent() {
     setOpaque(false); // v0.13: lets translucent background fills show the desktop (window is non-opaque too)
     theme = themeByName(engine.state.themeName);
@@ -175,6 +183,36 @@ MainComponent::MainComponent() {
     debugWin->setContentNonOwned(&debugLabel, true); debugWin->setSize(470, 262); debugWin->setUsingNativeTitleBar(true);
     loadPerfPersist(); // v0.28.2: BEFORE the first applyFps — a persisted stepped-down Auto starts at the Low-End cap from frame one
     engine.applySource(); applyTheme(); applyFps();
+    // v0.28.3: NEXT-LAUNCH CRASH NOTICE (family crash-log contract).
+    // The crash handler (CrashHandler.h, installed in Main.cpp)
+    // leaves crash-*.txt + .dmp in Documents\MeterBar; a crash file
+    // without a ".seen" sibling earns exactly one notice, however
+    // many launches it survives. Deferred via callAsync so the bar
+    // is fully up before the dialog appears. Either button marks
+    // every unseen crash seen — the notice never repeats for the
+    // same crash file.
+    juce::MessageManager::callAsync([this]{
+        auto dir = meterBarDocsDir();
+        std::vector<std::string> names;
+        for (auto& f : dir.findChildFiles(juce::File::findFiles, false))
+            names.push_back(f.getFileName().toStdString());
+        auto unseen = meterbar::unseenCrashes(names);
+        if (unseen.empty()) return;
+        auto count = (int)unseen.size();
+        auto w = std::make_shared<juce::AlertWindow>("MeterBar crashed",
+            "MeterBar crashed " + juce::String(count) + (count == 1 ? " time" : " times") +
+            " since you last saw this notice.\nThe crash record" + (count == 1 ? " is" : "s are") +
+            " in Documents\\MeterBar (crash-*.txt + .dmp).\nOpen the folder to send them to Milo?",
+            juce::AlertWindow::WarningIcon);
+        w->addButton("Open Log Folder", 1); w->addButton("Dismiss", 0);
+        w->enterModalState(true, juce::ModalCallbackFunction::create([unseen](int r){
+            for (auto& n : unseen) {
+                auto seen = meterBarDocsDir().getChildFile(juce::String(meterbar::seenMarkerFor(n)));
+                seen.create();
+            }
+            if (r == 1) openLogFolder();
+        }));
+    });
     // v0.23.0: Live Captions initialise AFTER the first applySource
     // (the controller reads the engine's caption epoch/source) and
     // after the window exists (the overlay's placement rule wants
@@ -1122,6 +1160,17 @@ void MainComponent::timerCallback() {
     }
     lastFrameMs = now;
     ++perfFrame_;
+    // v0.28.3: keep the crash handler's state snapshot current
+    // (throttled — every ~90 frames) with the last state the app
+    // can honestly know. The handler itself never formats; if the
+    // process dies, the crash record carries this snapshot.
+    if (perfFrame_ % 90 == 0) {
+        juce::String snap;
+        snap << "audio source: " << engine.state.audioSource << " (app source " << engine.state.appSource << ")\n";
+        snap << "capture status: " << engine.loopbackStatus() << "\n";
+        snap << "performance mode: " << engine.state.performanceMode << (perfAuto_.latched() ? " (auto stepped down)\n" : "\n");
+        crashhandler::setStateSnapshot(snap.toRawUTF8());
+    }
     if (!engine.paused.load()) prepareFrame();
     repaint();
     // v0.12: the Rec button mirrors the engine every frame — a recording can
@@ -1409,7 +1458,7 @@ enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
        idCapPause, idCapRecord, idClip10, idClip60, idHint, idToolbar, idDebug, idUpdates, idQuit,
        idArrange=6001, idRestore, idMinimize, // v0.22.0: compressed toolbar items in the hamburger menu
        idInDevBase=3300, idOutDevBase=3400,
-       idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101, // v0.21.4: Recordings submenu (idRecBase + up to 25 entries)
+       idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101, idOpenLogFolder=5102, // v0.21.4: Recordings submenu; v0.28.3: Open Log Folder (crash records live in the same Documents\MeterBar)
        idLcOff=7001, idLcTranscribe, idLcTranslate, idLcTop, idLcMove, idLcResetPos, idLcSetup, idLcStatus,
        idLcPresentOverlay, idLcPresentDocked }; // v0.23.0: Live Captions submenu; v0.24.0: presentation flip ids
 void MainComponent::savePresetInteractive(bool saveAs) {
@@ -1662,6 +1711,7 @@ void MainComponent::showHamburgerMenu() {
     m.addItem(idToolbar, "Show Toolbar", true, st.showToolbar);
     m.addItem(idDebug, "Show Debug Window", true, debugWin->isVisible());
     m.addItem(idUpdates, "Check For Updates");
+    m.addItem(idOpenLogFolder, "Open Log Folder"); // v0.28.3: crash records + capture log (family crash-log contract: reachable outside Settings)
     m.addSeparator(); m.addItem(idMinimize, "Minimize"); m.addItem(idQuit, "Quit");
     const int numDisplays = juce::Desktop::getInstance().getDisplays().displays.size();
     m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(burgerBtn), [this, inNames, outNames, recFiles, presetFiles, numDisplays](int r){
@@ -1700,6 +1750,7 @@ void MainComponent::showHamburgerMenu() {
         else if (r == idToolbar) { s.showToolbar = !s.showToolbar; resized(); repaint(); }
         else if (r == idDebug) debugWin->setVisible(!debugWin->isVisible());
         else if (r == idUpdates) checkForUpdates();
+        else if (r == idOpenLogFolder) openLogFolder();
         // v0.22.0: the compressed toolbar items. Preset actions are
         // the old dropdown's, unchanged; Arrange / Restore call the
         // same handlers the buttons did.

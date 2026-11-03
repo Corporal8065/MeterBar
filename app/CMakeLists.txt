@@ -40,5 +40,6 @@ target_link_libraries(MeterBar PRIVATE
 if(WIN32)
   # shell32 = SHAppBarMessage, comctl32 = SetWindowSubclass,
   # dwmapi = DWMWA_CLOAKED — all for ScreenSpace (v0.18 AppBar/arrange).
-  target_link_libraries(MeterBar PRIVATE ole32 mmdevapi shell32 comctl32 dwmapi)
+  # dbghelp = MiniDumpWriteDump for the v0.28.3 crash record (CrashHandler.h).
+  target_link_libraries(MeterBar PRIVATE ole32 mmdevapi shell32 comctl32 dwmapi dbghelp)
 endif()
