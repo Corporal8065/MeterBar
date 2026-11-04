@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <meterbar/State.hpp>
+#include <meterbar/PinSource.hpp> // v0.28.7: pinned-app source policy (exe name + label helpers)
 #include <functional>
 #include "MeterBarVersion.h" // v0.21.2: generated single-source version (About panel below)
 #include "Theme.h" // v0.12: panel headers wear their module's accent colour
@@ -276,9 +277,38 @@ public:
             // (index 3) so persisted values 0/1/2 keep their
             // meaning — same Spotify.exe, same resolver, explicit
             // label for the patched client.
-            combo("Capture Source", {"System (all audio)","Spotify only","Tidal only","Spotify (Spicetify) only"}, st->appSource,
+            // v0.28.7: index 4 APPENDED the same way — the pinned
+            // app. The item text NAMES the current pin (or that
+            // none is set), so the source menu itself shows the
+            // pin state; the buttons under it set / change / clear
+            // the pin. build() runs on every open-from-hidden, so
+            // the item text is fresh whenever Settings opens.
+            const juce::String pinItem = st->pinnedExe.empty()
+                ? juce::String("Pinned app only (no pin set)")
+                : "Pinned app only (" + juce::String(meterbar::pinDisplayLabel(st->pinnedExe)) + ")";
+            combo("Capture Source", {"System (all audio)","Spotify only","Tidal only","Spotify (Spicetify) only", pinItem}, st->appSource,
                   [&](int v){ st->appSource = v; if (onSourceChanged) onSourceChanged(); });
             if (appSourceStatus) note(appSourceStatus());
+            {
+                auto* pinBtn = add(new juce::TextButton(st->pinnedExe.empty() ? "Pin an app..." : "Change pinned app..."));
+                pinBtn->setBounds(24, y_, 170, 22);
+                pinBtn->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+                pinBtn->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
+                pinBtn->onClick = [this, pinBtn]{ choosePinnedExe(pinBtn); };
+                auto* unpinBtn = add(new juce::TextButton("Unpin"));
+                unpinBtn->setBounds(202, y_, 90, 22);
+                unpinBtn->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+                unpinBtn->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
+                unpinBtn->onClick = [this, pinBtn]{
+                    st->pinnedExe.clear();
+                    if (st->appSource == 4) st->appSource = 0; // unpin restores today's picker behaviour (System until re-picked)
+                    pinBtn->setButtonText("Pin an app...");
+                    if (onSourceChanged) onSourceChanged();
+                    changed();
+                };
+                y_ += 26;
+            }
+            note("Pinned app: MeterBar hears ONLY that app, attached whenever it runs. While it is not running the meters wait in silence — pinned mode never falls back to another app or the system mix. The pin is saved and survives restarts.");
             soundSourceCombo();
             slider("Trim dB (-48..+48)", -48.0, 48.0, st->trimDb, [&](double v){ st->trimDb = (float)v; }); // v0.20.3: range doubled (Jackson's ask — a larger input trim)
             combo("Channel Pair", {"Pair 1 (ch 1-2)","Pair 2 (ch 3-4)","Pair 3 (ch 5-6)","Pair 4 (ch 7-8)"}, st->routingPair,
@@ -334,8 +364,34 @@ private:
     int y_ = 8;
     Theme th_; int nextKind_ = -1; // v0.12: header accent for the panel being built
     std::vector<std::unique_ptr<juce::Component>> owned;
+    std::unique_ptr<juce::FileChooser> pinChooser_; // v0.28.7: lives across the async pin pick
     template <typename T> T* add(T* c) { owned.emplace_back(c); addAndMakeVisible(c); return c; }
     void changed() { if (onChanged) onChanged(); }
+    // v0.28.7: pin picking — a file chooser for the app's .exe.
+    // Only the exe NAME is stored (matching is by name, like the
+    // Spotify/Tidal resolver), so an app update that moves folders
+    // does not break the pin. Picking an exe also SELECTS pinned
+    // mode: pinning without switching would be a silent no-op.
+    // The callback runs long after the click gesture ended, and it
+    // never rebuilds the panel (the v0.28.2 visible-rebuild guard)
+    // — it updates the pin button's own text in place; the combo
+    // item text refreshes on the next open-from-hidden build.
+    void choosePinnedExe(juce::TextButton* pinBtn) {
+        pinChooser_ = std::make_unique<juce::FileChooser>(
+            "Pin an app — choose its .exe", juce::File{}, "*.exe");
+        const auto flags = juce::FileBrowserComponent::openMode
+                         | juce::FileBrowserComponent::canSelectFiles;
+        pinChooser_->launchAsync(flags, [this, pinBtn](const juce::FileChooser& fc) {
+            const auto f = fc.getResult();
+            pinChooser_.reset();
+            if (!f.existsAsFile()) return;
+            st->pinnedExe = meterbar::exeBaseName(f.getFullPathName().toStdString());
+            st->appSource = 4;
+            if (pinBtn) pinBtn->setButtonText("Change pinned app...");
+            if (onSourceChanged) onSourceChanged();
+            changed();
+        });
+    }
     // v0.19: explicit palette colours for every control the helpers
     // build (the SettingsLookAndFeel seeds the same palette; setting
     // both means no control can fall back to stock JUCE whites).

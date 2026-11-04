@@ -32,6 +32,7 @@
 #include "../dsp/include/meterbar/Undertow.hpp"
 #include "../dsp/include/meterbar/Performance.hpp"
 #include "../dsp/include/meterbar/CrashWatch.hpp"
+#include "../dsp/include/meterbar/PinSource.hpp" // v0.28.7
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -2950,6 +2951,144 @@ int main() {
             CHECK(mc.find("void MainComponent::toggleSettings()") != std::string::npos);
             CHECK(mc.find("idOpenSettings) { toggleSettings(); }") != std::string::npos);
             CHECK(mc.find("settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleSettings(); }") != std::string::npos);
+        }
+    }
+
+    // === v0.28.7 — pinned-app source (appSource 4): exe-name
+    // policy, the attach/detach watch machine, and the state
+    // default. The Windows behaviour itself (activation, process
+    // enumeration) cannot run in this harness; the app-source
+    // scan pins below cover the wiring it depends on.
+    {
+        using namespace meterbar;
+        // exe names: a chooser hands back a full path; the pin
+        // stores and matches the NAME part only
+        CHECK(exeBaseName("C:\\Program Files\\Ableton\\Live 12 Suite\\Program\\Ableton Live 12 Suite.exe") == "Ableton Live 12 Suite.exe");
+        CHECK(exeBaseName("C:/Program Files/Ableton/Ableton Live 12 Suite.exe") == "Ableton Live 12 Suite.exe");
+        CHECK(exeBaseName("Spotify.exe") == "Spotify.exe");
+        CHECK(exeBaseName("  TIDAL.exe  ") == "TIDAL.exe");
+        CHECK(exeBaseName("").empty());
+        CHECK(exeBaseName("   ").empty());
+        // display label: base name minus the .exe suffix
+        CHECK(pinDisplayLabel("Ableton Live 12 Suite.exe") == "Ableton Live 12 Suite");
+        CHECK(pinDisplayLabel("ABLETON.EXE") == "ABLETON");
+        CHECK(pinDisplayLabel("C:\\Apps\\My Tool.exe") == "My Tool");
+        CHECK(pinDisplayLabel("noext") == "noext");
+        CHECK(pinDisplayLabel("").empty());
+        // the resolver's match rule: base names, case-insensitive
+        CHECK(exeNamesMatch("spotify.exe", "Spotify.EXE"));
+        CHECK(exeNamesMatch("C:\\x\\TIDAL.exe", "tidal.exe"));
+        CHECK(!exeNamesMatch("Spotify.exe", "TIDAL.exe"));
+        CHECK(!exeNamesMatch("", "Spotify.exe"));
+        CHECK(!exeNamesMatch("Spotify.exe", ""));
+        // state default: no pin, System source
+        PresetState freshState;
+        CHECK(freshState.pinnedExe.empty());
+        CHECK(freshState.appSource == 0);
+        // --- the watch machine: one action per edge, no churn ---
+        {
+            PinWatch w;
+            // absent: the waiting state — no action, unattached
+            CHECK(w.step(false, false, true) == PinAction::None);
+            CHECK(!w.attached);
+            // appeared inside the settle window: not yet
+            CHECK(w.step(true, false, false) == PinAction::None);
+            CHECK(!w.attached);
+            // appeared and settled: attach exactly once
+            CHECK(w.step(true, false, true) == PinAction::Attach);
+            CHECK(w.attached);
+            // activation in flight or failed: NO re-attach churn
+            CHECK(w.step(true, false, true) == PinAction::None);
+            // capture reports running: belief confirmed silently
+            CHECK(w.step(true, true, true) == PinAction::None);
+            CHECK(w.attached);
+            // disappeared: detach exactly once, back to waiting
+            CHECK(w.step(false, false, true) == PinAction::Detach);
+            CHECK(!w.attached);
+            CHECK(w.step(false, false, true) == PinAction::None);
+            // reappeared: attach again
+            CHECK(w.step(true, false, true) == PinAction::Attach);
+            CHECK(w.attached);
+        }
+        {
+            // startup: the constructor's applySource attached
+            // before the first step (capture already running) —
+            // latch the belief with NO action, and a later
+            // disappearance still detaches
+            PinWatch w;
+            CHECK(w.step(true, true, false) == PinAction::None);
+            CHECK(w.attached);
+            CHECK(w.step(false, false, false) == PinAction::Detach);
+            CHECK(!w.attached);
+        }
+    }
+    {
+        // --- app-source pins for the wiring (v0.28.4 pattern:
+        // read the app source from a tree checkout; SKIP with a
+        // note when unreachable — CI and local runs execute them).
+        auto readApp = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string pio = readApp("app/Source/PresetIO.h");
+        const std::string sth = readApp("dsp/include/meterbar/State.hpp");
+        const std::string eng = readApp("app/Source/AudioEngine.h");
+        const std::string set = readApp("app/Source/Settings.h");
+        const std::string mc  = readApp("app/Source/MainComponent.cpp");
+        if (pio.empty() || sth.empty() || eng.empty() || set.empty() || mc.empty()) {
+            std::printf("v0.28.7 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            // persistence: the pin rides PresetIO BOTH ways and
+            // the appSource clamp admits 4 (an old clamp at 3
+            // would silently un-pin every saved preset)
+            CHECK(pio.find("set(\"pinnedExe\"") != std::string::npos);
+            CHECK(pio.find("g(\"pinnedExe\")") != std::string::npos);
+            CHECK(pio.find("as > 4 ? 4") != std::string::npos);
+            CHECK(sth.find("std::string pinnedExe") != std::string::npos);
+            // reuse: applySource sends the pin through the SAME
+            // process-loopback activation as Spotify/Tidal, and
+            // the pinned branch contains NO endpoint capture —
+            // pinned mode can never fall back to the system mix
+            const auto b0 = eng.find("state.appSource == 4) {");
+            CHECK(b0 != std::string::npos);
+            if (b0 != std::string::npos) {
+                const auto b1 = eng.find("}", b0);
+                const std::string seg = eng.substr(b0, b1 - b0);
+                CHECK(seg.find("startProcessLoopback(cb, state.pinnedExe)") != std::string::npos);
+                CHECK(seg.find("loopback.start(cb") == std::string::npos);
+                CHECK(seg.find("state.pinnedExe.empty()") != std::string::npos); // empty pin starts nothing
+            }
+            // the waiting state is real UI text
+            CHECK(eng.find("waiting for") != std::string::npos);
+            CHECK(eng.find("never another app or the system mix") != std::string::npos);
+            // Settings: the source menu shows the pin state and
+            // carries the Pin / Unpin controls
+            CHECK(set.find("Pinned app only (") != std::string::npos);
+            CHECK(set.find("no pin set") != std::string::npos);
+            CHECK(set.find("Pin an app...") != std::string::npos);
+            CHECK(set.find("choosePinnedExe") != std::string::npos);
+            CHECK(set.find("never falls back to another app or the system mix") != std::string::npos);
+            // the watcher is wired: ~1 s step, attach via the
+            // shared applySource, detach a bare stop, and the
+            // pin's own persistence file (restart survival)
+            CHECK(mc.find("pollPinnedSource(now)") != std::string::npos);
+            CHECK(mc.find("PinAction::Attach") != std::string::npos);
+            CHECK(mc.find("engine.applySource()") != std::string::npos);
+            CHECK(mc.find("PinAction::Detach") != std::string::npos);
+            CHECK(mc.find("engine.stopLoopback()") != std::string::npos);
+            CHECK(mc.find("pin-source.json") != std::string::npos);
+            CHECK(mc.find("loadPinPersist()") != std::string::npos);
+            CHECK(mc.find("savePinPersist()") != std::string::npos);
         }
     }
 

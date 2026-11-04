@@ -343,7 +343,7 @@ MainComponent::MainComponent() {
     settingsWin->content.st = &engine.state;
     settingsWin->content.deviceManager = &engine.deviceManager;
     settingsWin->content.onChanged = [this]{ linkBgEffectShadow_ = -1; applyTheme(); layoutModules(); repaint(); syncScreenSpace(); linkClient_.notifyLocalSettings(); }; // v0.2.1: bg publish feed (was missing). Drag-lag fix: any LOCAL settings change drops the adopted-effect shadow — local intent wins and MeterBar publishes its true values again
-    settingsWin->content.onSourceChanged = [this]{ engine.applySource(); };
+    settingsWin->content.onSourceChanged = [this]{ engine.applySource(); savePinPersist(); }; // v0.28.7: every source change rewrites the pin file from live state
     settingsWin->content.appSourceStatus = [this]{ return engine.appSourceState(); }; // v0.27.0 (item 8)
     settingsWin->content.onFpsChanged = [this]{ applyFps(); };
     settingsWin->content.onBgLinkToggled = [this]{ linkClient_.notifyBgLinkChanged(); }; // v0.21.3
@@ -353,6 +353,7 @@ MainComponent::MainComponent() {
     debugWin = std::make_unique<HideOnCloseWindow>("MeterBar Debug", juce::Colour(0xff231f31), juce::DocumentWindow::closeButton); // v0.28.2: X hides the window (stock DocumentWindow's X did nothing)
     debugLabel.setFont(12.5f); // v0.13: endpoint IDs are long — smaller font + wider window keeps them on one line
     debugWin->setContentNonOwned(&debugLabel, true); debugWin->setSize(470, 262); debugWin->setUsingNativeTitleBar(true);
+    loadPinPersist(); // v0.28.7: BEFORE the first applySource below — a saved pin comes up pinned (attached or waiting), like it was left
     loadPerfPersist(); // v0.28.2: BEFORE the first applyFps — a persisted stepped-down Auto starts at the Low-End cap from frame one
     engine.applySource(); applyTheme(); applyFps();
     // v0.28.3: NEXT-LAUNCH CRASH NOTICE (family crash-log contract).
@@ -503,6 +504,57 @@ void MainComponent::savePerfPersist(bool steppedDown) {
     o->setProperty("schema", 1);
     o->setProperty("steppedDown", steppedDown);
     f.replaceWithText(juce::JSON::toString(juce::var(o), true));
+}
+// v0.28.7: the pin's persistence — the perf-auto.json idiom (a
+// small JSON file under Documents/MeterBar, CaptionSettings'
+// pattern). The pin ALSO rides presets via PresetIO, but presets
+// are explicit user saves; this file is what makes the pin (and
+// whether pinned mode was on) survive an ordinary restart.
+// Written on every source change; read once at startup.
+namespace { juce::File pinPersistFile() {
+    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+               .getChildFile("MeterBar").getChildFile("pin-source.json");
+} }
+void MainComponent::loadPinPersist() {
+    const auto f = pinPersistFile();
+    if (!f.existsAsFile()) return;
+    const auto v = juce::JSON::parse(f.loadFileAsString());
+    if (!v.isObject()) return;
+    engine.state.pinnedExe = v.getProperty("pinnedExe", "").toString().toStdString();
+    if ((bool)v.getProperty("pinActive", false) && !engine.state.pinnedExe.empty())
+        engine.state.appSource = 4;
+}
+void MainComponent::savePinPersist() {
+    const auto f = pinPersistFile();
+    f.getParentDirectory().createDirectory();
+    juce::DynamicObject::Ptr o = new juce::DynamicObject();
+    o->setProperty("schema", 1);
+    o->setProperty("pinnedExe", juce::String(engine.state.pinnedExe));
+    o->setProperty("pinActive", engine.state.appSource == 4);
+    f.replaceWithText(juce::JSON::toString(juce::var(o), true));
+}
+// v0.28.7: the pinned-source watcher, stepped ~1 s from
+// timerCallback. While pinned mode is off it only keeps the
+// settle stamp fresh (and the watch belief reset), so entering
+// pinned mode starts clean. Attach goes through
+// AudioEngine::applySource — the same path a picker selection
+// takes, activation included; detach is a bare loopback stop.
+// Pinned mode NEVER falls back: an absent exe is the waiting
+// state (silence), not a cue to hear something else.
+void MainComponent::pollPinnedSource(juce::int64 nowMs) {
+    auto& s = engine.state;
+    const bool pinnedMode = s.audioSource == "System Loopback" && s.appSource == 4 && !s.pinnedExe.empty();
+    if (!pinnedMode) { pinWatch_ = meterbar::PinWatch{}; pinLastActionMs_ = nowMs; return; }
+    const bool running = WindowsLoopback::isProcessRunning(s.pinnedExe);
+    const bool capturing = engine.loopbackStatus() == "running";
+    const bool settle = nowMs - pinLastActionMs_ >= 6000;
+    switch (pinWatch_.step(running, capturing, settle)) {
+        case meterbar::PinAction::Attach:
+            pinLastActionMs_ = nowMs; engine.applySource(); break;
+        case meterbar::PinAction::Detach:
+            pinLastActionMs_ = nowMs; engine.stopLoopback(); break;
+        case meterbar::PinAction::None: break;
+    }
 }
 void MainComponent::applyFps() { int fps = perfLimits().fpsCap; startTimerHz(fps > 0 ? fps : 60); }
 // v0.18 RESERVE SCREEN SPACE (Jackson's ask): while the toggle is ON and
@@ -1368,6 +1420,10 @@ void MainComponent::timerCallback() {
     }
     lastFrameMs = now;
     ++perfFrame_;
+    // v0.28.7: pinned-source watcher — a ~1 s step inside the
+    // frame timer (process enumeration is a Toolhelp snapshot;
+    // once a second is plenty for an app appearing/disappearing).
+    if (now - pinLastTickMs_ >= 1000) { pinLastTickMs_ = now; pollPinnedSource(now); }
     // v0.28.6: mirror the trim STATE into the bar slider — the
     // Settings slider and preset loads write the state directly,
     // so the bar surface follows them here (never while the user
@@ -1382,6 +1438,7 @@ void MainComponent::timerCallback() {
     if (perfFrame_ % 90 == 0) {
         juce::String snap;
         snap << "audio source: " << engine.state.audioSource << " (app source " << engine.state.appSource << ")\n";
+        if (engine.state.appSource == 4) snap << "pinned exe: " << engine.state.pinnedExe << "\n"; // v0.28.7: pin forensics ride the crash snapshot
         snap << "capture status: " << engine.loopbackStatus() << "\n";
         snap << "performance mode: " << engine.state.performanceMode << (perfAuto_.latched() ? " (auto stepped down)\n" : "\n");
         crashhandler::setStateSnapshot(snap.toRawUTF8());
@@ -1692,7 +1749,8 @@ enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
        idRecBase=5000, idOpenRecFolder=5100, idRecEmpty=5101, idOpenLogFolder=5102, // v0.21.4: Recordings submenu; v0.28.3: Open Log Folder (crash records live in the same Documents\MeterBar)
        idLcOff=7001, idLcTranscribe, idLcTranslate, idLcTop, idLcMove, idLcResetPos, idLcSetup, idLcStatus,
        idLcPresentOverlay, idLcPresentDocked,
-       idLinkAllTop=8001, idLinkAllBottom }; // BLK7: Link All submenu (DESIGN §6e as amended 2026-11-03: option B only)
+       idLinkAllTop=8001, idLinkAllBottom, // BLK7: Link All submenu (DESIGN §6e as amended 2026-11-03: option B only)
+       idPinStatus=8101 }; // v0.28.7: disabled pin-status row in the Audio Source submenu
 void MainComponent::savePresetInteractive(bool saveAs) {
     auto& st = engine.state;
     if (!saveAs && st.name != "Default" && !st.name.empty()) { presetio::save(st, juce::String(st.name)); return; }
@@ -1880,6 +1938,11 @@ void MainComponent::showHamburgerMenu() {
                        st.audioSource == "System Loopback" && outNames[i] == juce::String(st.outputDeviceName));
     src.addSubMenu("Input Devices (mic / line-in)", inDev);
     src.addSubMenu("Output Devices (speakers - hear what's playing)", outDev);
+    // v0.28.7: while the pinned app is the capture source, the
+    // Audio Source menu SAYS so — a disabled status row (the Live
+    // Captions pattern) carrying the live pin state: running, or
+    // waiting for the pinned exe to start.
+    if (st.appSource == 4) { src.addSeparator(); src.addItem(idPinStatus, engine.appSourceState(), false); }
     m.addSubMenu("Audio Source", src);
     juce::PopupMenu themeM; const char* themes[] = {"Midnight Kids","Midnight Pink","Deep Teal","Daylight","Anime"};
     for (int i = 0; i < 5; ++i) themeM.addItem(idThemeBase + i, themes[i], true, st.themeName == themes[i]);

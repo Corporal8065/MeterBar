@@ -19,6 +19,7 @@
 #include "Captions/CaptionStrip.h"      // v0.24.0: docked caption strip
 #include <meterbar/WindowGeom.hpp>      // v0.24.0: caption homing / dock growth (pure core)
 #include <meterbar/Performance.hpp>     // v0.28.2: Performance Mode effective limits + Auto latch (pure core)
+#include <meterbar/PinSource.hpp>       // v0.28.7: pinned-app source watch machine (pure core)
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
 // the pair's PresetState::moduleFlex weights (their sum is preserved, so
@@ -190,6 +191,9 @@ private:
     meterbar::EffectiveLimits perfLimits(); // v0.28.2: mode + Auto latch + user settings -> effective per-frame limits (Performance.hpp)
     void loadPerfPersist();                 // v0.28.2: re-arm the Auto latch from Documents/MeterBar/perf-auto.json (a stepped-down session starts stepped down)
     void savePerfPersist(bool steppedDown); // v0.28.2: write/clear that file (called on latch trip and on any explicit mode change)
+    void loadPinPersist();                  // v0.28.7: restore the pinned-app source from Documents/MeterBar/pin-source.json (BEFORE the first applySource)
+    void savePinPersist();                  // v0.28.7: write that file from live state (called on every source change)
+    void pollPinnedSource(juce::int64 nowMs); // v0.28.7: ~1 s watcher step from timerCallback — attach the pinned exe on appear, detach on disappear, NEVER fall back
     void showHamburgerMenu();
     // v0.22.0: the Preset and Reposition dropdowns are SUBMENUS of
     // the hamburger menu now (their toolbar buttons are gone); the
@@ -319,6 +323,8 @@ private:
     // scope-pitch throttle divides, and the cached scope frequency
     // served between throttled pitch runs.
     meterbar::PerfAutoLatch perfAuto_;
+    meterbar::PinWatch pinWatch_;                       // v0.28.7: pinned-source attach/detach belief (policy in meterbar/PinSource.hpp)
+    juce::int64 pinLastTickMs_ = 0, pinLastActionMs_ = 0; // v0.28.7: watcher cadence + settle stamp (stamped continuously while pinned mode is off, so the settle window runs from mode entry)
     int perfModeShadow_ = 0;
     long long perfFrame_ = 0;
     float cachedScopeFreq_ = 0;

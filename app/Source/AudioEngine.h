@@ -11,6 +11,7 @@
 #include <meterbar/BeatTrack.hpp>
 #include <meterbar/Undertow.hpp>
 #include <meterbar/State.hpp>
+#include <meterbar/PinSource.hpp> // v0.28.7: pinned-app source policy (label derivation)
 #include "WindowsLoopback.h"
 #include "Captions/CaptionTap.h"
 
@@ -81,6 +82,12 @@ public:
             if (state.appSource == 1) loopback.startProcessLoopback(cb, "Spotify.exe");
             else if (state.appSource == 2) loopback.startProcessLoopback(cb, "TIDAL.exe");
             else if (state.appSource == 3) loopback.startProcessLoopback(cb, "Spotify.exe", "Spotify (Spicetify)");
+            // v0.28.7: the pinned app — the pin's exe through this
+            // SAME process-loopback path (no second activation
+            // implementation). An empty pin starts NO capture at
+            // all: silence, never the endpoint mix below. Attach on
+            // later appearance is the MainComponent watcher's job.
+            else if (state.appSource == 4) { if (!state.pinnedExe.empty()) loopback.startProcessLoopback(cb, state.pinnedExe); }
             else // Capture the CHOSEN output device — by endpoint ID when known
                  // (v0.13), by friendly name as fallback (empty = default output).
                 loopback.start(cb, state.outputDeviceName, state.outputDeviceId);
@@ -202,6 +209,10 @@ public:
     long long loopbackPackets() { return loopback.packetsReceived(); }
     juce::String loopbackFormat() { return juce::String(loopback.formatInfo()); }
     juce::String loopbackStatus() { return juce::String(loopback.statusInfo()); }
+    // v0.28.7: the pinned watcher's detach (the pinned exe went
+    // away) — stop the capture and start NOTHING in its place; a
+    // recording in progress is left running (starved, not ended).
+    void stopLoopback() { loopback.stop(); }
     // v0.27.0 (item 8): the Settings source-state line for the
     // per-app sources — "Spotify — running" / "Spotify — not
     // running" / the capture thread's own status when it differs.
@@ -209,18 +220,27 @@ public:
     // once known, and the capture log's location is named, so a
     // failure is diagnosable from this line alone.
     juce::String appSourceState() {
-        if (state.appSource >= 1 && state.appSource <= 3) {
-            const char* exe = state.appSource == 2 ? "TIDAL.exe" : "Spotify.exe";
-            const char* label = state.appSource == 1 ? "Spotify"
-                              : state.appSource == 2 ? "Tidal" : "Spotify (Spicetify)";
+        if (state.appSource >= 1 && state.appSource <= 4) {
+            // v0.28.7: value 4 is the pinned app — exe and label come
+            // from the pin; an empty pin is its own honest state.
+            if (state.appSource == 4 && state.pinnedExe.empty())
+                return "Pinned app — nothing pinned yet (use 'Pin an app...' below)";
+            const std::string exe = state.appSource == 4 ? state.pinnedExe
+                                  : state.appSource == 2 ? "TIDAL.exe" : "Spotify.exe";
+            const juce::String label = state.appSource == 4
+                ? juce::String(meterbar::pinDisplayLabel(exe)) + " (pinned)"
+                : juce::String(state.appSource == 1 ? "Spotify"
+                             : state.appSource == 2 ? "Tidal" : "Spotify (Spicetify)");
             juce::String line;
             auto st = loopback.statusInfo();
             if (!WindowsLoopback::isProcessRunning(exe))
-                line = juce::String(label) + " — not running (MeterBar hears silence until it starts)";
+                line = state.appSource == 4
+                    ? label + " — waiting for " + juce::String(exe) + " to start (pinned: silence until then — never another app or the system mix)"
+                    : label + " — not running (MeterBar hears silence until it starts)";
             else if (!st.empty() && st != "not started" && st != "running")
-                line = juce::String(label) + " — " + juce::String(st);
+                line = label + " — " + juce::String(st);
             else
-                line = juce::String(label) + " — running (process loopback, this app only)";
+                line = label + " — running (process loopback, this app only)";
             auto tgt = loopback.targetInfo();
             if (!tgt.empty() && line.indexOf(juce::String(tgt)) < 0)
                 line += " · target " + juce::String(tgt);

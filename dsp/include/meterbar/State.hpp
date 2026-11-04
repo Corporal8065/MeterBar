@@ -103,7 +103,8 @@ struct PresetState {
     // test tone is a diagnostic the user picks explicitly, never the
     // first-run source.
     std::string audioSource = "System Loopback"; // "Input" | "System Loopback" | "Test Tone"
-    int appSource = 0;                 // v0.27.0 (item 8): within System Loopback — 0 = System (whole endpoint mix), 1 = Spotify only, 2 = Tidal only (per-app process loopback; silence while the app is not running, never a silent fallback to system audio); v0.27.2: 3 = Spotify (Spicetify) — same Spotify.exe + resolver, explicit label; appended so persisted 0/1/2 keep their meaning
+    int appSource = 0;                 // v0.27.0 (item 8): within System Loopback — 0 = System (whole endpoint mix), 1 = Spotify only, 2 = Tidal only (per-app process loopback; silence while the app is not running, never a silent fallback to system audio); v0.27.2: 3 = Spotify (Spicetify) — same Spotify.exe + resolver, explicit label; v0.28.7: 4 = Pinned app only (pinnedExe below, same process loopback + watcher attach); appended so persisted 0/1/2 keep their meaning
+    std::string pinnedExe;             // v0.28.7: the pinned app's exe NAME (e.g. "Ableton Live 12 Suite.exe"); empty = no pin. Matched by name, case-insensitively (meterbar/PinSource.hpp), exactly like the Spotify/Tidal resolver. Rides presets with appSource; the live pin ALSO persists in Documents/MeterBar/pin-source.json (the perf-auto.json idiom), loaded at startup before the first applySource
     std::string audioDeviceName;           // chosen INPUT device (source = Input)
     std::string outputDeviceName;          // chosen OUTPUT device (source = System Loopback captures THIS device)
     std::string outputDeviceId;            // v0.13: WASAPI endpoint ID of the chosen output — loopback keys on THIS, name is display/fallback
