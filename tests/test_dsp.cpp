@@ -116,7 +116,8 @@ int main() {
         PresetState p;
         CHECK(p.fftSize == 1024); CHECK(p.spectrumSmoothingPct == 50.0f); CHECK(p.spectrumTiltDb == 5.6f);
         CHECK(p.fade == 0.5f); CHECK(p.fftScale == FreqScale::Log); CHECK(p.vsync == true);
-        CHECK(p.stereoPointSize == 1.0f); CHECK(p.themeName == "Midnight Kids"); CHECK(isValidFftSize(16384) && !isValidFftSize(1000));
+        CHECK(p.stereoPointSize == 2.0f); CHECK(p.stereoColor == StereoColor::Rainbow); // v0.28.6 recipe: point size 2, Rainbow default (was 1.0f / Single)
+        CHECK(p.themeName == "Midnight Kids"); CHECK(isValidFftSize(16384) && !isValidFftSize(1000));
         CHECK(p.backgroundOpacity == 0.15f); CHECK(p.spectrumColorMode == SpectrumColorMode::Level);
         CHECK(p.outputDeviceId.empty());
     }
@@ -2512,7 +2513,8 @@ int main() {
           CHECK(e.bloomQuarter && e.bloomEighth);
           CHECK(e.vizMaxW == 480 && e.vizMaxH == 270);
           CHECK(e.scopePitchEvery == 1);
-          CHECK(e.swarmCap == 240 && e.dustCap == 60); }
+          CHECK(e.swarmCap == 240 && e.dustCap == 60);
+          CHECK(e.sgScale == 1.0f); } // v0.28.6: full-res spectrogram cache at Full
         { auto e = effectiveLimits(false, 120, false, true);
           CHECK(e.fpsCap == 120); CHECK(!e.bloomQuarter && e.bloomEighth); }
         { auto e = effectiveLimits(false, 0, true, false);
@@ -2523,7 +2525,8 @@ int main() {
           CHECK(!e.bloomQuarter && !e.bloomEighth);
           CHECK(e.vizMaxW == 320 && e.vizMaxH == 180);
           CHECK(e.scopePitchEvery == 3);
-          CHECK(e.swarmCap == 120 && e.dustCap == 30); }
+          CHECK(e.swarmCap == 120 && e.dustCap == 30);
+          CHECK(e.sgScale == 0.5f); } // v0.28.6: half-res spectrogram cache under Low-End (bilinear render keeps it smooth)
         { auto e = effectiveLimits(true, 120, true, true); CHECK(e.fpsCap == 30); }
         { auto e = effectiveLimits(true, 15, true, true); CHECK(e.fpsCap == 15); } // never raises a lower user limit
         // --- mode resolution ---
@@ -2868,6 +2871,85 @@ int main() {
                && parentSy.adoptedFrom == -1);
             CHECK(sh.slots[0].bgSeq == parentSlotBefore.bgSeq && sh.slots[0].bgTheme == parentSlotBefore.bgTheme);
             CHECK(!groupDockMovesSelf(sh, 0, 1, now)); // and the automatic dock cannot move it either
+        }
+    }
+
+    // === v0.28.6 — feel-fixes round (decided subset) ===
+    {
+        using namespace meterbar;
+        // --- bilinear spectrogram sampling (item: blockiness fix).
+        // A 4-bin x 3-row history with known rows; pushRow at speed 5
+        // advances exactly one row per push. Newest row = last push.
+        SpectrogramHistory h; h.prepare(4, 3);
+        h.pushRow({ 0.f, 10.f, 20.f, 30.f }, 5.f);     // oldest
+        h.pushRow({ 40.f, 50.f, 60.f, 70.f }, 5.f);
+        h.pushRow({ 80.f, 90.f, 100.f, 110.f }, 5.f);  // newest (age 0)
+        CHECK(h.at(0, 0) == 80.f && h.at(2, 3) == 30.f); // fixture sanity
+        // integer coordinates sample their own cell exactly
+        CHECK(std::abs(spectrogramSampleBilinear(h, 0.f, 0.f) - 80.f) < 0.001f);
+        CHECK(std::abs(spectrogramSampleBilinear(h, 2.f, 3.f) - 30.f) < 0.001f);
+        // midpoints blend the two neighbours (the anti-blocky property)
+        CHECK(std::abs(spectrogramSampleBilinear(h, 0.5f, 0.f) - 60.f) < 0.001f);  // (80+40)/2 along age
+        CHECK(std::abs(spectrogramSampleBilinear(h, 0.f, 1.5f) - 95.f) < 0.001f);  // (90+100)/2 along bin
+        CHECK(std::abs(spectrogramSampleBilinear(h, 0.25f, 0.5f) - 75.f) < 0.001f); // full bilinear blend
+        // out-of-range coordinates clamp to the edge cells
+        CHECK(std::abs(spectrogramSampleBilinear(h, -3.f, 99.f) - 110.f) < 0.001f);
+        CHECK(std::abs(spectrogramSampleBilinear(h, 99.f, -1.f) - 0.f) < 0.001f);
+        // an unprepared history reads as silence, never garbage
+        SpectrogramHistory empty;
+        CHECK(spectrogramSampleBilinear(empty, 0.f, 0.f) == -120.f);
+    }
+    {
+        // --- app-source pins for the items the core cannot execute
+        // (same pattern as the v0.28.4 activation pin: read the app
+        // source when run from a tree checkout; SKIP with a note
+        // when unreachable).
+        auto readApp = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string mv = readApp("app/Source/ModuleViews.h");
+        const std::string tp = readApp("app/Source/TextPop.h");
+        const std::string sh = readApp("app/Source/Settings.h");
+        const std::string mc = readApp("app/Source/MainComponent.cpp");
+        if (mv.empty() || tp.empty() || sh.empty() || mc.empty()) {
+            std::printf("v0.28.6 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            // item 1: textpop::drawSingle exists, and drawLoudness's
+            // readout column uses ONLY single draws (no drawPoppedText
+            // between drawLoudness and drawStereo)
+            CHECK(tp.find("drawSingle") != std::string::npos);
+            const auto l0 = mv.find("void drawLoudness");
+            const auto l1 = mv.find("void drawStereo", l0);
+            CHECK(l0 != std::string::npos && l1 != std::string::npos && l1 > l0);
+            if (l0 != std::string::npos && l1 != std::string::npos && l1 > l0) {
+                const std::string seg = mv.substr(l0, l1 - l0);
+                CHECK(seg.find("drawSingleText") != std::string::npos);
+                CHECK(seg.find("drawPoppedText") == std::string::npos);
+            }
+            // item 4: the spectrogram render samples bilinearly
+            CHECK(mv.find("spectrogramSampleBilinear") != std::string::npos);
+            // item 5: the stereometer plot is the full cell rect
+            CHECK(mv.find("auto sq = p;") != std::string::npos);
+            // item 6: Settings headings paint through the text pop
+            CHECK(sh.find("PoppedHeading") != std::string::npos);
+            CHECK(sh.find("textpop::draw") != std::string::npos);
+            // items 2+3: the bar trim slider exists, and BOTH Settings
+            // open paths (toolbar gear + menu item) route the toggle
+            CHECK(mc.find("trimSlider_") != std::string::npos);
+            CHECK(mc.find("void MainComponent::toggleSettings()") != std::string::npos);
+            CHECK(mc.find("idOpenSettings) { toggleSettings(); }") != std::string::npos);
+            CHECK(mc.find("settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleSettings(); }") != std::string::npos);
         }
     }
 

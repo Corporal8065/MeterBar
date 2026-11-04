@@ -186,6 +186,7 @@ private:
     void prepareFrame();
     void layoutModules();
     void applyTheme(); void applyFps(); void rebuildSettings();
+    void toggleSettings(); // v0.28.6: Settings open-or-close (clicking Settings while it is open closes it)
     meterbar::EffectiveLimits perfLimits(); // v0.28.2: mode + Auto latch + user settings -> effective per-frame limits (Performance.hpp)
     void loadPerfPersist();                 // v0.28.2: re-arm the Auto latch from Documents/MeterBar/perf-auto.json (a stepped-down session starts stepped down)
     void savePerfPersist(bool steppedDown); // v0.28.2: write/clear that file (called on latch trip and on any explicit mode change)
@@ -261,6 +262,14 @@ private:
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
     meterbar::ReserveMachine reserveMachine;                      // v0.18.1: event-driven dock/reserve decisions (hysteresis) — replaces the v0.18 ~4x/sec timer poll
     juce::Label logoLabel, versionLabel, hintLabel;
+    // v0.28.6: the TRIM slider on the bar itself (Jackson's ask) — a
+    // second surface for the SAME PresetState::trimDb the Settings
+    // slider writes (Settings > Audio Source > Trim dB). One
+    // setting, two surfaces: the bar slider writes the state, the
+    // frame timer mirrors state back into the slider (so a Settings
+    // or preset change shows here), never a second variable.
+    juce::Label trimLabel_;
+    juce::Slider trimSlider_;
     std::vector<std::unique_ptr<ModuleView>> modules;
     std::vector<std::unique_ptr<ModuleSplitter>> splitters; // v0.15: one per gap (modules + mascot cell, max 6)
     MascotView mascot;                                      // v0.16: Anime-only, docked after the last module

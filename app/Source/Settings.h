@@ -4,6 +4,7 @@
 #include <functional>
 #include "MeterBarVersion.h" // v0.21.2: generated single-source version (About panel below)
 #include "Theme.h" // v0.12: panel headers wear their module's accent colour
+#include "TextPop.h" // v0.28.6: panel headings paint with the text pop (PoppedHeading below)
 #include "WindowsLoopback.h" // v0.13: the output picker is built from real WASAPI endpoints (name + ID)
 // v0.19: the dark-title-bar call below is Windows-only. The guard tests
 // the COMPILER's own predefined _WIN32 (MSVC and MinGW both predefine
@@ -132,6 +133,27 @@ public:
         setColour(juce::ScrollBar::thumbColourId, border());
         setColour(juce::ScrollBar::trackColourId, well());
     }
+};
+// v0.28.6: a Settings panel HEADING with the TEXT POP — the same
+// treatment as the bar's titles (white front copy, the heading's
+// own colour as the offset back copy, textpop::draw — TextPop.h).
+// Jackson's explicit reversal of the old Settings exclusion
+// (field test, 2026-11-03): Settings titles/headings match the
+// bar titles for consistency. A stock juce::Label cannot draw the
+// pop, so the heading is this tiny paint-it-ourselves component;
+// it is display-only (no mouse interaction), like the Label was.
+class PoppedHeading : public juce::Component {
+public:
+    PoppedHeading(const juce::String& text, juce::Colour colour) : text_(text), colour_(colour) {
+        setInterceptsMouseClicks(false, false);
+    }
+    void paint(juce::Graphics& g) override {
+        g.setFont(juce::Font(15.f, juce::Font::bold));
+        textpop::draw(g, text_, getLocalBounds().toFloat(), juce::Justification::centredLeft, colour_);
+    }
+private:
+    juce::String text_;
+    juce::Colour colour_;
 };
 // Big Settings window content: one panel per module + Audio + Performance.
 // Controls write straight into the shared PresetState and fire onChanged.
@@ -331,8 +353,9 @@ private:
         t->setColour(juce::ToggleButton::tickDisabledColourId, settingsPalette::dimText());
     }
     void panel(const juce::String& title, bool* enabledFlag, std::function<void()> body) {
-        auto* hdr = add(new juce::Label({}, title)); hdr->setFont(juce::Font(15.f, juce::Font::bold));
-        hdr->setColour(juce::Label::textColourId, nextKind_ >= 0 ? th_.moduleAccent(nextKind_) : th_.accent);
+        // v0.28.6: the heading paints with the text pop (PoppedHeading),
+        // in the same accent colour the plain Label wore.
+        auto* hdr = add(new PoppedHeading(title, nextKind_ >= 0 ? th_.moduleAccent(nextKind_) : th_.accent));
         nextKind_ = -1; // consumed (set by build() before each module panel)
         hdr->setBounds(12, y_, 300, 22); y_ += 24;
         if (enabledFlag) {

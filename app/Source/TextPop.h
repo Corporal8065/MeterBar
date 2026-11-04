@@ -119,4 +119,19 @@ inline void drawFittedBlackBack(juce::Graphics& g, const juce::String& text, juc
     g.drawFittedText(text, r, j, maxLines, minScale);
 }
 
+// SINGLE draw (v0.28.6) — the family's drawSingle convention (named
+// identically to TickerBar's): the text once, in its own colour, no
+// offset copy at all. For the labels Jackson has ruled plain: the
+// Loudness readout column (his 2026-11-03 feel-fixes ask — "remove
+// the double text for the number of lufs and the text below that").
+inline void drawSingle(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
+                       juce::Justification j, juce::Colour colour) {
+    g.setColour(colour);
+    g.drawText(text, r, j);
+}
+inline void drawSingle(juce::Graphics& g, const juce::String& text, juce::Rectangle<int> r,
+                       juce::Justification j, juce::Colour colour) {
+    drawSingle(g, text, r.toFloat(), j, colour);
+}
+
 } // namespace textpop

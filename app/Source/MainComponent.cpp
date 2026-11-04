@@ -103,6 +103,24 @@ MainComponent::MainComponent() {
     // the pop (Jackson, 2026-11-02 21:54 PT); it keeps the stock
     // look and draws once.
     for (auto* l : { &logoLabel, &versionLabel, &hintLabel }) l->setLookAndFeel(&labelLnf_);
+    // v0.28.6: TRIM slider on the bar (Jackson's ask) — the same
+    // PresetState::trimDb as Settings > Audio Source > Trim dB
+    // (-48..+48, Settings.h), surfaced beside the wordmark. No text
+    // box (toolbar room); the tooltip carries the live value's
+    // meaning and the Settings slider remains the precise editor.
+    // The frame timer mirrors state -> slider (see timerCallback),
+    // so the two surfaces can never disagree.
+    trimLabel_.setText("Trim", juce::dontSendNotification);
+    trimLabel_.setFont(juce::Font(10.f, juce::Font::bold));
+    trimLabel_.setLookAndFeel(&labelLnf_);
+    trimLabel_.setInterceptsMouseClicks(false, false); // like the other toolbar labels: drags fall through to the window drag
+    addAndMakeVisible(trimLabel_);
+    trimSlider_.setRange(-48.0, 48.0, 0.01);
+    trimSlider_.setValue(engine.state.trimDb, juce::dontSendNotification);
+    trimSlider_.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+    trimSlider_.setTooltip("Input trim (dB) — the same setting as Settings > Audio Source > Trim dB; drag to trim the meters' input");
+    trimSlider_.onValueChange = [this]{ engine.state.trimDb = (float)trimSlider_.getValue(); };
+    addAndMakeVisible(trimSlider_);
     // v0.20.0 (k): family LINK toggle + client wiring. Geometry leads
     // via notifyWindowGeometryChanged. v0.2.1: the settings feed is
     // wired too (see onChanged below) — MeterBar was the only bar not
@@ -289,12 +307,7 @@ MainComponent::MainComponent() {
     // Screen Space" item; engine.state.reserveScreenSpace is
     // unchanged, so existing users keep it.
     burgerBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); showHamburgerMenu(); };
-    settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true);
-        // v0.28.2: this click's own mouse-down capture is still held
-        // by the BAR's window while onClick runs (JUCE releases it in
-        // the peer's mouse-up path, after dispatch) — free it now so
-        // opening Settings can never inherit a live capture.
-        settingsPalette::releaseCaptureIfHeldBy(this); settingsPalette::resetMouseSources(); };
+    settingsBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleSettings(); }; // v0.28.6: toggle — the open/close logic + capture hygiene live in toggleSettings()
     pauseBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); engine.paused = !engine.paused.load(); pauseBtn.setButtonText(engine.paused ? juce::String::fromUTF8(meterbar::glyphPlayUtf8()) : juce::String::fromUTF8(meterbar::glyphPauseUtf8())); }; // v0.22.0: glyph swap replaces the Pause/Resume text swap; v0.22.2: explicit UTF-8 bytes (see meterbar/Glyphs.hpp)
     recBtn.onClick = [this]{ uiClick(ClickSounds::Which::Pop); toggleRecord(); };
     // v0.19.2: the update indicator lives in the toolbar but starts
@@ -396,6 +409,11 @@ void MainComponent::applyTheme() {
     logoLabel.setColour(juce::Label::textColourId, theme.accent);
     versionLabel.setColour(juce::Label::textColourId, theme.dim);
     hintLabel.setColour(juce::Label::textColourId, theme.dim);
+    // v0.28.6: the bar trim slider wears the theme like the rest of the toolbar
+    trimLabel_.setColour(juce::Label::textColourId, theme.dim);
+    trimSlider_.setColour(juce::Slider::thumbColourId, theme.accent);
+    trimSlider_.setColour(juce::Slider::trackColourId, theme.dim.withAlpha(0.55f));
+    trimSlider_.setColour(juce::Slider::backgroundColourId, theme.deepest);
     for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn, &linkBtn }) {
         b->setColour(juce::TextButton::buttonColourId, theme.panel);
         b->setColour(juce::TextButton::buttonOnColourId, theme.deepest);
@@ -620,6 +638,22 @@ void MainComponent::rebuildSettings() {
     if (settingsWin->isVisible()) return;
     settingsWin->content.build();
 }
+// v0.28.6: SETTINGS TOGGLE (Jackson's feel-fixes ask: "if the
+// settings bar is already open, clicking settings again should
+// close the settings"). Both open paths — the toolbar gear and
+// the hamburger menu's Settings item — route through here, so the
+// toggle behaves identically from either. Closing is a plain
+// hide. Opening keeps the exact v0.28.2 flow: rebuild-from-hidden
+// (rebuildSettings' own visible-guard stands) + the mouse-capture
+// hygiene for the bar's window (this click's mouse-down capture is
+// still held while onClick runs; JUCE releases it in the peer's
+// mouse-up path, after dispatch — free it now so opening Settings
+// can never inherit a live capture).
+void MainComponent::toggleSettings() {
+    if (settingsWin->isVisible()) { settingsWin->setVisible(false); return; }
+    rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true);
+    settingsPalette::releaseCaptureIfHeldBy(this); settingsPalette::resetMouseSources();
+}
 void MainComponent::paint(juce::Graphics& g) {
     // v0.13: background fills honour the Background Opacity setting; at 1.0
     // (default) this paints exactly as before, below 1.0 the desktop shows
@@ -659,6 +693,16 @@ void MainComponent::resized() {
         burgerBtn.setBounds(bar.removeFromRight(44)); settingsBtn.setBounds(bar.removeFromRight(44));
         pauseBtn.setBounds(bar.removeFromRight(44)); recBtn.setBounds(bar.removeFromRight(44));
         linkBtn.setBounds(bar.removeFromRight(44));
+        // v0.28.6: the TRIM cluster (label + slider) takes the first
+        // slice of the leftover middle strip — but only while the
+        // strip can spare ~190 px; narrower than that the cluster
+        // hides rather than crushing the hint / update surfaces
+        // (the Settings slider remains the trim editor there).
+        if (bar.getWidth() >= 190) {
+            trimLabel_.setBounds(bar.removeFromLeft(30));
+            trimSlider_.setBounds(bar.removeFromLeft(130).reduced(0, 4));
+            trimLabel_.setVisible(true); trimSlider_.setVisible(true);
+        } else { trimLabel_.setVisible(false); trimSlider_.setVisible(false); }
         // v0.19.2: the update indicator takes a slice of the leftover
         // middle strip (where the hint label lives) — only while lit.
         if (updateAvailable) { updateBtn.setBounds(bar.removeFromLeft(78)); updateBtn.setVisible(true); }
@@ -667,6 +711,7 @@ void MainComponent::resized() {
     } else {
         for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setVisible(false);
         logoLabel.setVisible(false); versionLabel.setVisible(false); hintLabel.setVisible(false);
+        trimLabel_.setVisible(false); trimSlider_.setVisible(false); // v0.28.6: no toolbar, no trim cluster
         updateBtn.setVisible(false);
     }
     if (st.showToolbar) for (auto* b : { &recBtn, &pauseBtn, &settingsBtn, &burgerBtn }) b->setVisible(true);
@@ -1323,6 +1368,13 @@ void MainComponent::timerCallback() {
     }
     lastFrameMs = now;
     ++perfFrame_;
+    // v0.28.6: mirror the trim STATE into the bar slider — the
+    // Settings slider and preset loads write the state directly,
+    // so the bar surface follows them here (never while the user
+    // is dragging the bar slider itself).
+    if (!trimSlider_.isMouseButtonDown()
+        && std::abs(trimSlider_.getValue() - (double)engine.state.trimDb) > 0.001)
+        trimSlider_.setValue(engine.state.trimDb, juce::dontSendNotification);
     // v0.28.3: keep the crash handler's state snapshot current
     // (throttled — every ~90 frames) with the last state the app
     // can honestly know. The handler itself never formats; if the
@@ -1470,6 +1522,7 @@ void MainComponent::prepareFrame() {
     // mapping must slow with it; in Full this is st.fpsLimit itself).
     frame.waveSecPerColumn = 1.0f / ((float)std::max(1, perfLimits().fpsCap) * (float)std::max(1, (int)std::lround(1 + st.linkedSpeed)));
     frame.sgSecPerRow = 1.0f / ((float)std::max(1, perfLimits().fpsCap) * std::max(0.1f, st.linkedSpeed) * 0.2f);
+    frame.sgResScale = perfLimits().sgScale; // v0.28.6: spectrogram cache resolution follows Performance Mode (1.0 Full / 0.5 Low-End)
     // Loudness + stereo + scope
     frame.loudDb = engine.loudnessValue(); frame.peakLin = engine.peakValue();
     // v0.16 loudness pack readouts (integrated is gated BS.1770; true peak
@@ -1902,8 +1955,7 @@ void MainComponent::showHamburgerMenu() {
         auto& s = engine.state;
         if (r == idAbout) juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "MeterBar",
             "MeterBar " + kVersion + "\nA compact audio metering bar: Spectrum, Spectrogram, Waveform,\nLoudness, Stereometer, Oscilloscope.\nBuilt with JUCE + a custom DSP core.\nMade with JUCE (juce.com) — free-license attribution.");
-        else if (r == idOpenSettings) { rebuildSettings(); settingsWin->setVisible(true); settingsWin->toFront(true);
-            settingsPalette::releaseCaptureIfHeldBy(this); settingsPalette::resetMouseSources(); } // v0.28.2: same capture hygiene as the toolbar path
+        else if (r == idOpenSettings) { toggleSettings(); } // v0.28.6: same toggle as the toolbar gear
         else if (r == idSrcTone) { s.audioSource = "Test Tone"; engine.applySource(); }
         else if (r >= idInDevBase && r < idInDevBase + inNames.size()) setDeviceByName(true, inNames[r - idInDevBase]);
         else if (r >= idOutDevBase && r < idOutDevBase + outNames.size()) setDeviceByName(false, outNames[r - idOutDevBase]);

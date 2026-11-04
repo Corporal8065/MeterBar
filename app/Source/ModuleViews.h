@@ -43,6 +43,7 @@ struct AnalysisData {
     int beatDownbeat = 0;
     float waveSecPerColumn = 0;              // waveform overlay timebase (seconds per history column)
     float sgSecPerRow = 0;                   // spectrogram overlay timebase (seconds per history row)
+    float sgResScale = 1.f;                  // v0.28.6: spectrogram cache resolution scale (Performance EffectiveLimits::sgScale, fed by MainComponent)
     std::vector<float> scopeBuf; float scopeFreq = 0;
     std::vector<float> scopeLow, scopeMid, scopeHigh; // v0.20.0: true 3-band split of scopeBuf (core splitScopeBands) for Multi
     double sampleRate = 48000;
@@ -111,6 +112,13 @@ public:
                            juce::Justification j, juce::Colour colour) {
         textpop::drawBlackBack(g, text, r, j, colour);
     }
+    // v0.28.6: SINGLE draw — no pop at all (Jackson's feel-fixes
+    // ask for the Loudness readout column: "remove the double text
+    // for the number of lufs and the text below that").
+    void drawSingleText(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
+                        juce::Justification j, juce::Colour colour) {
+        textpop::drawSingle(g, text, r, j, colour);
+    }
     juce::Image sgCache; // spectrogram render cache (v0.11)
     // v0.20.2: what the cache was last rendered FROM — drawSpectrogram
     // skips its re-render while every input in this signature is
@@ -119,6 +127,7 @@ public:
     meterbar::FreqScale sgRenderedScale = (meterbar::FreqScale)-1;
     bool sgRenderedVert = false; double sgRenderedSr = 0;
     int sgRenderedColorMap = -1;
+    float sgRenderedResScale = -1.f; // v0.28.6: the res scale the cache was rendered at (a perf step-down re-renders even if the pixel size coincides)
     void paint(juce::Graphics& g) override {
         if (!data || !data->st) return;
         auto& st = *data->st; auto& th = data->theme; auto r = getLocalBounds().toFloat();
@@ -350,7 +359,13 @@ private:
         // v0.27.0 (item 14): the cache is now FULL resolution (was
         // half) — the direct BitmapData writes below made the extra
         // cells cheap, and the spectrogram reads visibly finer.
-        int iw = std::max(1, (int)p.getWidth()), ih = std::max(1, (int)p.getHeight());
+        // v0.28.6: the cache size is the plot size scaled by the
+        // Performance res scale (1.0 Full / 0.5 Low-End): under
+        // Low-End the cache holds a quarter of the pixels and the
+        // blit stretches it back — smooth, not blocky, because the
+        // render below samples the history BILINEARLY (see there).
+        const float resScale = juce::jlimit(0.25f, 1.0f, data->sgResScale);
+        int iw = std::max(1, (int)((float)(int)p.getWidth() * resScale)), ih = std::max(1, (int)((float)(int)p.getHeight() * resScale));
         bool freshCache = false;
         if (!sgCache.isValid() || sgCache.getWidth() != iw || sgCache.getHeight() != ih) {
             sgCache = juce::Image(juce::Image::RGB, iw, ih, true);
@@ -364,11 +379,18 @@ private:
         const double maxFSg = std::min(20000.0, srSg * 0.5);
         const int fftSg = (sg->bins() - 1) * 2;
         const int axisPx = vert ? iw : ih;
-        std::vector<int> binLut((size_t)std::max(1, axisPx), 1);
+        // v0.28.6: the axis LUT now carries the FRACTIONAL bin
+        // position (the exact inverse of the scale mapping:
+        // xToFreq, then freq -> bin as a real number) instead of
+        // binAtX's truncated integer bin — the render loop feeds
+        // it to the core's bilinear sampler, so neighbouring
+        // pixels blend neighbouring bins instead of repeating one
+        // bin across a hard-edged block.
+        std::vector<float> binPos((size_t)std::max(1, axisPx), 1.f);
         for (int a = 0; a < axisPx; ++a) {
             const float frac = vert ? (float)a / (float)axisPx
                                     : 1.f - (float)a / (float)axisPx; // y axis: top = highest freq
-            binLut[(size_t)a] = meterbar::SpectrumAnalyser::binAtX(frac, sg->bins(), fftSg, srSg, 20.0, maxFSg, st.fftScale);
+            binPos[(size_t)a] = (float)(meterbar::SpectrumAnalyser::xToFreq(frac, 20.0, maxFSg, st.fftScale) * (double)fftSg / srSg);
         }
         // v0.20.2 (freeze-audit suspect 3): two changes, same output.
         // (1) SKIP the re-render while every input the cache depends on
@@ -391,13 +413,20 @@ private:
             || sg->bins() != sgRenderedBins
             || st.fftScale != sgRenderedScale
             || vert != sgRenderedVert || srSg != sgRenderedSr
-            || (int)st.colorMap != sgRenderedColorMap;
+            || (int)st.colorMap != sgRenderedColorMap
+            || resScale != sgRenderedResScale;
         if (inputsChanged) {
             juce::Image::BitmapData bd(sgCache, juce::Image::BitmapData::writeOnly);
             for (int x = 0; x < iw; ++x) for (int y = 0; y < ih; ++y) {
-                int age = vert ? (int)((float)y / ih * sg->rows()) : (int)((float)x / iw * sg->rows());
-                int bin = vert ? binLut[(size_t)x] : binLut[(size_t)y];
-                float db = sg->at(age, juce::jlimit(0, sg->bins() - 1, bin));
+                // v0.28.6: FRACTIONAL age + bin, bilinearly sampled
+                // (core spectrogramSampleBilinear) — the blockiness
+                // fix. Pixel centres map to the history grid at
+                // (coord + 0.5)/size * cells - 0.5, so an integer
+                // grid point still samples its own cell exactly.
+                const float ageF = vert ? ((float)y + 0.5f) / (float)ih * (float)sg->rows() - 0.5f
+                                        : ((float)x + 0.5f) / (float)iw * (float)sg->rows() - 0.5f;
+                const float binF = vert ? binPos[(size_t)x] : binPos[(size_t)y];
+                float db = meterbar::spectrogramSampleBilinear(*sg, ageF, binF);
                 // v0.15: the spectrogram has its OWN sensitivity mapping
                 // (DSP spectrogramLevelT) — at the trim where the other
                 // modules peak properly, strong bins reach the RED band.
@@ -415,6 +444,7 @@ private:
             sgRenderedHead = headNow; sgRenderedBins = sg->bins();
             sgRenderedScale = st.fftScale;
             sgRenderedVert = vert; sgRenderedSr = srSg; sgRenderedColorMap = (int)st.colorMap;
+            sgRenderedResScale = resScale;
         }
         g.drawImage(sgCache, p);
         // v0.26.0: the same beat grid over the spectrogram. Age in
@@ -524,7 +554,14 @@ private:
         // fill = the shared palette level language, peak tick per channel.
         auto& th = data->theme; double v = data->loudDb;
         auto plot = p; plot.removeFromBottom(2);
-        const float barW = 20.f, gap = 7.f;
+        // v0.28.6: the loudness VISUAL scales with the cell
+        // (Jackson's field test — resizing the cell must resize
+        // the module's rendering, not just its box). Bars and the
+        // readout type scale with the cell's width against a
+        // 210 px reference, clamped so a sliver cell stays legible
+        // and a very wide one stays sane.
+        const float uiScale = juce::jlimit(0.8f, 1.6f, p.getWidth() / 210.f);
+        const float barW = 20.f * uiScale, gap = 7.f * uiScale;
         auto barsArea = plot.removeFromLeft(barW * 2 + gap);
         auto chanBar = [&](juce::Rectangle<float> bar, double db, double peakDb) {
             g.setColour(th.deepest.withAlpha(juce::jlimit(0.15f, 1.0f, st.backgroundOpacity)));
@@ -549,28 +586,33 @@ private:
         auto barR = barsArea.removeFromLeft(barW);
         // reserve a label strip under the bars by trimming the plot first
         auto plotTop = plot.getY();
-        auto mkBar = [&](juce::Rectangle<float> b) { return b.withTop(plotTop).withBottom(b.getBottom() - 11.f); };
+        const float labelH = std::max(9.f, 10.f * uiScale); // v0.28.6: label strip scales with the cell too
+        auto mkBar = [&](juce::Rectangle<float> b) { return b.withTop(plotTop).withBottom(b.getBottom() - (labelH + 1.f)); };
         chanBar(mkBar(barL), data->loudDbL, data->loudPeakDbL);
         chanBar(mkBar(barR), data->loudDbR, data->loudPeakDbR);
-        g.setFont(9.f);
-        drawBlackBackText(g, "L", juce::Rectangle<float>(barL.getX(), barL.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
-        drawBlackBackText(g, "R", juce::Rectangle<float>(barR.getX(), barR.getBottom() - 11.f, barW, 10.f), juce::Justification::centred, th.dim);
+        g.setFont(9.f * uiScale);
+        drawBlackBackText(g, "L", juce::Rectangle<float>(barL.getX(), barL.getBottom() - labelH, barW, labelH), juce::Justification::centred, th.dim);
+        drawBlackBackText(g, "R", juce::Rectangle<float>(barR.getX(), barR.getBottom() - labelH, barW, labelH), juce::Justification::centred, th.dim);
         // numeric readout immediately right of the bars, level-live
+        // v0.28.6 (Jackson's feel-fixes ask): the LUFS number and ALL
+        // the text below it draw SINGLE — no text-pop in this column.
+        // (The L/R channel labels above keep their v0.28.0 black-back
+        // treatment; they were not part of this ask.)
         auto num = plot.withTrimmedLeft(6);
-        g.setFont(juce::Font(22.f, juce::Font::bold));
-        drawPoppedText(g, v <= -119 ? juce::String("--") : juce::String(v, 1), num.removeFromTop(28), juce::Justification::centredLeft, th.text);
-        g.setFont(10.f);
-        drawPoppedText(g, juce::String(meterbar::loudnessModeName(st.loudnessMode)), num.removeFromTop(13), juce::Justification::topLeft, th.dim);
-        drawPoppedText(g, "Peak " + (data->peakLin > 0 ? juce::String(20 * std::log10(data->peakLin), 1) + " dBFS" : juce::String("-inf")),
-                       num.removeFromTop(13), juce::Justification::topLeft, th.dim);
+        g.setFont(juce::Font(22.f * uiScale, juce::Font::bold));
+        drawSingleText(g, v <= -119 ? juce::String("--") : juce::String(v, 1), num.removeFromTop(28.f * uiScale), juce::Justification::centredLeft, th.text);
+        g.setFont(10.f * uiScale);
+        drawSingleText(g, juce::String(meterbar::loudnessModeName(st.loudnessMode)), num.removeFromTop(13.f * uiScale), juce::Justification::topLeft, th.dim);
+        drawSingleText(g, "Peak " + (data->peakLin > 0 ? juce::String(20 * std::log10(data->peakLin), 1) + " dBFS" : juce::String("-inf")),
+                       num.removeFromTop(13.f * uiScale), juce::Justification::topLeft, th.dim);
         // v0.16 loudness pack: Integrated + Short-Term LUFS, True Peak,
         // and the streaming-target read against the integrated value.
         num.removeFromTop(2);
-        g.setFont(9.5f);
+        g.setFont(9.5f * uiScale);
         auto fmtDb = [](double x) { return x <= -119 ? juce::String("--") : juce::String(x, 1); };
-        drawPoppedText(g, "Integrated " + fmtDb(data->loudIntegrated) + " LUFS", num.removeFromTop(12), juce::Justification::topLeft, th.text);
-        drawPoppedText(g, "Short-Term " + fmtDb(data->loudShortTerm) + " LUFS", num.removeFromTop(12), juce::Justification::topLeft, th.text);
-        drawPoppedText(g, "True Peak " + fmtDb(data->loudTruePeakDb) + " dBTP", num.removeFromTop(12), juce::Justification::topLeft, th.text);
+        drawSingleText(g, "Integrated " + fmtDb(data->loudIntegrated) + " LUFS", num.removeFromTop(12.f * uiScale), juce::Justification::topLeft, th.text);
+        drawSingleText(g, "Short-Term " + fmtDb(data->loudShortTerm) + " LUFS", num.removeFromTop(12.f * uiScale), juce::Justification::topLeft, th.text);
+        drawSingleText(g, "True Peak " + fmtDb(data->loudTruePeakDb) + " dBTP", num.removeFromTop(12.f * uiScale), juce::Justification::topLeft, th.text);
         // v0.17: the two streaming-target lines are a SECTION, off in the
         // Default recipe (Settings -> Loudness -> "Streaming target
         // lines"). The Integrated/Short-Term/True Peak lines above always
@@ -581,8 +623,8 @@ private:
                 if (std::abs(d) <= 0.5) return juce::String("at target");
                 return d > 0 ? "over by " + juce::String(d, 1) : "under by " + juce::String(-d, 1);
             };
-            drawPoppedText(g, "Spotify/YT -14: " + vs(data->loudIntegrated, -14.0), num.removeFromTop(12), juce::Justification::topLeft, th.dim);
-            drawPoppedText(g, "Apple Music -16: " + vs(data->loudIntegrated, -16.0), num.removeFromTop(12), juce::Justification::topLeft, th.dim);
+            drawSingleText(g, "Spotify/YT -14: " + vs(data->loudIntegrated, -14.0), num.removeFromTop(12.f * uiScale), juce::Justification::topLeft, th.dim);
+            drawSingleText(g, "Apple Music -16: " + vs(data->loudIntegrated, -16.0), num.removeFromTop(12.f * uiScale), juce::Justification::topLeft, th.dim);
         }
     }
     void drawStereo(juce::Graphics& g, juce::Rectangle<float> p, const meterbar::PresetState& st) {
@@ -594,8 +636,15 @@ private:
         // unchanged and still shown below the plot). x = R, y = L: mono
         // draws the main diagonal, width spreads points off it.
         auto& th = data->theme; auto& f = data->stereo;
-        // v0.13: the plot square is a background fill -> honours bg opacity.
-        g.setColour(th.deepest.withAlpha(juce::jlimit(0.15f, 1.0f, st.backgroundOpacity))); auto sq = p.withSizeKeepingCentre(std::min(p.getWidth(), p.getHeight()), std::min(p.getWidth(), p.getHeight()));
+        // v0.13: the plot is a background fill -> honours bg opacity.
+        // v0.28.6: the plot is the FULL cell rect, no longer the
+        // centred min(w,h) square (Jackson's field test: resizing
+        // the Stereometer cell must resize the VISUAL with it —
+        // under the square, widening the cell past its height only
+        // grew the empty margins). The axes scale independently
+        // (the point mapping below already works per-axis from
+        // sq's width/height); a wide cell draws a wide scope.
+        g.setColour(th.deepest.withAlpha(juce::jlimit(0.15f, 1.0f, st.backgroundOpacity))); auto sq = p;
         g.fillRect(sq); g.setColour(th.grid.withAlpha(0.6f)); g.drawRect(sq, 0.5f);
         g.drawLine(sq.getX(), sq.getCentreY(), sq.getRight(), sq.getCentreY(), 0.5f);
         g.drawLine(sq.getCentreX(), sq.getY(), sq.getCentreX(), sq.getBottom(), 0.5f);

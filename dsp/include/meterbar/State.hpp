@@ -22,7 +22,8 @@ enum class BackgroundStyle { CleanDark, MidnightKids, Flat, Pastel }; // v0.16 (
 // tone). Saved presets are separate files and are never touched by
 // these defaults. (v0.28.0 recipe revision, Jackson's word 2026-11-02:
 // trim +10.18 -> +27 dB, background style Clean Dark -> Midnight Kids,
-// visualizer OFF/Bubbles -> ON/Field.)
+// visualizer OFF/Bubbles -> ON/Field. v0.28.6 recipe revision, Jackson
+// 2026-11-03: Stereometer colour Single -> Rainbow, point size 1 -> 2.)
 struct PresetState {
     std::string name = "Default";
     // Modules enable
@@ -42,8 +43,8 @@ struct PresetState {
     bool loudnessShowTargets = false;  // v0.17: streaming-target lines (Spotify/YT -14, Apple Music -16) beside the loudness bars — OFF in the Default recipe (Jackson corrected himself to off); the Integrated/Short-Term/True Peak lines always show
     // Stereometer
     StereoMode stereoMode = StereoMode::ScaledUnipolar;
-    StereoColor stereoColor = StereoColor::Single;
-    bool stereoPointAuto = true; float stereoPointSize = 1.0f; // 1..20
+    StereoColor stereoColor = StereoColor::Rainbow; // v0.28.6 recipe (Jackson, 2026-11-03): Rainbow is the default, not the purple Single — a DEFAULTS change only: saved presets/settings carry their own stored value and are never rewritten by this
+    bool stereoPointAuto = true; float stereoPointSize = 2.0f; // 1..20; v0.28.6 recipe (Jackson, 2026-11-03): default point size 2 (was 1)
     // Oscilloscope
     ScopeTrigger scopeTrigger = ScopeTrigger::Pitch;
     ScopeDisplay scopeDisplay = ScopeDisplay::Single;

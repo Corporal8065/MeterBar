@@ -61,6 +61,29 @@ public:
     int head() const { return head_; }
 private: int bins_=0, rows_=256, head_=0; float acc_=0; std::vector<float> data_;
 };
+// v0.28.6: BILINEAR sample of the spectrogram history at fractional
+// (age, bin) — the renderer's smoothing. The pre-v0.28.6 renderer
+// truncated both coordinates, so each display pixel repeated one
+// history cell across a hard-edged block (Jackson's field report:
+// "spectrogram blocky"). Interpolating in the dB domain between the
+// four neighbouring cells turns those blocks into gradients. Both
+// coordinates clamp to the valid range, so edge pixels sample the
+// edge cell exactly; at integer coordinates the result is at()
+// itself, bit for bit.
+inline float spectrogramSampleBilinear(const SpectrogramHistory& h, float age, float bin) {
+    if (h.bins() < 1 || h.rows() < 1) return -120.f;
+    const float a = age < 0.f ? 0.f : (age > (float)(h.rows() - 1) ? (float)(h.rows() - 1) : age);
+    const float b = bin < 0.f ? 0.f : (bin > (float)(h.bins() - 1) ? (float)(h.bins() - 1) : bin);
+    const int a0 = (int)a, b0 = (int)b;
+    const int a1 = a0 + 1 < h.rows() ? a0 + 1 : a0;
+    const int b1 = b0 + 1 < h.bins() ? b0 + 1 : b0;
+    const float fa = a - (float)a0, fb = b - (float)b0;
+    const float v00 = h.at(a0, b0), v01 = h.at(a0, b1);
+    const float v10 = h.at(a1, b0), v11 = h.at(a1, b1);
+    const float top = v00 + (v01 - v00) * fb;
+    const float bot = v10 + (v11 - v10) * fb;
+    return top + (bot - top) * fa;
+}
 // ---------- Stereometer ----------
 enum class StereoMode { ScaledUnipolar, ScaledBipolar, LinearUnipolar, LinearBipolar, Lissajous };
 enum class StereoColor { Single, Rgb, MultiBand, Rainbow, Sunset, Ice };
