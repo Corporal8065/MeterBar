@@ -74,6 +74,7 @@ static void harvestWerCrashDumps() {
 #endif
 }
 MainComponent::MainComponent() {
+    presetio::loadLastState(engine.state); // v0.28.8: restore the last state BEFORE anything reads it (theme below, applySource later, MainWindow's placement after) — the close-save prompt's other half. loadPinPersist() below still runs after this and re-overrides the pin fields: the pin file stays the pin authority.
     setOpaque(false); // v0.13: lets translucent background fills show the desktop (window is non-opaque too)
     theme = themeByName(engine.state.themeName);
     frame.cmap = meterbar::ColorMap(engine.state.colorMap);
@@ -1400,6 +1401,15 @@ void MainComponent::drawVisualizerBackground(juce::Graphics& g) {
     g.fillRect(bounds);
 }
 void MainComponent::timerCallback() {
+    // v0.28.8: the close-save baseline — the state as opened,
+    // captured on the first tick (MainWindow has placed the window
+    // by now; the stamp normalises the caption strip back out, so
+    // the baseline and any later comparison speak the same rect).
+    if (!openBaselineCaptured_) {
+        syncWindowRectToState();
+        openBaseline_ = engine.state;
+        openBaselineCaptured_ = true;
+    }
     pollUpdater(); // v0.19: surface a finished background update check / download on the message thread
     captions_.poll(); // v0.23.0: Live Captions — drain helper events, track pause/source/epoch edges, drive the overlay
     syncCaptionDock(); // v0.24.0: docked presentation — feed the strip; grow/shrink the bar on state transitions
@@ -1751,13 +1761,107 @@ enum { idNew=1, idSave, idSaveAs, idOpenFolder, idLoadBase=1000,
        idLcPresentOverlay, idLcPresentDocked,
        idLinkAllTop=8001, idLinkAllBottom, // BLK7: Link All submenu (DESIGN §6e as amended 2026-11-03: option B only)
        idPinStatus=8101 }; // v0.28.7: disabled pin-status row in the Audio Source submenu
-void MainComponent::savePresetInteractive(bool saveAs) {
+// v0.28.8: stamp the top level's live bounds into the state's
+// window rect. The state's rect is the BAR rect: while the docked
+// caption strip is in the height, the strip is un-grown again with
+// the app's own inverse (captionShrunkBarRect, at the same anchor
+// the growth used), so a stamped rect never double-counts the
+// strip when it is restored later.
+void MainComponent::syncWindowRectToState() {
+    auto* tl = getTopLevelComponent();
+    if (tl == nullptr) return;
+    auto b = tl->getBounds();
+    if (captionStripInHeight_) {
+        auto bar = meterbar::captionShrunkBarRect(
+            { b.getX(), b.getY(), b.getWidth(), b.getHeight() }, kCaptionStripHeight, captionAnchorEdge());
+        b = { bar.x, bar.y, bar.w, bar.h };
+    }
+    engine.state.windowX = b.getX(); engine.state.windowY = b.getY();
+    engine.state.windowW = b.getWidth(); engine.state.windowH = b.getHeight();
+}
+// v0.28.8: THE save function — one path for every preset save in
+// the app (SessionBar v0.4.21 parity; Jackson's refinement,
+// 2026-11-03: save, save as, and the close prompt go "all through
+// the same kind of function"). The Presets menu's Save / Save As
+// and the close prompt's Save / Save As all call performSave();
+// callers differ only in what they do with the answer. Every save
+// also refreshes the last-state record — the analogue of
+// SessionBar's saveSettings() inside its performSave — with the
+// live rect stamped first: a preset includes position. done(true)
+// = state saved (preset + last-state); done(false) = the name
+// prompt was cancelled and no preset was written.
+void MainComponent::performSave(bool saveAs, std::function<void(bool)> done) {
+    syncWindowRectToState();
+    presetio::saveLastState(engine.state);
     auto& st = engine.state;
-    if (!saveAs && st.name != "Default" && !st.name.empty()) { presetio::save(st, juce::String(st.name)); return; }
+    if (!saveAs && st.name != "Default" && !st.name.empty()) {
+        presetio::save(st, juce::String(st.name));
+        done(true);
+        return;
+    }
+    promptForPresetNameAsync([this, done](bool named) {
+        if (!named) { done(false); return; }
+        presetio::save(engine.state, juce::String(engine.state.name));
+        presetio::saveLastState(engine.state); // persist the (new) active name at once
+        done(true);
+    });
+}
+void MainComponent::savePresetInteractive(bool saveAs) {
+    performSave(saveAs, [](bool) {}); // the menu's Save / Save As — the same function the close prompt uses
+}
+void MainComponent::promptForPresetNameAsync(std::function<void(bool)> done) {
     auto w = std::make_shared<juce::AlertWindow>("Save Preset", "Preset name:", juce::AlertWindow::NoIcon);
-    w->addTextEditor("name", juce::String(st.name == "Default" ? "My Preset" : st.name)); w->addButton("Save", 1); w->addButton("Cancel", 0);
-    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w](int r){
-        if (r == 1) { engine.state.name = w->getTextEditorContents("name").toStdString(); presetio::save(engine.state, w->getTextEditorContents("name")); }
+    w->addTextEditor("name", juce::String(engine.state.name == "Default" ? "My Preset" : engine.state.name));
+    w->addButton("Save", 1);
+    w->addButton("Cancel", 0);
+    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w, done](int r) {
+        if (r == 1) {
+            auto name = w->getTextEditorContents("name").trim();
+            if (name.isNotEmpty()) { engine.state.name = name.toStdString(); done(true); return; }
+        }
+        done(false);
+    }));
+}
+// v0.28.8: the close-time save prompt (Jackson's ruling,
+// 2026-11-03, shipped in SessionBar v0.4.20: save on close ONLY if
+// something changed since the app opened; a save restores the same
+// position and size on the next open). JUCE 8 has no modal loop,
+// so the gate is async in the family's enterModalState idiom:
+// requestClose() either quits at once (unchanged) or opens the
+// prompt, and the prompt's answer completes the quit itself.
+void MainComponent::requestClose() {
+    if (closePromptOpen_) return; // the prompt is already up — a second request adds nothing
+    // Stamp the live rect first: the comparison (and any save)
+    // must see the window as it is NOW, not as last written.
+    syncWindowRectToState();
+    if (!openBaselineCaptured_ || !meterbar::changedSinceOpen(openBaseline_, engine.state)) {
+        // Unchanged since open (or quit inside the first tick):
+        // silent close — the last-state record still refreshes, so
+        // the next open restores exactly this state.
+        presetio::saveLastState(engine.state);
+        juce::JUCEApplication::getInstance()->quit();
+        return;
+    }
+    closePromptOpen_ = true;
+    auto w = std::make_shared<juce::AlertWindow>("Close MeterBar",
+        "The settings, the active preset, or the bar's position/size changed since you opened MeterBar.\n\nSave the current state before closing?",
+        juce::AlertWindow::QuestionIcon);
+    // Exactly three actions (Jackson's refinement, 2026-11-03):
+    // Save / Save As / Continue Without Saving. There is
+    // deliberately no Cancel button — dismissing the prompt (Esc)
+    // still aborts the close, it just isn't a fourth action.
+    w->addButton("Save", 1);
+    w->addButton("Save As...", 2);
+    w->addButton("Continue Without Saving", 3);
+    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w](int r) {
+        closePromptOpen_ = false;
+        // Both saves route through the ONE save function; a
+        // cancelled name prompt inside it vetoes the close
+        // (saved=false).
+        if (r == 1) performSave(false, [this](bool saved) { if (saved) juce::JUCEApplication::getInstance()->quit(); });
+        else if (r == 2) performSave(true, [this](bool saved) { if (saved) juce::JUCEApplication::getInstance()->quit(); });
+        else if (r == 3) { presetio::saveLastState(openBaseline_); juce::JUCEApplication::getInstance()->quit(); } // discard: the last state reverts to the open baseline; no preset file is touched
+        // r == 0 (prompt dismissed): stay open — no quit is issued
     }));
 }
 void MainComponent::loadPresetFile(const juce::File& f) {

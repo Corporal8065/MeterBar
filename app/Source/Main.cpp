@@ -36,6 +36,9 @@ public:
         setVisible(true);
     }
     void closeButtonPressed() override { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
+    // v0.28.8: the close gate lives in MainComponent (it owns the
+    // baseline + the prompt); systemRequestedQuit routes here.
+    void requestClose() { if (content != nullptr) content->requestClose(); }
     // v0.18.1: the reserve machine is EVENT-driven — the window's own
     // moved/resized notifications are its geometry feed (these fire for
     // native drags and border resizes too, via the peer). v0.18 instead
@@ -84,7 +87,12 @@ public:
         mainWindow = std::make_unique<MainWindow>("MeterBar");
     }
     void shutdown() override { mainWindow.reset(); }
-    void systemRequestedQuit() override { quit(); }
+    void systemRequestedQuit() override {
+        // v0.28.8: through the close gate, never a bare quit — the
+        // gate quits itself once any save is settled (SessionBar parity).
+        if (mainWindow != nullptr) mainWindow->requestClose();
+        else quit();
+    }
 private:
     std::unique_ptr<MainWindow> mainWindow;
     juce::SplashScreen* splash = nullptr; // self-deleting (see initialise) — never delete via this pointer

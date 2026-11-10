@@ -15,6 +15,7 @@ inline juce::var toVar(const meterbar::PresetState& s) {
     set("specEn", s.spectrogramEnabled); set("waveEn", s.waveformEnabled); set("loudEn", s.loudnessEnabled);
     set("stereoEn", s.stereometerEnabled); set("scopeEn", s.oscilloscopeEnabled); set("spectrumEn", s.spectrumEnabled);
     set("sgOrient", (int)s.spectrogramOrientation); set("fade", s.fade); set("linkedSpeed", s.linkedSpeed);
+    set("loop", s.loopEnabled); // v0.28.8: the one PresetState field presets never carried (audit latent gap) — a preset is the COMPLETE state
     set("waveCh1", (int)s.waveCh1); set("waveCh2", (int)s.waveCh2); set("waveHist", (int)s.waveHistory);
     set("loudMode", (int)s.loudnessMode);
     set("loudTargets", s.loudnessShowTargets); // v0.17
@@ -67,6 +68,7 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     s.oscilloscopeEnabled = gb("scopeEn", s.oscilloscopeEnabled); s.spectrumEnabled = gb("spectrumEn", s.spectrumEnabled);
     s.spectrogramOrientation = (meterbar::Orientation)gi("sgOrient", (int)s.spectrogramOrientation);
     s.fade = gf("fade", s.fade); s.linkedSpeed = gf("linkedSpeed", s.linkedSpeed);
+    s.loopEnabled = gb("loop", s.loopEnabled); // v0.28.8 (absent in old presets -> keeps base value)
     s.waveCh1 = (meterbar::ChanSel)gi("waveCh1", (int)s.waveCh1); s.waveCh2 = (meterbar::ChanSel)gi("waveCh2", (int)s.waveCh2);
     s.waveHistory = (meterbar::HistoryMode)gi("waveHist", (int)s.waveHistory);
     s.loudnessMode = (meterbar::LoudnessMode)gi("loudMode", (int)s.loudnessMode);
@@ -123,6 +125,25 @@ inline bool save(const meterbar::PresetState& s, const juce::String& fileName) {
     return f.replaceWithText(juce::JSON::toString(toVar(s), true));
 }
 inline bool load(const juce::File& f, meterbar::PresetState& into) {
+    auto parsed = juce::JSON::parse(f.loadFileAsString()); if (parsed.isVoid()) return false;
+    into = fromVar(parsed, into); return true;
+}
+// v0.28.8: the last-state record — the complete PresetState as the
+// app was last left, restored on the next open (the persistence
+// under the close-save prompt). It rides the SAME toVar/fromVar
+// serialiser as presets: one definition of the complete state, no
+// second field list to drift. The active preset's identity needs
+// no separate key — state.name already rides inside. Live Captions
+// settings are NOT in here and never join it (Fork C ruling,
+// 2026-11-03: they live in Documents\MeterBar\Captions\settings.json).
+inline juce::File lastStateFile() {
+    return presetFolder().getParentDirectory().getChildFile("last-state.json");
+}
+inline bool saveLastState(const meterbar::PresetState& s) {
+    return lastStateFile().replaceWithText(juce::JSON::toString(toVar(s), true));
+}
+inline bool loadLastState(meterbar::PresetState& into) {
+    auto f = lastStateFile(); if (!f.existsAsFile()) return false;
     auto parsed = juce::JSON::parse(f.loadFileAsString()); if (parsed.isVoid()) return false;
     into = fromVar(parsed, into); return true;
 }

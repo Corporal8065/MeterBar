@@ -33,6 +33,7 @@
 #include "../dsp/include/meterbar/Performance.hpp"
 #include "../dsp/include/meterbar/CrashWatch.hpp"
 #include "../dsp/include/meterbar/PinSource.hpp" // v0.28.7
+#include "../dsp/include/meterbar/CloseSave.hpp" // v0.28.8
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -3089,6 +3090,139 @@ int main() {
             CHECK(mc.find("pin-source.json") != std::string::npos);
             CHECK(mc.find("loadPinPersist()") != std::string::npos);
             CHECK(mc.find("savePinPersist()") != std::string::npos);
+        }
+    }
+    {
+        // --- CloseSave (v0.28.8): the exit save prompt's dirty
+        // check — the complete PresetState, exact field-by-field
+        // (SessionBar parity). Identical states are NOT a change;
+        // a mutation of ANY single field IS — one line per field,
+        // so this block is the checklist that "complete" is real.
+        const PresetState base;
+        CHECK(sameState(base, base));
+        CHECK(!changedSinceOpen(base, base));
+        auto changed = [&base](auto fn) { PresetState c = base; fn(c); return changedSinceOpen(base, c); };
+        CHECK(changed([](PresetState& c) { c.name = "Other"; }));
+        CHECK(changed([](PresetState& c) { c.spectrogramEnabled = !c.spectrogramEnabled; }));
+        CHECK(changed([](PresetState& c) { c.waveformEnabled = !c.waveformEnabled; }));
+        CHECK(changed([](PresetState& c) { c.loudnessEnabled = !c.loudnessEnabled; }));
+        CHECK(changed([](PresetState& c) { c.stereometerEnabled = !c.stereometerEnabled; }));
+        CHECK(changed([](PresetState& c) { c.oscilloscopeEnabled = !c.oscilloscopeEnabled; }));
+        CHECK(changed([](PresetState& c) { c.spectrumEnabled = !c.spectrumEnabled; }));
+        CHECK(changed([](PresetState& c) { c.spectrogramOrientation = Orientation::Vertical; }));
+        CHECK(changed([](PresetState& c) { c.fade += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.loopEnabled = !c.loopEnabled; }));
+        CHECK(changed([](PresetState& c) { c.linkedSpeed += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.waveCh1 = ChanSel::Right; }));
+        CHECK(changed([](PresetState& c) { c.waveCh2 = ChanSel::Left; }));
+        CHECK(changed([](PresetState& c) { c.waveHistory = HistoryMode::Fast; }));
+        CHECK(changed([](PresetState& c) { c.loudnessMode = LoudnessMode::RmsFast; }));
+        CHECK(changed([](PresetState& c) { c.loudnessShowTargets = !c.loudnessShowTargets; }));
+        CHECK(changed([](PresetState& c) { c.stereoMode = StereoMode::Lissajous; }));
+        CHECK(changed([](PresetState& c) { c.stereoColor = StereoColor::Single; }));
+        CHECK(changed([](PresetState& c) { c.stereoPointAuto = !c.stereoPointAuto; }));
+        CHECK(changed([](PresetState& c) { c.stereoPointSize += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.scopeTrigger = ScopeTrigger::Free; }));
+        CHECK(changed([](PresetState& c) { c.scopeDisplay = ScopeDisplay::Multi; }));
+        CHECK(changed([](PresetState& c) { c.scopeWindowMs += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.spectrumStyle = PresetState::SpectrumStyle::Fft; }));
+        CHECK(changed([](PresetState& c) { c.spectrumSmoothingPct += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.spectrumTiltDb += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.fftSize += 1; }));
+        CHECK(changed([](PresetState& c) { c.fftScale = FreqScale::Linear; }));
+        CHECK(changed([](PresetState& c) { c.spectrumShowReference = !c.spectrumShowReference; }));
+        CHECK(changed([](PresetState& c) { c.spectrumShowTarget = !c.spectrumShowTarget; }));
+        CHECK(changed([](PresetState& c) { c.spectrumColorMode = SpectrumColorMode::Frequency; }));
+        CHECK(changed([](PresetState& c) { c.spectrumDisplayTiltDb += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.spectrumSixthOctave = !c.spectrumSixthOctave; }));
+        CHECK(changed([](PresetState& c) { c.themeName = "Other"; }));
+        CHECK(changed([](PresetState& c) { c.colorMap = ColorMapId::Plasma; }));
+        CHECK(changed([](PresetState& c) { c.backgroundOpacity += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.backgroundStyle = BackgroundStyle::Flat; }));
+        CHECK(changed([](PresetState& c) { c.beatPulseEnabled = !c.beatPulseEnabled; }));
+        CHECK(changed([](PresetState& c) { c.beatTimeSignature += 1; }));
+        CHECK(changed([](PresetState& c) { c.linkEnabled = !c.linkEnabled; }));
+        CHECK(changed([](PresetState& c) { c.linkBackground = !c.linkBackground; }));
+        CHECK(changed([](PresetState& c) { c.visualizerEnabled = !c.visualizerEnabled; }));
+        CHECK(changed([](PresetState& c) { c.visualizerStyle += 1; }));
+        CHECK(changed([](PresetState& c) { c.undertowBloomQuarter = !c.undertowBloomQuarter; }));
+        CHECK(changed([](PresetState& c) { c.undertowBloomEighth = !c.undertowBloomEighth; }));
+        CHECK(changed([](PresetState& c) { c.undertowPreArm = !c.undertowPreArm; }));
+        CHECK(changed([](PresetState& c) { c.undertowKickTauMs += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.visualizerBaseHue += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.visualizerSaturation += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.visualizerSpread += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.visualizerCycleSec += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.animeClickSounds = !c.animeClickSounds; }));
+        CHECK(changed([](PresetState& c) { c.mascotFlex += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.audioSource = "Other"; }));
+        CHECK(changed([](PresetState& c) { c.appSource += 1; }));
+        CHECK(changed([](PresetState& c) { c.pinnedExe = "Other.exe"; }));
+        CHECK(changed([](PresetState& c) { c.audioDeviceName = "Other"; }));
+        CHECK(changed([](PresetState& c) { c.outputDeviceName = "Other"; }));
+        CHECK(changed([](PresetState& c) { c.outputDeviceId = "Other"; }));
+        CHECK(changed([](PresetState& c) { c.trimDb += 0.25f; }));
+        CHECK(changed([](PresetState& c) { c.routingPair += 1; }));
+        CHECK(changed([](PresetState& c) { c.routingCh1 += 1; }));
+        CHECK(changed([](PresetState& c) { c.routingCh2 += 1; }));
+        CHECK(changed([](PresetState& c) { c.vsync = !c.vsync; }));
+        CHECK(changed([](PresetState& c) { c.fpsLimit += 1; }));
+        CHECK(changed([](PresetState& c) { c.performanceMode += 1; }));
+        CHECK(changed([](PresetState& c) { c.moduleFlex[3] += 0.5f; }));
+        CHECK(changed([](PresetState& c) { c.pinned = !c.pinned; }));
+        CHECK(changed([](PresetState& c) { c.stick = !c.stick; }));
+        CHECK(changed([](PresetState& c) { c.showToolbar = !c.showToolbar; }));
+        CHECK(changed([](PresetState& c) { c.showRepositionHint = !c.showRepositionHint; }));
+        CHECK(changed([](PresetState& c) { c.reserveScreenSpace = !c.reserveScreenSpace; }));
+        CHECK(changed([](PresetState& c) { c.windowX += 7; })); // geometry alone is a change
+        CHECK(changed([](PresetState& c) { c.windowY += 7; }));
+        CHECK(changed([](PresetState& c) { c.windowW += 7; }));
+        CHECK(changed([](PresetState& c) { c.windowH += 7; }));
+        // an exact revert is NOT a change (floats compare exactly)
+        { PresetState c = base; c.fade = 0.9f; c.fade = base.fade; c.windowX += 5; c.windowX = base.windowX;
+          CHECK(!changedSinceOpen(base, c)); }
+    }
+    {
+        // --- close-save wiring pins (v0.28.8, v0.28.4 pattern:
+        // read the app source from a tree checkout; SKIP with a
+        // note when unreachable — CI and local runs execute them).
+        auto readApp = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string mc  = readApp("app/Source/MainComponent.cpp");
+        const std::string mn  = readApp("app/Source/Main.cpp");
+        const std::string pio = readApp("app/Source/PresetIO.h");
+        if (mc.empty() || mn.empty() || pio.empty()) {
+            std::printf("v0.28.8 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            // the gate: every quit path routes through it, and the
+            // prompt compares against the open baseline
+            CHECK(mn.find("mainWindow->requestClose()") != std::string::npos);
+            CHECK(mc.find("void MainComponent::requestClose()") != std::string::npos);
+            CHECK(mc.find("changedSinceOpen(openBaseline_") != std::string::npos);
+            CHECK(mc.find("Continue Without Saving") != std::string::npos);
+            // the ONE save function serves the menu and the prompt
+            CHECK(mc.find("void MainComponent::performSave(bool saveAs") != std::string::npos);
+            CHECK(mc.find("performSave(saveAs, [](bool) {})") != std::string::npos);
+            // startup restore + the last-state record beside the presets
+            CHECK(mc.find("presetio::loadLastState(engine.state)") != std::string::npos);
+            CHECK(pio.find("last-state.json") != std::string::npos);
+            // the audit's latent gap closed: loop rides presets BOTH ways
+            CHECK(pio.find("set(\"loop\"") != std::string::npos);
+            CHECK(pio.find("gb(\"loop\"") != std::string::npos);
+            // standing rule: the updater entry stays in the menu
+            CHECK(mc.find("Check For Updates") != std::string::npos);
         }
     }
 

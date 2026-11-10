@@ -20,6 +20,7 @@
 #include <meterbar/WindowGeom.hpp>      // v0.24.0: caption homing / dock growth (pure core)
 #include <meterbar/Performance.hpp>     // v0.28.2: Performance Mode effective limits + Auto latch (pure core)
 #include <meterbar/PinSource.hpp>       // v0.28.7: pinned-app source watch machine (pure core)
+#include <meterbar/CloseSave.hpp>       // v0.28.8: close-save state comparison (pure core)
 
 // v0.15: draggable divider between two adjacent modules. Dragging adjusts
 // the pair's PresetState::moduleFlex weights (their sum is preserved, so
@@ -178,6 +179,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     void notifyWindowGeometryChanged(); // v0.18.1: MainWindow forwards moved()/resized() here — the event feed for the reserve machine
+    void requestClose(); // v0.28.8: the close gate — every quit path routes here; prompts ONLY when the state changed since open (SessionBar parity)
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
@@ -203,6 +205,9 @@ private:
     juce::PopupMenu buildPresetSubMenu(std::vector<juce::File>& filesOut);
     juce::PopupMenu buildRepositionSubMenu();
     void savePresetInteractive(bool saveAs);
+    void performSave(bool saveAs, std::function<void(bool)> done); // v0.28.8: THE save — the Presets menu and the close prompt share this one path
+    void promptForPresetNameAsync(std::function<void(bool)> done); // v0.28.8: name prompt for performSave (cancel/empty name -> done(false), nothing written)
+    void syncWindowRectToState(); // v0.28.8: stamp the top level's live rect into state.windowX/Y/W/H, the docked-caption strip height normalised back out
     void loadPresetFile(const juce::File&);
     void doTopBottom(bool top); void doStick(); void doMoveToDisplay(int idx);
     void toggleRecord(); void exportClip(double seconds);
@@ -334,6 +339,12 @@ private:
     // order vs captions_ carries no lifetime constraint).
     CaptionStrip captionStrip_;
     bool captionStripInHeight_ = false; // our strip growth is currently in the window height
+    // v0.28.8: close-save state — the state as opened (captured on
+    // the first UI tick, after MainWindow has placed the window)
+    // and the prompt's re-entry guard.
+    meterbar::PresetState openBaseline_;
+    bool openBaselineCaptured_ = false;
+    bool closePromptOpen_ = false;
     static constexpr int kCaptionStripHeight = 76;
     // v0.23.0 Live Captions: declared late so it destructs BEFORE
     // engine (reverse declaration order) — the controller stops the
