@@ -30,7 +30,7 @@ namespace meterbar {
 // the numbers live here and are checked there in the tests).
 inline constexpr int kPerfFullSwarmCap = 240;
 inline constexpr int kPerfFullDustCap = 60;
-inline constexpr int kPerfFullOrbCap = 30; // v0.28.9: == UndertowModel::kOrbCount (suite-pinned)
+inline constexpr int kPerfFullOrbCap = 48; // v0.28.9: == UndertowModel::kOrbCount (suite-pinned); v0.28.12: 30 -> 48 with the band-group rework
 
 struct EffectiveLimits {
     int fpsCap;            // effective UI timer rate (Hz)
@@ -71,7 +71,7 @@ inline EffectiveLimits effectiveLimits(bool lowActive, int userFps,
         e.scopePitchEvery = 3;
         e.swarmCap = kPerfFullSwarmCap / 2; // 120
         e.dustCap = kPerfFullDustCap / 2;   // 30
-        e.orbCap = kPerfFullOrbCap / 2;     // 15 (v0.28.9: orbs halve with the other caps)
+        e.orbCap = kPerfFullOrbCap / 2;     // 24 (v0.28.9: orbs halve with the other caps; v0.28.12: 48 -> 24)
         e.sgScale = 0.5f;                  // half-res spectrogram cache (quarter the pixels); the v0.28.6 bilinear sample + blit keep it smooth
     }
     return e;

@@ -66,6 +66,18 @@ inline constexpr float kUndertowKickReleaseTau = 0.065f;     // exponential rele
 inline constexpr float kUndertowPipelineCompSec = 0.034f;    // fixed pipeline compensation for LOCKED prediction
 inline constexpr float kUndertowPredictedCap = 0.45f;        // unconfirmed grid prediction amplitude cap
 inline constexpr float kUndertowConfirmWindowSec = 0.060f;   // onset within ±60 ms of the grid beat confirms it
+// v0.28.12: the visual limiter's displayed-estimate budget (DESIGN
+// §(f)) — an aesthetic cap (the ">=60% near-black soak" rule), raised
+// 0.18 -> 0.26 on Jackson's explicit presence ruling (the orb layer
+// read as absent under loud material). Sized with the membrane's
+// v0.28.1 visibility floor in view: the first balance (0.24) let the
+// brighter orb layer's limiter gain squeeze the membrane under its
+// floor in the suite's arithmetic check, so the cap rose a step and
+// the orb alpha range trimmed a step (see DIAGNOSIS.md). It is NOT
+// the photosensitivity safeguard: that is the separate Δ≤0.18
+// frame-to-frame change clamp inside updateLimiter, which stays at
+// 0.18.
+inline constexpr float kUndertowLuminanceCap = 0.26f;
 
 // ==================================================================
 // PATH A — five-band time-domain onset detection (DESIGN §(a)).
@@ -370,7 +382,8 @@ enum class UndertowOrbEffect { Drift = 0, Pulse = 1, Halo = 2 };
 struct UndertowOrb {
     float x = 0.5f, y = 0.5f, vx = 0, vy = 0;
     float baseRadius = 20;   // px at the canonical 270 px layer height (diameter 28–70 px per DESIGN §(a))
-    float slice = 0;         // this orb's sub-range of the low band, 0..1
+    int band = 1;            // v0.28.12: the band this orb answers (0 sub .. 4 presence; UndertowModel::orbBandOf)
+    float slice = 0;         // this orb's sub-range of its band, 0..1
     float radius = 0, alpha = 0;
     VizRgb colour{ 0x33, 0x50, 0x7A }; // v0.28.9: this orb's own palette colour (was: every orb in bandColour(1))
     UndertowOrbEffect effect = UndertowOrbEffect::Drift; // v0.28.9
@@ -393,7 +406,30 @@ struct UndertowRing {
 class UndertowModel {
 public:
     static constexpr int kSwarmCap = 240;
-    static constexpr int kOrbCount = 30; // v0.28.9: 12 -> 30 (Jackson: "not very many orbs" on screen)
+    static constexpr int kOrbCount = 48; // v0.28.9: 12 -> 30 (Jackson: "not very many orbs" on screen); v0.28.12: 30 -> 48 in five band groups (Jackson: "needs more circles too, reactive to different elements it can hear")
+    // v0.28.12: orb group sizes across the five bands (sub / low /
+    // mid / high / presence) — the counts sum to kOrbCount.
+    static constexpr int kOrbBandCounts[5] = { 8, 10, 12, 10, 8 };
+    static int orbBandOf(int i) {
+        int acc = 0;
+        for (int b = 0; b < 5; ++b) { acc += kOrbBandCounts[b]; if (i < acc) return b; }
+        return 4;
+    }
+    // v0.28.12: per-band orb response (the reactivity rework — see
+    // DIAGNOSIS.md in the round folder). Before this round every orb
+    // hung off the LOW band alone: alpha was 0.10 + 0.18 x drive (a
+    // 0.28 ceiling), drift was one coefficient for all, and mid /
+    // high / presence content moved nothing. Now each orb answers
+    // its OWN band: level sets drift + size, the band pulse swells
+    // the radius and (pulse-weighted) drives the alpha.
+    static constexpr float kOrbBandSpeed[5]  = { 0.055f, 0.10f, 0.17f, 0.26f, 0.20f }; // tangential drift coefficient at full band level: sub lumbers, high darts
+    static constexpr float kOrbBandRadius[5] = { 1.20f, 1.00f, 0.85f, 0.58f, 0.45f };  // size class per band
+    static constexpr float kOrbBandSwell[5]  = { 0.38f, 0.30f, 0.18f, 0.10f, 0.06f };  // radius swell per unit band pulse: the kick pumps the big orbs
+    static constexpr float kOrbBandPulseW[5] = { 0.90f, 0.90f, 0.85f, 1.15f, 0.00f };  // pulse weight in the alpha drive (presence = level only: band-4 onsets drive nothing, DESIGN §(a))
+    static constexpr float kOrbBandAlpha[5]  = { 1.00f, 1.00f, 0.95f, 0.90f, 0.70f };  // per-band alpha scale (presence stays the faintest)
+    static constexpr float kOrbBandPulseRate[5] = { 0.70f, 0.85f, 1.00f, 1.50f, 1.90f }; // Pulse-effect breathe rate scale per band
+    static constexpr float kOrbAlphaFloor = 0.05f; // rest alpha (was 0.10 — softer per orb: Jackson's "more transparent")
+    static constexpr float kOrbAlphaRange = 0.45f; // driven alpha range: ceiling 0.50 at full drive (was a 0.18 range under a 0.28 ceiling; trimmed 0.48 -> 0.45 in the membrane-floor rebalance)
     static constexpr int kTickCap = 32;
     static constexpr int kRingCap = 6;
     static constexpr int kDustCap = 60;
@@ -410,10 +446,15 @@ public:
             o.slice = ((float)i + 0.5f) / (float)kOrbCount;
             // v0.28.9: the orb's own colour and effect, fixed at seed
             // (deterministic — the same bar every launch).
-            o.colour = orbPalette(i);
+            // v0.28.12: the orb's band is fixed at seed too, and its
+            // colour is the palette colour tinted 45% toward the
+            // band colour, so the five groups read as families while
+            // every orb keeps a colour of its own.
+            o.band = orbBandOf(i);
+            o.colour = mixRgb(orbPalette(i), bandColour(o.band), 0.45f);
             o.effect = (UndertowOrbEffect)(i % 3);
             o.phase = next01() * 6.2831853f;
-            o.pulseRate = 1.2f + next01() * 2.2f; // ~0.2–0.55 Hz breathe
+            o.pulseRate = (1.2f + next01() * 2.2f) * kOrbBandPulseRate[o.band]; // ~0.2–0.55 Hz breathe, scaled per band
             o.trail.reset(o.x, o.y);
         }
     }
@@ -436,6 +477,14 @@ public:
             VizRgb{ 0x4F, 0xB2, 0x86 }, // fern green
         };
         return kPal[((i % kOrbPaletteSize) + kOrbPaletteSize) % kOrbPaletteSize];
+    }
+    // v0.28.12: linear per-channel mix (the seed-time orb tint).
+    static VizRgb mixRgb(VizRgb a, VizRgb b, float t) {
+        auto ch = [t](std::uint8_t x, std::uint8_t y) {
+            const float v = (float)x + ((float)y - (float)x) * t;
+            return (std::uint8_t)std::lround(v < 0.f ? 0.f : (v > 255.f ? 255.f : v));
+        };
+        return VizRgb{ ch(a.r, b.r), ch(a.g, b.g), ch(a.b, b.b) };
     }
 
     // --- grading hooks (DESIGN build notes): one committed table,
@@ -527,7 +576,7 @@ public:
             if (b == 0) onSubOnset(strength, oTime, beat);
             else if (b == 1) bandPulse_[1] = std::max(bandPulse_[1], strength);
             else if (b == 2) bandPulse_[2] = std::max(bandPulse_[2], strength);
-            else if (b == 3) pendingTicks_ += 1; // spawned below, rate-capped
+            else if (b == 3) { bandPulse_[3] = std::max(bandPulse_[3], strength); pendingTicks_ += 1; } // spawned below, rate-capped; v0.28.12: the pulse is latched too — it was decayed on the τ table and read (spawnTick strength) but never set, and the high orb group needs the transient channel
             // band 4 (presence): computed, deliberately drives nothing in v1 (DESIGN §(a))
         }
 
@@ -765,18 +814,26 @@ private:
         (void)beat;
         // --- echo rings: follow-through only, dead at 280 ms ---
         for (auto& r : rings_) if (r.active) { r.age += dt; if (r.age >= 0.280f) r.active = false; }
-        // --- low orbs: drift AGAINST the swarm's swirl so the
-        // layers read as separate (DESIGN §(a)); pulse from the low
-        // band's own transient envelope, radius from its level.
-        // v0.28.9: 30 orbs (was 12), each with its own palette colour
-        // and effect (see UndertowOrbEffect); orbs past the runtime
-        // orb cap (Low-End mode) park at alpha 0. ---
+        // --- orbs: drift AGAINST the swarm's swirl so the layers
+        // read as separate (DESIGN §(a)). v0.28.9: 30 orbs (was 12),
+        // each with its own palette colour and effect (see
+        // UndertowOrbEffect); orbs past the runtime orb cap
+        // (Low-End mode) park at alpha 0.
+        // v0.28.12: 48 orbs in five BAND GROUPS — every orb answers
+        // its own band (the kOrbBand* tables): its band's level sets
+        // drift speed and size, its band's pulse swells the radius
+        // and drives brightness alongside the level. Before this,
+        // all orbs hung off the low band alone and alpha capped at
+        // 0.28 (see DIAGNOSIS.md in the round folder). ---
         {
-            const float speed = (still_ ? 0.003f : 0.02f + 0.10f * levelEnv_[1]);
             const int orbN = activeOrbCount();
             for (int oi = 0; oi < kOrbCount; ++oi) {
                 auto& o = orbs_[(size_t)oi];
                 if (oi >= orbN) { o.alpha = 0; o.radius = 0; continue; } // parked by the cap
+                const int band = o.band;
+                const float lvl = levelEnv_[band];
+                const float pulse = bandPulse_[band];
+                const float speed = still_ ? 0.003f : 0.015f + kOrbBandSpeed[band] * lvl;
                 const float dx = 0.5f - o.x, dy = 0.5f - o.y;
                 const float dist = std::sqrt(dx * dx + dy * dy) + 1e-5f;
                 // tangential (negative = against the swarm) + weak inward pull
@@ -788,10 +845,14 @@ private:
                 if (o.x > 0.97f) { o.x = 0.97f; o.vx = -std::abs(o.vx); }
                 if (o.y < 0.03f) { o.y = 0.03f; o.vy = std::abs(o.vy); }
                 if (o.y > 0.97f) { o.y = 0.97f; o.vy = -std::abs(o.vy); }
-                o.radius = o.baseRadius * (0.45f + softClipUnit(levelEnv_[1]) * (0.55f + 0.45f * o.slice));
-                float a = 0.10f + 0.18f * std::max(levelEnv_[1], bandPulse_[1] * 0.85f);
+                o.radius = o.baseRadius * kOrbBandRadius[band]
+                           * (0.50f + softClipUnit(lvl) * (0.55f + 0.45f * o.slice))
+                           * (1.f + kOrbBandSwell[band] * pulse);
+                float drive = std::max(lvl, pulse * kOrbBandPulseW[band]);
+                if (drive > 1.f) drive = 1.f;
+                float a = (kOrbAlphaFloor + kOrbAlphaRange * drive) * kOrbBandAlpha[band];
                 if (still_) a = std::min(a, 0.10f); // Still: orbs fade to ≤0.10
-                o.alpha = a * preArmGlow_[1];
+                o.alpha = a * preArmGlow_[band];
                 // v0.28.9 per-orb effect: Pulse orbs breathe on their
                 // own rate/phase — radius ±30%, alpha ±40% around the
                 // level-driven values above (a modulation, never a
@@ -925,18 +986,19 @@ private:
     }
 
     // The visual limiter (DESIGN §(f)): a rolling 1-second average
-    // of the section's estimated luminance, capped at 18% of full
-    // scale, with frame-to-frame change clamped to Δ ≤0.18. The
+    // of the section's estimated luminance, capped at
+    // kUndertowLuminanceCap of full scale (18% through v0.28.11,
+    // 26% since v0.28.12), with frame-to-frame change clamped to Δ ≤0.18. The
     // gain scales ALPHAS ONLY — it never touches a follower's
     // timing (the envelope-law tests pin that identity).
     void updateLimiter(float dt) {
         const float rawEst = estimateLuminanceRaw();
         float est = rawEst * limiterGain_;
         rollAvg_ += (est - rollAvg_) * tauCoef(dt, 0.34f); // ~1 s rolling window
-        if (rollAvg_ > 0.18f && rawEst > 1e-5f) {
-            limiterGain_ = std::max(0.05f, limiterGain_ * (0.18f / rollAvg_));
+        if (rollAvg_ > kUndertowLuminanceCap && rawEst > 1e-5f) {
+            limiterGain_ = std::max(0.05f, limiterGain_ * (kUndertowLuminanceCap / rollAvg_));
             est = rawEst * limiterGain_;
-        } else if (rollAvg_ < 0.16f && limiterGain_ < 1.f) {
+        } else if (rollAvg_ < kUndertowLuminanceCap - 0.02f && limiterGain_ < 1.f) {
             limiterGain_ = std::min(1.f, limiterGain_ + (1.f - limiterGain_) * tauCoef(dt, 2.0f));
             est = rawEst * limiterGain_;
         }

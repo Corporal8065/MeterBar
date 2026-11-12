@@ -2277,7 +2277,7 @@ int main() {
             for (int i = 0; i < 375; ++i) { hot.update(0.016f, maxLv, -6.f, noBeat, none); cold.update(0.016f, zero, -60.f, noBeat, none); }
             std::printf("undertow limiter: est=%.3f dark=%.3f dots=%d\n",
                         (double)hot.estimatedLuminance(), (double)hot.darkFraction(), hot.liveDots());
-            CHECK(hot.estimatedLuminance() > 0.f && hot.estimatedLuminance() <= 0.19f); // rolling average under the 18% cap
+            CHECK(hot.estimatedLuminance() > 0.19f && hot.estimatedLuminance() <= (double)kUndertowLuminanceCap + 0.01); // v0.28.12: rolling average under the raised cap (0.26; was <=0.19 under the 18% cap)
             CHECK(hot.darkFraction() >= 0.60f);                       // the soak rule: >=60% near-black even driven hard
             CHECK(hot.liveDots() <= UndertowModel::kDotHardCap);
             CHECK(hot.displayGain() > 0.f && hot.displayGain() <= 1.f);
@@ -3254,8 +3254,8 @@ int main() {
 
         // Performance: the orb cap halves in Low-End like the others.
         CHECK(kPerfFullOrbCap == UndertowModel::kOrbCount);
-        { auto e = effectiveLimits(false, 60, true, true); CHECK(e.orbCap == 30); }
-        { auto e = effectiveLimits(true, 60, true, true);  CHECK(e.orbCap == 15); }
+        { auto e = effectiveLimits(false, 60, true, true); CHECK(e.orbCap == 48); }
+        { auto e = effectiveLimits(true, 60, true, true);  CHECK(e.orbCap == 24); }
 
         // Orb palette: 8 colours, wraps, first entry is the
         // historical slate (bandColour(1)).
@@ -3271,9 +3271,9 @@ int main() {
           }
           CHECK(distinct == UndertowModel::kOrbPaletteSize); }
 
-        // Model seeding: 30 orbs, varied colours AND effects,
-        // deterministic across instances.
-        CHECK(UndertowModel::kOrbCount == 30);
+        // Model seeding: 48 orbs (30 in v0.28.9), varied colours AND
+        // effects, deterministic across instances.
+        CHECK(UndertowModel::kOrbCount == 48); // v0.28.12 (was 30 in v0.28.9)
         { UndertowModel m1, m2;
           int distinctColours = 0; bool fxSeen[3] = { false, false, false };
           for (int i = 0; i < UndertowModel::kOrbCount; ++i) {
@@ -3298,7 +3298,7 @@ int main() {
           UndertowBeatFeed bf; UndertowOnsetFeed of;
           for (int f = 0; f < 90; ++f) m.update(1.f / 60.f, lv, -20.f, bf, of);
           CHECK(m.orbs()[4].alpha > 0.f);
-          CHECK(m.orbs()[5].alpha == 0.f && m.orbs()[29].alpha == 0.f);
+          CHECK(m.orbs()[5].alpha == 0.f && m.orbs()[47].alpha == 0.f);
           bool radiusVaries = false;
           for (int i = 1; i < 5; ++i) {
               const float r0 = m.orbs()[0].radius / m.orbs()[0].baseRadius;
@@ -3309,6 +3309,90 @@ int main() {
         }
         { UndertowModel m; m.setOrbCap(1000); CHECK(m.orbCap() == UndertowModel::kOrbCount); // clamps
           m.setOrbCap(-3); CHECK(m.orbCap() == 0); }
+
+        // --- v0.28.12: band-grouped orbs + the reactivity rework ---
+        // Group assignment: per-band counts are the committed table,
+        // every orb's band matches orbBandOf, and the seeded colour
+        // is the palette colour tinted 45% toward the band colour.
+        { int per[5] = { 0, 0, 0, 0, 0 };
+          UndertowModel m;
+          for (int i = 0; i < UndertowModel::kOrbCount; ++i) {
+              const auto& o = m.orbs()[(size_t)i];
+              CHECK(o.band == UndertowModel::orbBandOf(i));
+              ++per[o.band];
+              const auto mix = UndertowModel::mixRgb(UndertowModel::orbPalette(i),
+                                                     UndertowModel::bandColour(o.band), 0.45f);
+              CHECK(o.colour.r == mix.r && o.colour.g == mix.g && o.colour.b == mix.b);
+          }
+          for (int b = 0; b < 5; ++b) CHECK(per[b] == UndertowModel::kOrbBandCounts[b]);
+          { const auto a = UndertowModel::orbPalette(3), b = UndertowModel::bandColour(2);
+            const auto m0 = UndertowModel::mixRgb(a, b, 0.f), m1 = UndertowModel::mixRgb(a, b, 1.f);
+            CHECK(m0.r == a.r && m0.g == a.g && m0.b == a.b);
+            CHECK(m1.r == b.r && m1.g == b.g && m1.b == b.b); }
+        }
+        {   // Each band drives its OWN group: feeding only band b
+            // raises band b's mean orb alpha above every other
+            // group's; loud low-band drive clears the old 0.28
+            // ceiling by a wide margin; silence settles every orb
+            // back to the floor.
+            UndertowBeatFeed bf; UndertowOnsetFeed of;
+            for (int b = 0; b < 5; ++b) {
+                UndertowModel m;
+                FiveBandLevels lv; lv.band[b] = 0.9f;
+                for (int f = 0; f < 120; ++f) m.update(1.f / 60.f, lv, -12.f, bf, of);
+                double sum[5] = { 0, 0, 0, 0, 0 }; int cnt[5] = { 0, 0, 0, 0, 0 };
+                for (int i = 0; i < UndertowModel::kOrbCount; ++i) {
+                    const auto& o = m.orbs()[(size_t)i];
+                    sum[o.band] += o.alpha; ++cnt[o.band];
+                }
+                for (int g = 0; g < 5; ++g) if (g != b) CHECK(sum[b] / cnt[b] > sum[g] / cnt[g]);
+                if (b == 1) CHECK(sum[1] / cnt[1] > 0.40); // pre-v0.28.12 ceiling was 0.28 at ANY feed
+            }
+            { UndertowModel m; FiveBandLevels lv;
+              for (int f = 0; f < 120; ++f) m.update(1.f / 60.f, lv, -60.f, bf, of);
+              for (int i = 0; i < UndertowModel::kOrbCount; ++i)
+                  CHECK(m.orbs()[(size_t)i].alpha <= 0.071f); } // floor 0.05 x worst Pulse breathe 1.4
+        }
+        {   // Drift speed is per-band: at equal drive the high
+            // group's orbs carry far more velocity than the sub
+            // group's (speed table 0.26 vs 0.055 at full level).
+            UndertowBeatFeed bf; UndertowOnsetFeed of;
+            FiveBandLevels lv; for (int b = 0; b < 5; ++b) lv.band[b] = 0.85f;
+            UndertowModel m;
+            for (int f = 0; f < 180; ++f) m.update(1.f / 60.f, lv, -12.f, bf, of);
+            double vel[5] = { 0, 0, 0, 0, 0 }; int cnt[5] = { 0, 0, 0, 0, 0 };
+            for (int i = 0; i < UndertowModel::kOrbCount; ++i) {
+                const auto& o = m.orbs()[(size_t)i];
+                vel[o.band] += std::sqrt((double)o.vx * o.vx + (double)o.vy * o.vy); ++cnt[o.band];
+            }
+            CHECK(vel[3] / cnt[3] > 2.0 * (vel[0] / cnt[0])); // high darts
+            CHECK(vel[2] / cnt[2] > vel[0] / cnt[0]);         // mid out-drifts sub
+        }
+        {   // A sub onset pumps the sub orbs' radii (the swell term)
+            // beyond what the same level alone produces.
+            UndertowBeatFeed bf; UndertowOnsetFeed none;
+            FiveBandLevels lv; lv.band[0] = 0.8f;
+            UndertowModel plain, pumped;
+            for (int f = 0; f < 30; ++f) { plain.update(1.f / 60.f, lv, -12.f, bf, none); pumped.update(1.f / 60.f, lv, -12.f, bf, none); }
+            UndertowOnsetFeed kick; kick.count[0] = 1; kick.strength[0] = 1.f; kick.lastSec[0] = 1.0;
+            pumped.update(1.f / 60.f, lv, -12.f, bf, kick);
+            plain.update(1.f / 60.f, lv, -12.f, bf, none);
+            double rp = 0, rq = 0;
+            for (int i = 0; i < UndertowModel::kOrbBandCounts[0]; ++i) {
+                rp += pumped.orbs()[(size_t)i].radius / pumped.orbs()[(size_t)i].baseRadius;
+                rq += plain.orbs()[(size_t)i].radius / plain.orbs()[(size_t)i].baseRadius;
+            }
+            CHECK(rp > rq + 0.10 * UndertowModel::kOrbBandCounts[0]); // swell 0.38 x pulse ~1 on the kick frame
+        }
+        {   // v0.28.12: a high onset now latches bandPulse_[3] (it
+            // was decayed on the tau table and read, but never set).
+            UndertowModel m;
+            UndertowBeatFeed bf; UndertowOnsetFeed of;
+            of.count[3] = 1; of.strength[3] = 0.9f; of.lastSec[3] = 0.5;
+            FiveBandLevels lv;
+            m.update(1.f / 60.f, lv, -40.f, bf, of);
+            CHECK(m.bandPulse(3) > 0.4f);
+        }
 
         // --- dock-merge wiring pins (app sources, same pattern as
         // the v0.28.8 pins above; SKIP with a note when unreachable).
@@ -3530,7 +3614,7 @@ int main() {
             CHECK(ssA.find("RegisterWindowMessageW(L\"TaskbarCreated\")") != std::string::npos);
             CHECK(ssA.find("reregisterAfterShellRestart") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmA.find("project(MeterBar VERSION 0.28.11") != std::string::npos);
+            CHECK(cmA.find("project(MeterBar VERSION 0.28.12") != std::string::npos);
         }
     }
 
@@ -3649,7 +3733,7 @@ int main() {
             // S1-B guard: remote link applies yield while stuck.
             CHECK(mcB.find("if (engine.state.stick) return;") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmB.find("project(MeterBar VERSION 0.28.11") != std::string::npos);
+            CHECK(cmB.find("project(MeterBar VERSION 0.28.12") != std::string::npos);
         }
     }
 
