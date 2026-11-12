@@ -221,6 +221,7 @@ private:
     void syncCaptionDock();                                       // v0.24.0: reconcile the bar's height with the docked-caption state (grow/shrink on transitions only) + feed the strip
     meterbar::ReserveEdge captionAnchorEdge();                    // v0.24.0: the edge dock growth anchors at (reserved edge, else nearest)
     void doArrangeWindows();                                      // v0.18: sweep other windows clear of the bar (v0.19.1: on its docked edge)
+    void doLinkAll(int edgeOrdinal);                              // v0.28.13: THE gather — stamps a BLK7 Link All request (Menu submenu + Settings buttons both land here)
     void doRestoreWindows();                                      // v0.18: undo the sweep
     // v0.19 updater; v0.19.2: wired to the real repo + launch check:
     void checkForUpdates();                                       // menu action: honest-unconfigured, or start the background check

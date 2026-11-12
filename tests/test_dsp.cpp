@@ -3127,7 +3127,8 @@ int main() {
         CHECK(changed([](PresetState& c) { c.stereoColor = StereoColor::Single; }));
         CHECK(changed([](PresetState& c) { c.stereoPointAuto = !c.stereoPointAuto; }));
         CHECK(changed([](PresetState& c) { c.stereoPointSize += 0.25f; }));
-        CHECK(changed([](PresetState& c) { c.scopeTrigger = ScopeTrigger::Free; }));
+        CHECK(changed([](PresetState& c) { c.scopeTrigger = ScopeTrigger::Pitch; })); // v0.28.13: flipped — the default below is now Free, so Pitch is the mutation
+        CHECK(PresetState{}.scopeTrigger == ScopeTrigger::Free); // v0.28.13 (Jackson, 2026-11-12): FRESH-INSTALL default trigger mode is Free (free-run); a saved scopeTrigger still loads over it (PresetIO), never the reverse
         CHECK(changed([](PresetState& c) { c.scopeDisplay = ScopeDisplay::Multi; }));
         CHECK(changed([](PresetState& c) { c.scopeWindowMs += 0.25f; }));
         CHECK(changed([](PresetState& c) { c.spectrumStyle = PresetState::SpectrumStyle::Fft; }));
@@ -3619,7 +3620,7 @@ int main() {
             CHECK(ssA.find("RegisterWindowMessageW(L\"TaskbarCreated\")") != std::string::npos);
             CHECK(ssA.find("reregisterAfterShellRestart") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmA.find("project(MeterBar VERSION 0.28.12") != std::string::npos);
+            CHECK(cmA.find("project(MeterBar VERSION 0.28.13") != std::string::npos);
         }
     }
 
@@ -3738,7 +3739,44 @@ int main() {
             // S1-B guard: remote link applies yield while stuck.
             CHECK(mcB.find("if (engine.state.stick) return;") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmB.find("project(MeterBar VERSION 0.28.12") != std::string::npos);
+            CHECK(cmB.find("project(MeterBar VERSION 0.28.13") != std::string::npos);
+        }
+    }
+
+    // ---------- v0.28.13: Link All buttons + scope trigger default ----------
+    {
+        auto readApp5 = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string mcC  = readApp5("app/Source/MainComponent.cpp");
+        const std::string mhC  = readApp5("app/Source/MainComponent.h");
+        const std::string stC  = readApp5("app/Source/Settings.h");
+        const std::string dspC = readApp5("dsp/include/meterbar/State.hpp");
+        if (mcC.empty() || mhC.empty() || stC.empty() || dspC.empty()) {
+            std::printf("v0.28.13 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            // the gather has ONE host path, used by the Menu submenu
+            // and the Settings buttons alike
+            CHECK(mcC.find("void MainComponent::doLinkAll(int edgeOrdinal)") != std::string::npos);
+            CHECK(mhC.find("void doLinkAll(int edgeOrdinal);") != std::string::npos);
+            CHECK(mcC.find("settingsWin->content.onLinkAll") != std::string::npos);
+            // the Settings Window panel carries both edge buttons
+            CHECK(stC.find("onLinkAll(0)") != std::string::npos);
+            CHECK(stC.find("onLinkAll(1)") != std::string::npos);
+            // fresh-install scope trigger default is Free (State.hpp
+            // is also pinned functionally above: PresetState{} check)
+            CHECK(dspC.find("scopeTrigger = ScopeTrigger::Free") != std::string::npos);
         }
     }
 

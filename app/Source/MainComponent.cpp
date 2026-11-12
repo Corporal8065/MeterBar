@@ -355,6 +355,7 @@ MainComponent::MainComponent() {
     settingsWin->content.onFpsChanged = [this]{ applyFps(); };
     settingsWin->content.onBgLinkToggled = [this]{ linkClient_.notifyBgLinkChanged(); }; // v0.21.3
     settingsWin->content.onArrange = [this]{ doArrangeWindows(); };   // v0.18: Settings > Window buttons
+    settingsWin->content.onLinkAll = [this](int edge){ doLinkAll(edge); }; // v0.28.13: Settings > Window Link All buttons
     settingsWin->content.onRestore = [this]{ doRestoreWindows(); };   // v0.18
     settingsWin->content.onStickToggled = [this](bool b){ setStick(b); }; // v0.28.9: Settings' Stick lands in the same merged action as the menu's
     settingsWin->content.build();
@@ -2181,6 +2182,16 @@ void MainComponent::setDeviceByName(bool input, const juce::String& name) {
 // Source submenu of the hamburger menu) are now the ONLY source
 // surfaces: both list Input Devices AND Output Devices (WASAPI render
 // endpoints), and picking an output starts loopback on that endpoint.
+// v0.28.13: THE gather (BLK7 Link All initiation, DESIGN §6a). One
+// code path for the Menu submenu and the Settings buttons: the area
+// is the total area of the display containing THIS bar's window
+// (via the client callback) — the same invoker rule in all three
+// bars, so the stack anchors identically no matter who asks.
+void MainComponent::doLinkAll(int edgeOrdinal) {
+    auto area = linkClient_.getLinkAllArea ? linkClient_.getLinkAllArea() : getScreenBounds();
+    linkClient_.requestLinkAll(edgeOrdinal, area);
+}
+
 void MainComponent::showHamburgerMenu() {
     auto& st = engine.state; juce::PopupMenu m;
     juce::PopupMenu help; help.addItem(idAbout, "About MeterBar"); help.addItem(idUpdates, "Check For Updates");
@@ -2348,10 +2359,7 @@ void MainComponent::showHamburgerMenu() {
             // client callback; defer past popup dismissal like the
             // Reposition actions (menu-capture discipline).
             const int edge = (r == idLinkAllBottom) ? 1 : 0;
-            juce::MessageManager::callAsync([this, edge]{
-                auto area = linkClient_.getLinkAllArea ? linkClient_.getLinkAllArea() : getScreenBounds();
-                linkClient_.requestLinkAll(edge, area);
-            });
+            juce::MessageManager::callAsync([this, edge]{ doLinkAll(edge); });
         }
         // v0.22.0: the compressed toolbar items. Preset actions are
         // the old dropdown's, unchanged; Arrange / Restore call the

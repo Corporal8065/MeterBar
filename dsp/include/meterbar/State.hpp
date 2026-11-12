@@ -46,7 +46,7 @@ struct PresetState {
     StereoColor stereoColor = StereoColor::Rainbow; // v0.28.6 recipe (Jackson, 2026-11-03): Rainbow is the default, not the purple Single — a DEFAULTS change only: saved presets/settings carry their own stored value and are never rewritten by this
     bool stereoPointAuto = true; float stereoPointSize = 2.0f; // 1..20; v0.28.6 recipe (Jackson, 2026-11-03): default point size 2 (was 1)
     // Oscilloscope
-    ScopeTrigger scopeTrigger = ScopeTrigger::Pitch;
+    ScopeTrigger scopeTrigger = ScopeTrigger::Free; // v0.28.13 (Jackson, 2026-11-12): the FRESH-INSTALL default is Free (free-run) — a defaults change only: a saved scopeTrigger in settings/presets loads over this and is never rewritten by it
     ScopeDisplay scopeDisplay = ScopeDisplay::Single;
     float scopeWindowMs = 100.0f;      // v0.15: visible time window 10..200 ms (wider than the old fixed ~43 ms)
     // Spectrum

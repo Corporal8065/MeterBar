@@ -167,6 +167,7 @@ public:
     std::function<void()> onArrange, onRestore; // v0.18: Window panel buttons (wired by MainComponent)
     std::function<void(bool)> onStickToggled; // v0.28.9: Stick flipped here (wired by MainComponent — docks, merges, syncs; the toggle must not just write the flag)
     std::function<void()> onBgLinkToggled; // v0.21.3: "Link background" flipped (wired by MainComponent)
+    std::function<void(int)> onLinkAll; // v0.28.13: Window panel Link All buttons (edge ordinal 0=Top, 1=Bottom; wired by MainComponent)
     SettingsContent() { setSize(760, 640); }
     // v0.19: Settings paints its OWN background in the fixed palette —
     // this is the line that ends the theme.panel inheritance (near-white
@@ -267,6 +268,20 @@ public:
             note("Windows only: Stick is the one dock control (v0.28.9 — the old separate Reserve Screen Space control merged into it, same as the Reposition menu's Stick item). ON docks the bar flush at its nearest edge (top or bottom) at full monitor width and registers it as an App Bar there — Windows shrinks that monitor's work area by exactly the bar's height, so maximised windows stop at the bar instead of sliding under it, and the bar cannot be dragged while stuck. OFF releases the space; the bar stays where it sits and can be dragged again.");
             buttonRow("Arrange windows clear of the bar", "Restore arranged windows");
             note("Arrange slides every other window on the bar's monitor into the space clear of the bar's docked edge — maximised windows included (they are un-maximised, fitted, and Restore puts them back maximised). Restore puts every window back where it was. The Debug window's 'Screen space' line shows the current state, including which edge is reserved. On non-Windows builds these do nothing.");
+            { // v0.28.13: Link All BUTTONS (Jackson, 2026-11-12 — the gather used to exist only in the Menu's Link All submenu)
+                auto* la = add(new juce::TextButton(juce::String::fromUTF8("Link All \xe2\x86\x92 Top")));
+                la->setBounds(24, y_, 260, 22);
+                la->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+                la->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
+                la->onClick = [this]{ if (onLinkAll) onLinkAll(0); };
+                auto* lb = add(new juce::TextButton(juce::String::fromUTF8("Link All \xe2\x86\x92 Bottom")));
+                lb->setBounds(296, y_, 260, 22);
+                lb->setColour(juce::TextButton::buttonColourId, settingsPalette::surface());
+                lb->setColour(juce::TextButton::textColourOffId, settingsPalette::text());
+                lb->onClick = [this]{ if (onLinkAll) onLinkAll(1); };
+                y_ += 26;
+            }
+            note("Link All gathers every running family bar (MeterBar, TickerBar, SessionBar) into one stack flush at the chosen edge of this bar's screen — full width, no gaps; a bar whose Link is off is linked in. Same action as the Menu's Link All submenu.");
         });
         panel("Audio Source", nullptr, [&]{
             // v0.27.0 (item 8): the capture-source control — System
