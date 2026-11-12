@@ -225,6 +225,38 @@ inline IntRect groupDockRect(IntRect leader, IntRect follower, ReserveEdge edge)
     return out;
 }
 
+// v0.28.14 GROUP-DOCK LEADER (round-3 fix — the two-leader ping-pong):
+// the pre-.14 client iterated EVERY reserve-docked linked peer in one
+// tick and re-applied each one's groupDockRect target whenever its
+// key differed from the client's SINGLE stored dockKey_. With two
+// docked peers the key can never match both at once: leader A's key
+// differs from the stored B key, then B's differs from the just-stored
+// A key, so the follower was teleported between the two targets every
+// tick, forever, with no further input (sim-reproduced with the real
+// client headers: 883 applies in 30 idle seconds; field shape: the
+// sustained post-resize oscillation of 2026-11-12 — it ignites when a
+// resize leaves a second bar docked, and breaking a dock stops it
+// because one leader's key can settle). The follower therefore docks
+// against exactly ONE leader: the senior docked peer — smallest
+// linkSeq (the group parent, when the parent is the docked one;
+// unclaimed linkSeq 0 sorts last; ties break by slot order). The
+// choice is a pure function of the snapshot: it can change only when
+// dock/claim/liveness state itself changes, never per tick, so the
+// client's dockKey_ converges after at most one apply per change.
+// Returns the leader's SLOT index (slots are appId-indexed), or -1
+// when no live linked peer is reserve-docked.
+inline int groupDockLeaderSlot(const LinkShared& sh, int selfApp, long long nowMs) {
+    int best = -1;
+    unsigned bestSeq = 0;
+    for (int i = 0; i < 3; ++i) {
+        const LinkSlot& s = sh.slots[(size_t)i];
+        if (s.appId < 0 || s.appId == selfApp || !s.linked || s.dockedEdge < 0 || !slotLive(s, nowMs)) continue;
+        const unsigned seq = s.linkSeq != 0 ? s.linkSeq : ~0u; // unclaimed sorts last
+        if (best < 0 || seq < bestSeq) { best = i; bestSeq = seq; }
+    }
+    return best;
+}
+
 // ------------------------------------------------------------------
 // BACKGROUND SYNC DECISIONS (v0.2.1) — the publish/adopt rules for the
 // shared background, as pure functions over a per-client state block.

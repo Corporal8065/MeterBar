@@ -3620,7 +3620,7 @@ int main() {
             CHECK(ssA.find("RegisterWindowMessageW(L\"TaskbarCreated\")") != std::string::npos);
             CHECK(ssA.find("reregisterAfterShellRestart") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmA.find("project(MeterBar VERSION 0.28.13") != std::string::npos);
+            CHECK(cmA.find("project(MeterBar VERSION 0.28.14") != std::string::npos);
         }
     }
 
@@ -3739,7 +3739,7 @@ int main() {
             // S1-B guard: remote link applies yield while stuck.
             CHECK(mcB.find("if (engine.state.stick) return;") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmB.find("project(MeterBar VERSION 0.28.13") != std::string::npos);
+            CHECK(cmB.find("project(MeterBar VERSION 0.28.14") != std::string::npos);
         }
     }
 
@@ -3777,6 +3777,69 @@ int main() {
             // fresh-install scope trigger default is Free (State.hpp
             // is also pinned functionally above: PresetState{} check)
             CHECK(dspC.find("scopeTrigger = ScopeTrigger::Free") != std::string::npos);
+        }
+    }
+
+    // ---------- v0.28.14: group-dock single leader (round-3 fix) ----------
+    {
+        using namespace meterbar;
+        const long long now = 500000;
+        auto docked = [](LinkShared& sh, int idx, unsigned seq, int edge, long long hb) {
+            auto& s = sh.slots[(size_t)idx];
+            s.appId = idx; s.linked = 1; s.heartbeatMs = hb; s.linkSeq = seq; s.dockedEdge = edge;
+        };
+        // no peers at all -> no leader
+        { LinkShared sh; CHECK(groupDockLeaderSlot(sh, 0, now) == -1); }
+        // one docked peer -> that peer
+        { LinkShared sh; docked(sh, 2, 3, 1, now);
+          CHECK(groupDockLeaderSlot(sh, 0, now) == 2); }
+        // two docked peers -> the senior (smallest linkSeq) wins,
+        // regardless of slot order. The pre-.14 client applied BOTH
+        // leaders' targets per tick (one shared dockKey_ can never
+        // match two keys), teleporting the follower between them
+        // forever — the 2026-11-12 sustained post-resize oscillation.
+        { LinkShared sh; docked(sh, 0, 2, 0, now); docked(sh, 2, 5, 1, now);
+          CHECK(groupDockLeaderSlot(sh, 1, now) == 0); }
+        { LinkShared sh; docked(sh, 0, 5, 0, now); docked(sh, 2, 2, 1, now);
+          CHECK(groupDockLeaderSlot(sh, 1, now) == 2); }
+        // an unclaimed peer (linkSeq 0) sorts after any claimed peer
+        { LinkShared sh; docked(sh, 0, 0, 0, now); docked(sh, 2, 4, 1, now);
+          CHECK(groupDockLeaderSlot(sh, 1, now) == 2); }
+        // equal claims -> lowest slot wins (deterministic, never alternates)
+        { LinkShared sh; docked(sh, 0, 3, 0, now); docked(sh, 2, 3, 1, now);
+          CHECK(groupDockLeaderSlot(sh, 1, now) == 0); }
+        // self is never its own leader, even when self is docked+senior
+        { LinkShared sh; docked(sh, 1, 1, 0, now);
+          CHECK(groupDockLeaderSlot(sh, 1, now) == -1); }
+        // unlinked / stale / undocked peers are not leaders
+        { LinkShared sh; docked(sh, 2, 1, 1, now); sh.slots[2].linked = 0;
+          CHECK(groupDockLeaderSlot(sh, 0, now) == -1); }
+        { LinkShared sh; docked(sh, 2, 1, 1, now - kPeerStaleMs - 1);
+          CHECK(groupDockLeaderSlot(sh, 0, now) == -1); }
+        { LinkShared sh; docked(sh, 2, 1, -1, now);
+          CHECK(groupDockLeaderSlot(sh, 0, now) == -1); }
+        // app-source pins: the client docks against the single core
+        // leader, and never while its own drag session is live
+        auto readApp6 = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string blH = readApp6("app/Source/BarLink.h");
+        if (blH.empty()) {
+            std::printf("v0.28.14 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            CHECK(blH.find("meterbar::groupDockLeaderSlot(snap, appId_, now)") != std::string::npos);
+            CHECK(blH.find("!meterbar::dragLive(mine, now)") != std::string::npos);
         }
     }
 

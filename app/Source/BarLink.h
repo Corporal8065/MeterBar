@@ -424,10 +424,24 @@ private:
         // (core rule groupDockFollows, BarLink.hpp). With both bars
         // docked, each stacks against the other's latest rect and the
         // pair chases forever at tick rate — the 2026-10-29 freeze.
+        // v0.28.14 (round-3 fix): dock against exactly ONE leader —
+        // the senior docked peer (core groupDockLeaderSlot). The
+        // pre-.14 loop visited every docked peer per tick and compared
+        // each one's key against the single dockKey_: with two leaders
+        // the key can never match both, so the follower was teleported
+        // between the leaders' targets every tick, forever (the
+        // sustained post-resize oscillation of 2026-11-12). One leader
+        // means the key converges after at most one apply per leader
+        // change. Also: never apply while THIS bar's own drag session
+        // is live — the user's hand owns the bar mid-gesture; the
+        // section settles it once the gesture ends instead of tugging
+        // against the drag.
         if (meterbar::groupDockFollows(mine.dockedEdge)
+            && !meterbar::dragLive(mine, now)
             && meterbar::groupDockMovesSelf(snap, appId_, myLinkSeq_, now)) { // BLK7 §5: the group PARENT is exempt from the automatic group-dock
-            for (auto& s : snap.slots) {
-                if (s.appId < 0 || s.appId == appId_ || !s.linked || s.dockedEdge < 0 || !meterbar::slotLive(s, now)) continue;
+            const int li = meterbar::groupDockLeaderSlot(snap, appId_, now);
+            if (li >= 0) {
+                const auto& s = snap.slots[(size_t)li];
                 auto target = meterbar::groupDockRect(s.rect, mine.rect, (meterbar::DockArg)s.dockedEdge);
                 const auto key = std::make_tuple(s.appId, s.dockedEdge, s.rect.x, s.rect.y, s.rect.w, s.rect.h);
                 if (key != dockKey_) {
