@@ -41,6 +41,17 @@ enable_testing()
 add_executable(test_dsp tests/test_dsp.cpp)
 target_link_libraries(test_dsp PRIVATE meterbar_dsp)
 add_test(NAME dsp COMMAND test_dsp)
+if(MSVC)
+  # v0.28.12 CI fix: the suite is one monolithic main() holding
+  # ~1,500 locals including dozens of ~100 KB UndertowModel
+  # instances; MSVC's frame for it outgrew the default 1 MB stack
+  # reserve when this round's orb growth (30 -> 48) and new blocks
+  # landed — the exe died in its prologue stack probe on the CI
+  # runner (exit before any output) while g++/clang slot-sharing
+  # kept the same frame at ~170 KB locally. Test target only: give
+  # the harness an 8 MB reserve. The app target is untouched.
+  target_link_options(test_dsp PRIVATE /STACK:8388608)
+endif()
 
 # ---- Phase B: JUCE app ----
 if(METERBAR_BUILD_APP)
