@@ -657,6 +657,20 @@ void MainComponent::syncScreenSpace() {
         linkBtn.setToggleState(engine.state.linkEnabled, juce::dontSendNotification);
 }
 void MainComponent::notifyWindowGeometryChanged() { syncScreenSpace(); linkClient_.notifyLocalGeometry(); }
+void MainComponent::visibilityChanged() {
+    // v0.28.10 (DIAGNOSIS candidate 2): the post-show hook the
+    // event-driven reserve design was missing. The constructor's
+    // deliberate syncScreenSpace() runs before this component is
+    // parented — no window, no peer, a guaranteed no-op — and no
+    // other startup path runs a sync with a live peer, so a restore
+    // with stick = true (last-state record, preset) came back as a
+    // flag with no AppBar behind it until the first user geometry
+    // change. Becoming visible is the first moment the peer is
+    // guaranteed to exist: run the sync then. The machine acts on
+    // transitions only, so a visibility change that alters nothing
+    // costs one None.
+    if (isVisible()) syncScreenSpace();
+}
 // v0.18 ARRANGE: slide every other window on this bar's monitor clear
 // of the bar. The strip the sweep clears is the bar's far edge measured
 // from the monitor edge it is docked to — so it does the right thing
@@ -810,8 +824,16 @@ meterbar::ReserveEdge MainComponent::captionAnchorEdge() {
         HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{}; mi.cbSize = sizeof mi;
         if (GetMonitorInfoW(mon, &mi)) {
-            const int gapTop = std::abs(wr.top - mi.rcMonitor.top);
-            const int gapBottom = std::abs(mi.rcMonitor.bottom - wr.bottom);
+            // v0.28.10 (DIAGNOSIS candidate 3): judge the VISIBLE
+            // rect, like the other two feed sites (syncScreenSpace,
+            // doArrangeWindows) — this was the one conversion
+            // v0.28.9 missed, so caption-dock growth anchored on the
+            // raw window rect's gaps, ~one frame inset off the
+            // reserve machine's view of the same bar.
+            meterbar::IntRect rect{ wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top };
+            { meterbar::IntRect vis; if (screenSpace.windowVisibleRect(hwnd, vis)) rect = vis; }
+            const int gapTop = std::abs(rect.y - mi.rcMonitor.top);
+            const int gapBottom = std::abs(mi.rcMonitor.bottom - rect.bottom());
             return gapBottom <= gapTop ? meterbar::ReserveEdge::Bottom : meterbar::ReserveEdge::Top;
         }
     }
@@ -1958,9 +1980,40 @@ void MainComponent::doTopBottom(bool top) {
     auto disp = displays.getDisplayForRect(curRect);
     if (!disp) disp = displays.getPrimaryDisplay();
     if (!disp) return; auto ta = disp->totalArea;
-    const auto target = meterbar::dockedBarRect(
+    // v0.28.10 (DIAGNOSIS candidate 1 — the definite 0.28.9 defect):
+    // measure the LIVE frame inset and place the WINDOW rect so the
+    // VISIBLE bar lands flush. 0.28.9 placed the window rect flush
+    // (dockedBarRect on totalArea) while syncScreenSpace judges the
+    // visible rect; the two disagree by the DWM invisible resize
+    // border (~7-8 px a side at 100% scaling), so the app's own dock
+    // left the machine's judged gap inside its 3-8 px no-dock dead
+    // zone and the reservation never engaged. The insets are
+    // measured in physical pixels (GetWindowRect vs the DWM
+    // extended frame bounds — the same pair the machine is fed) and
+    // converted into this function's logical domain by the display
+    // scale. No peer or no DWM answer: zero insets, and the
+    // placement reduces to the plain v0.28.9 dock.
+    meterbar::FrameInsets insets{};
+#if JUCE_WINDOWS
+    if (w && w->getPeer()) {
+        HWND hwnd = static_cast<HWND>(w->getPeer()->getNativeHandle());
+        RECT wr{}; meterbar::IntRect vis;
+        if (hwnd && GetWindowRect(hwnd, &wr) && screenSpace.windowVisibleRect(hwnd, vis)) {
+            const auto phys = meterbar::frameInsetsOf(
+                { wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top }, vis);
+            const double scale = disp->scale > 0.0 ? disp->scale : 1.0;
+            auto toLogical = [scale](int px) {
+                const int v = (int)(px / scale + 0.5); // phys >= 0 (frameInsetsOf clamps)
+                return v > 0 ? v : 0;
+            };
+            insets = meterbar::FrameInsets{ toLogical(phys.top), toLogical(phys.bottom),
+                                            toLogical(phys.left), toLogical(phys.right) };
+        }
+    }
+#endif
+    const auto target = meterbar::dockedBarWindowRect(
         { curRect.getX(), curRect.getY(), curRect.getWidth(), getHeight() },
-        { ta.getX(), ta.getY(), ta.getWidth(), ta.getHeight() }, top);
+        { ta.getX(), ta.getY(), ta.getWidth(), ta.getHeight() }, top, insets);
     if (w) {
         w->setBounds(target.x, target.y, target.w, target.h);
     }

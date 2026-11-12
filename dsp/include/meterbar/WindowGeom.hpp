@@ -220,6 +220,78 @@ inline IntRect dockedBarRect(IntRect bar, IntRect mon, bool top) {
     return IntRect{ mon.x, top ? mon.y : mon.bottom() - bar.h, mon.w, bar.h };
 }
 
+// ------------------------------------------------------------------
+// FRAME INSETS + THE WINDOW-SPACE DOCK RECT (v0.28.10) — the fix for
+// the v0.28.9 placed-vs-judged mismatch (DIAGNOSIS candidate 1, a
+// definite defect in the shipped 0.28.9). The dock ACTION places a
+// WINDOW rect (what setBounds / SetWindowPos consume); the reserve
+// machine JUDGES the bar's VISIBLE rect (DWM extended frame bounds).
+// The two differ by the DWM invisible resize border — ~7-8 px a side
+// at 100% scaling, ~10-12 px at 125-150% — while the machine only
+// registers at a judged gap <= 2 px and never docks from the 3-8 px
+// band. So a dock performed by the app's own Reposition / Stick
+// buttons in 0.28.9 placed the window flush and left the judged gap
+// at ~7-8 px: the reservation never engaged ("still fucked" —
+// Jackson's field report on 0.28.9), the strip came out ~one inset
+// thin when a drag-overshoot did engage it, and at >=125% scaling
+// the inset alone exceeded the 8 px undock band so a reserved bar
+// released itself.
+//
+// The fix makes placement speak the machine's language: measure the
+// live frame inset (window rect minus visible rect, per side), dock
+// the VISIBLE rect flush via dockedBarRect, then expand the target
+// back out by the insets to the WINDOW rect to hand the OS. The
+// machine's thresholds are NOT widened — the inset is DPI-dependent,
+// and a fixed wider dock band would re-open the flap class the dead
+// zone exists to prevent (the rejected alternative; see DIAGNOSIS).
+// Placement, judgment and the strip derivation (already visible-rect
+// based) then all describe the same geometry, and the machine's
+// Switch branch works because the judged gap after an edge-to-edge
+// reposition is genuinely ~0. Pure: the app measures the insets from
+// the live window (GetWindowRect + DWM extended frame bounds) and
+// feeds them here, in the same pixel domain as the rects it passes.
+struct FrameInsets { int top = 0, bottom = 0, left = 0, right = 0; };
+
+// The insets of a window whose window rect and visible rect are both
+// known (same pixel domain). A visible rect that matches or exceeds
+// the window rect on a side clamps that side to 0 — a DWM refusal
+// handled by the caller's fallback never reaches here, and a
+// borderless window honestly reports 0.
+inline FrameInsets frameInsetsOf(IntRect windowRect, IntRect visibleRect) {
+    auto side = [](int d) { return d > 0 ? d : 0; };
+    return FrameInsets{ side(visibleRect.y - windowRect.y),
+                        side(windowRect.bottom() - visibleRect.bottom()),
+                        side(visibleRect.x - windowRect.x),
+                        side(windowRect.right() - visibleRect.right()) };
+}
+
+// The visible rect of a window placed at `windowRect` with the given
+// insets — the exact rect the reserve machine will judge after the
+// placement lands.
+inline IntRect visibleRectFromWindowRect(IntRect windowRect, FrameInsets in) {
+    return IntRect{ windowRect.x + in.left, windowRect.y + in.top,
+                    windowRect.w - in.left - in.right,
+                    windowRect.h - in.top - in.bottom };
+}
+
+// The WINDOW rect to place so the bar's VISIBLE rect lands flush at
+// the chosen edge, full monitor width, visible height unchanged:
+// dockedBarRect run on the visible rect, expanded back by the
+// insets. The resulting window height equals the input's (visible
+// height + both insets), and the edge-adjacent side of the window
+// rect sits one inset OUTSIDE the monitor edge — exactly where a
+// borderless-looking bar's window must sit for its visible edge to
+// be flush. Degenerate inputs (bad monitor/bar, or insets that meet
+// or exceed the bar) fall back to the plain v0.28.9 window-rect dock.
+inline IntRect dockedBarWindowRect(IntRect bar, IntRect mon, bool top, FrameInsets in) {
+    if (mon.w <= 0 || mon.h <= 0 || bar.h <= 0) return bar;
+    const IntRect vis = visibleRectFromWindowRect(bar, in);
+    if (vis.w <= 0 || vis.h <= 0) return dockedBarRect(bar, mon, top);
+    const IntRect vt = dockedBarRect(vis, mon, top);
+    return IntRect{ vt.x - in.left, vt.y - in.top,
+                    vt.w + in.left + in.right, vt.h + in.top + in.bottom };
+}
+
 inline IntRect captionShrunkBarRect(IntRect bar, int stripH, ReserveEdge anchor) {
     if (stripH <= 0 || bar.w <= 0 || bar.h <= 0) return bar;
     const int minH = 48;

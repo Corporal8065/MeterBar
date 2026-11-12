@@ -3356,6 +3356,184 @@ int main() {
         }
     }
 
+    // ---------- v0.28.10: dock fix — placement must speak the
+    // machine's language (the VISIBLE rect). Until this block, no
+    // test produced the observation the shipped app produces: dock
+    // via the app's own action, then read the gap the machine is
+    // fed (the DIAGNOSIS coverage gap — the 0.28.9 pins were
+    // substring finds that this defect sailed through). These
+    // checks run that loop end to end in core: place, derive the
+    // visible rect, compute the gaps exactly as syncScreenSpace
+    // does, feed the ReserveMachine. ----------
+    {
+        using RA = ReserveAction;
+        using RE = ReserveEdge;
+        const IntRect mon{0, 0, 1920, 1080};
+        auto iabs = [](int a, int b) { return a > b ? a - b : b - a; };
+        auto gapsOf = [&iabs](IntRect r, IntRect m) {
+            return EdgeGaps{ iabs(r.y, m.y), iabs(m.bottom(), r.bottom()),
+                             iabs(r.x, m.x), iabs(m.right(), r.right()) };
+        };
+
+        // frameInsetsOf: window minus visible per side, clamped >= 0.
+        { const auto f = frameInsetsOf({0, 0, 1936, 136}, {8, 8, 1920, 120});
+          CHECK(f.top == 8 && f.bottom == 8 && f.left == 8 && f.right == 8); }
+        { const auto f = frameInsetsOf({100, 100, 800, 120}, {100, 100, 800, 120});
+          CHECK(f.top == 0 && f.bottom == 0 && f.left == 0 && f.right == 0); }
+        { const auto f = frameInsetsOf({0, 0, 100, 100}, {-4, -4, 108, 108}); // visible beyond window: clamp
+          CHECK(f.top == 0 && f.bottom == 0 && f.left == 0 && f.right == 0); }
+        { const auto f = frameInsetsOf({0, 0, 1936, 140}, {8, 0, 1920, 132}); // asymmetric: no top border
+          CHECK(f.top == 0 && f.bottom == 8 && f.left == 8 && f.right == 8); }
+        // visibleRectFromWindowRect inverts the placement expansion.
+        CHECK(visibleRectFromWindowRect({-8, -8, 1936, 136}, FrameInsets{8, 8, 8, 8}) == (IntRect{0, 0, 1920, 120}));
+
+        // THE DEFECT, on the shipped 0.28.9 path: place the WINDOW
+        // rect flush (dockedBarRect), then let the machine judge the
+        // VISIBLE rect. For any inset > 2 the judged gap sits in the
+        // 3..8 px no-dock dead zone (or beyond) and Register never
+        // fires — Jackson's "reserve never engages from the app's own
+        // dock" field failure, reproduced in core.
+        for (int ins : { 3, 8, 12 }) {
+            const FrameInsets in{ins, ins, ins, ins};
+            const IntRect winBar{300, 400, 800, 120 + 2 * ins}; // window rect of a 120 px visible bar
+            const IntRect placed = dockedBarRect(winBar, mon, true);
+            const IntRect vis = visibleRectFromWindowRect(placed, in);
+            ReserveMachine m;
+            CHECK(m.update(true, gapsOf(vis, mon), vis, mon, 1) == RA::None);
+            CHECK(!m.reserved());
+        }
+        // The boundary that made the field failure look
+        // intermittent: insets 0 and 2 DO register on the old path.
+        for (int ins : { 0, 2 }) {
+            const FrameInsets in{ins, ins, ins, ins};
+            const IntRect winBar{300, 400, 800, 120 + 2 * ins};
+            const IntRect vis = visibleRectFromWindowRect(dockedBarRect(winBar, mon, true), in);
+            ReserveMachine m;
+            CHECK(m.update(true, gapsOf(vis, mon), vis, mon, 1) == RA::Register);
+        }
+
+        // THE FIX: place via dockedBarWindowRect with the live
+        // insets. The visible bar lands flush, full width, height
+        // kept; the machine's own observation registers on BOTH
+        // edges at every realistic inset (0 = borderless, 4/8 = 100%
+        // scaling, 10/12 = 125-150% scaling), with the strip EXACTLY
+        // the visible bar's height (0.28.9's overshoot engagement
+        // came out ~one inset thin) and a steady state of None.
+        for (int ins : { 0, 4, 8, 10, 12 }) {
+            const FrameInsets in{ins, ins, ins, ins};
+            const IntRect winBar{300, 400, 800, 120 + 2 * ins};
+            {   // top
+                const IntRect placed = dockedBarWindowRect(winBar, mon, true, in);
+                CHECK(placed.h == winBar.h); // window height preserved (visible height + insets)
+                const IntRect vis = visibleRectFromWindowRect(placed, in);
+                CHECK(vis == (IntRect{0, 0, 1920, 120}));
+                CHECK(gapsOf(vis, mon).top == 0);
+                ReserveMachine m;
+                CHECK(m.update(true, gapsOf(vis, mon), vis, mon, 1) == RA::Register);
+                CHECK(m.edge() == RE::Top);
+                CHECK(m.requestedRect() == (IntRect{0, 0, 1920, 120}));
+                CHECK(m.update(true, gapsOf(vis, mon), vis, mon, 1) == RA::None);
+            }
+            {   // bottom
+                const IntRect placed = dockedBarWindowRect(winBar, mon, false, in);
+                const IntRect vis = visibleRectFromWindowRect(placed, in);
+                CHECK(vis == (IntRect{0, 960, 1920, 120}));
+                ReserveMachine m;
+                CHECK(m.update(true, gapsOf(vis, mon), vis, mon, 1) == RA::Register);
+                CHECK(m.edge() == RE::Bottom);
+                CHECK(m.requestedRect() == (IntRect{0, 960, 1920, 120}));
+            }
+        }
+        // Asymmetric insets (a borderless top edge): still flush.
+        { const FrameInsets in{0, 8, 8, 8};
+          const IntRect placed = dockedBarWindowRect({300, 400, 800, 128}, mon, true, in);
+          CHECK(visibleRectFromWindowRect(placed, in) == (IntRect{0, 0, 1920, 120})); }
+        // Non-primary / negative-origin monitor through the new path.
+        { const FrameInsets in{8, 8, 8, 8};
+          const IntRect monL{-1920, 0, 1920, 1080};
+          const IntRect placed = dockedBarWindowRect({-1500, 500, 700, 106}, monL, true, in);
+          const IntRect vis = visibleRectFromWindowRect(placed, in);
+          CHECK(vis == (IntRect{-1920, 0, 1920, 90}));
+          ReserveMachine m;
+          CHECK(m.update(true, gapsOf(vis, monL), vis, monL, 7) == RA::Register); }
+        // Edge-to-edge reposition while stuck: 0.28.9 took Release
+        // (bottom dock, click At the Top — judged top gap ~8 with
+        // the bottom clear); the new path's judged top gap is 0, so
+        // the machine SWITCHES, exactly once, and then holds steady
+        // (no self-release at high scaling — the judged gap after
+        // the app's own dock is 0 whatever the inset).
+        { const FrameInsets in{12, 12, 12, 12};
+          const IntRect winBar{300, 400, 800, 144};
+          ReserveMachine m;
+          const IntRect visB = visibleRectFromWindowRect(dockedBarWindowRect(winBar, mon, false, in), in);
+          CHECK(m.update(true, gapsOf(visB, mon), visB, mon, 1) == RA::Register);
+          CHECK(m.edge() == RE::Bottom);
+          const IntRect visT = visibleRectFromWindowRect(
+              dockedBarWindowRect(dockedBarWindowRect(winBar, mon, false, in), mon, true, in), in);
+          CHECK(m.update(true, gapsOf(visT, mon), visT, mon, 1) == RA::Switch);
+          CHECK(m.edge() == RE::Top);
+          CHECK(m.requestedRect() == (IntRect{0, 0, 1920, 120}));
+          CHECK(m.update(true, gapsOf(visT, mon), visT, mon, 1) == RA::None); }
+        // Degenerate: insets meeting the bar fall back to the plain
+        // window-rect dock; a degenerate monitor keeps the bar as-is.
+        CHECK(dockedBarWindowRect({10, 10, 100, 12}, mon, true, FrameInsets{8, 8, 8, 8})
+              == dockedBarRect({10, 10, 100, 12}, mon, true));
+        CHECK(dockedBarWindowRect({10, 10, 100, 50}, {0, 0, 0, 0}, true, FrameInsets{8, 8, 8, 8})
+              == (IntRect{10, 10, 100, 50}));
+
+        // --- v0.28.10 wiring pins (app sources, same pattern as the
+        // earlier blocks; SKIP with a note when unreachable). These
+        // pin the app-side halves of fixes 1-4; the OS-facing bodies
+        // (DWM measurement, AppBar calls, the TaskbarCreated
+        // broadcast) are compile-proven by the Windows CI build,
+        // not executable here — see the receipt's honesty note.
+        auto readApp3 = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        auto countOf = [](const std::string& hay, const std::string& needle) {
+            int n = 0; std::string::size_type p = 0;
+            while ((p = hay.find(needle, p)) != std::string::npos) { ++n; p += needle.size(); }
+            return n;
+        };
+        const std::string mcA  = readApp3("app/Source/MainComponent.cpp");
+        const std::string mhA  = readApp3("app/Source/MainComponent.h");
+        const std::string ssA  = readApp3("app/Source/ScreenSpace.cpp");
+        const std::string cmA  = readApp3("CMakeLists.txt");
+        if (mcA.empty() || mhA.empty() || ssA.empty() || cmA.empty()) {
+            std::printf("v0.28.10 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            // fix 1: doTopBottom measures the live insets and places
+            // through the window-space dock rect
+            CHECK(mcA.find("meterbar::dockedBarWindowRect") != std::string::npos);
+            CHECK(mcA.find("meterbar::frameInsetsOf") != std::string::npos);
+            // fix 2: the post-show hook exists and syncs
+            CHECK(mhA.find("void visibilityChanged() override;") != std::string::npos);
+            CHECK(mcA.find("void MainComponent::visibilityChanged()") != std::string::npos);
+            CHECK(mcA.find("if (isVisible()) syncScreenSpace();") != std::string::npos);
+            // fix 3: the visible-rect feed now reaches every rect
+            // consumer — the three gap-judging sites (syncScreenSpace,
+            // doArrangeWindows, captionAnchorEdge) plus doTopBottom's
+            // fix-1 inset measurement
+            CHECK(countOf(mcA, "screenSpace.windowVisibleRect") == 4);
+            // fix 4: TaskbarCreated re-register in ScreenSpace
+            CHECK(ssA.find("RegisterWindowMessageW(L\"TaskbarCreated\")") != std::string::npos);
+            CHECK(ssA.find("reregisterAfterShellRestart") != std::string::npos);
+            // the version source of truth moved
+            CHECK(cmA.find("project(MeterBar VERSION 0.28.10") != std::string::npos);
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

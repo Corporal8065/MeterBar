@@ -99,12 +99,46 @@ void setAppBarPosIfChanged() {
     g_appBar.applied = abd.rc;
 }
 
+// v0.28.10 (DIAGNOSIS candidate 4): an Explorer restart destroys
+// every AppBar registration — but nothing told this file, so
+// g_appBar.registered stayed true and reserveEdge's idempotence
+// check answered "already exactly this bar" forever: the
+// reservation could never come back until the bar's rect or edge
+// changed. Windows broadcasts the registered "TaskbarCreated"
+// message to every top-level window when the shell (re)creates the
+// taskbar; the subclass below already hears every message for the
+// bar's window, so it is the natural ear. The repair deliberately
+// does NOT go through reserveEdge (the veto) and does NOT ABM_REMOVE
+// first (the shell has already forgotten us — there is nothing to
+// remove): forget locally, then register fresh at the same edge and
+// requested rect. applied is zeroed so setAppBarPosIfChanged really
+// places the bar (same first-position ordering as reserveEdge).
+// If ABM_NEW is refused, registered stays false — honest state, and
+// the next reserveEdge call (the machine's next transition) then
+// re-registers through the normal path instead of being vetoed.
+void reregisterAfterShellRestart() {
+    if (!g_appBar.registered || !g_appBar.hwnd) return;
+    const HWND hwnd = g_appBar.hwnd;
+    g_appBar.registered = false;
+    g_appBar.applied = RECT{};
+    APPBARDATA abd{}; abd.cbSize = sizeof abd; abd.hWnd = hwnd;
+    abd.uCallbackMessage = g_appBar.callbackMsg;
+    if (!SHAppBarMessage(ABM_NEW, &abd)) return;
+    g_appBar.registered = true; // live BEFORE the first SETPOS, as in reserveEdge
+    setAppBarPosIfChanged();
+}
+
 // ABN_POSCHANGED: another bar (or the taskbar) changed the available
 // space — the documented response is to re-ask; we re-SET only when the
 // answer actually moved us (see setAppBarPosIfChanged above).
 LRESULT CALLBACK appBarSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                     UINT_PTR subclassId, DWORD_PTR refData) {
     (void)subclassId; (void)refData;
+    // v0.28.10: the shell came back (Explorer restart) — re-register
+    // the reservation the shell just destroyed (see above).
+    static const UINT taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+    if (taskbarCreatedMsg != 0 && msg == taskbarCreatedMsg)
+        reregisterAfterShellRestart();
     if (msg == g_appBar.callbackMsg && wp == ABN_POSCHANGED && g_appBar.registered)
         setAppBarPosIfChanged();
     return DefSubclassProc(hwnd, msg, wp, lp);

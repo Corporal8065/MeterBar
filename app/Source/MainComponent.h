@@ -178,6 +178,7 @@ public:
     ~MainComponent() override;
     void paint(juce::Graphics&) override;
     void resized() override;
+    void visibilityChanged() override; // v0.28.10: post-show hook — the first syncScreenSpace with a live peer (the constructor's sync runs pre-parent and is a no-op)
     void notifyWindowGeometryChanged(); // v0.18.1: MainWindow forwards moved()/resized() here — the event feed for the reserve machine
     void requestClose(); // v0.28.8: the close gate — every quit path routes here; prompts ONLY when the state changed since open (SessionBar parity)
     void mouseDown(const juce::MouseEvent&) override;
