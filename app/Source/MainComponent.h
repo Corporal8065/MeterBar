@@ -209,7 +209,7 @@ private:
     void promptForPresetNameAsync(std::function<void(bool)> done); // v0.28.8: name prompt for performSave (cancel/empty name -> done(false), nothing written)
     void syncWindowRectToState(); // v0.28.8: stamp the top level's live rect into state.windowX/Y/W/H, the docked-caption strip height normalised back out
     void loadPresetFile(const juce::File&);
-    void doTopBottom(bool top); void doStick(); void doMoveToDisplay(int idx);
+    void doTopBottom(bool top); void doStick(); void setStick(bool on); void doMoveToDisplay(int idx); // v0.28.9: setStick = the merged Stick=Reserve action (menu + Settings both land here)
     void toggleRecord(); void exportClip(double seconds);
     void setDeviceByName(bool input, const juce::String& name);
     void adjustFlex(int leftFlexIdx, int rightFlexIdx, int dxPx); // v0.15 splitter drag

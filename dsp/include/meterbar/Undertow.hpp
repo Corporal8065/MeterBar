@@ -361,11 +361,21 @@ struct UndertowSwarmDot {
     float x = 0, y = 0, vx = 0, vy = 0, age = 0, life = 1, size = 2, alpha = 0;
     UndertowTrail trail; float trailTimer = 0;
 };
+// v0.28.9: per-orb effect variation (Jackson: "different effects on
+// each orb"). Drift = the historical tangential drift only. Pulse =
+// drift + a per-orb sinusoidal breathe on radius and alpha (rate and
+// phase are the orb's own). Halo = drift + a soft wide glow disc the
+// renderer draws under the orb (the bloom pass softens it further).
+enum class UndertowOrbEffect { Drift = 0, Pulse = 1, Halo = 2 };
 struct UndertowOrb {
     float x = 0.5f, y = 0.5f, vx = 0, vy = 0;
     float baseRadius = 20;   // px at the canonical 270 px layer height (diameter 28–70 px per DESIGN §(a))
     float slice = 0;         // this orb's sub-range of the low band, 0..1
     float radius = 0, alpha = 0;
+    VizRgb colour{ 0x33, 0x50, 0x7A }; // v0.28.9: this orb's own palette colour (was: every orb in bandColour(1))
+    UndertowOrbEffect effect = UndertowOrbEffect::Drift; // v0.28.9
+    float phase = 0;         // v0.28.9: pulse phase (radians, the orb's own)
+    float pulseRate = 1;     // v0.28.9: pulse rate (radians/sec, the orb's own)
     UndertowTrail trail; float trailTimer = 0;
 };
 struct UndertowTick {
@@ -383,7 +393,7 @@ struct UndertowRing {
 class UndertowModel {
 public:
     static constexpr int kSwarmCap = 240;
-    static constexpr int kOrbCount = 12;
+    static constexpr int kOrbCount = 30; // v0.28.9: 12 -> 30 (Jackson: "not very many orbs" on screen)
     static constexpr int kTickCap = 32;
     static constexpr int kRingCap = 6;
     static constexpr int kDustCap = 60;
@@ -398,8 +408,34 @@ public:
             o.x = 0.5f + 0.30f * std::cos(ang); o.y = 0.5f + 0.26f * std::sin(ang);
             o.baseRadius = 14.f + next01() * 21.f; // radius 14–35 px -> diameter 28–70 px
             o.slice = ((float)i + 0.5f) / (float)kOrbCount;
+            // v0.28.9: the orb's own colour and effect, fixed at seed
+            // (deterministic — the same bar every launch).
+            o.colour = orbPalette(i);
+            o.effect = (UndertowOrbEffect)(i % 3);
+            o.phase = next01() * 6.2831853f;
+            o.pulseRate = 1.2f + next01() * 2.2f; // ~0.2–0.55 Hz breathe
             o.trail.reset(o.x, o.y);
         }
+    }
+
+    // v0.28.9: the orb palette — deep-water colours around the
+    // Midnight Kits family (slate/indigo/teal/cyan/violet/rose/
+    // amber/fern). Orbs take palette[i % kOrbPaletteSize]; band
+    // identity still rides bandColour() — the palette is decoration
+    // Jackson asked for ("different colored orbs"), not coding.
+    static constexpr int kOrbPaletteSize = 8;
+    static VizRgb orbPalette(int i) {
+        static constexpr VizRgb kPal[kOrbPaletteSize] = {
+            VizRgb{ 0x33, 0x50, 0x7A }, // slate blue (the historical orb colour)
+            VizRgb{ 0x4A, 0x5F, 0xD9 }, // indigo
+            VizRgb{ 0x2E, 0x8C, 0x9E }, // teal
+            VizRgb{ 0x9F, 0xD8, 0xE8 }, // pale cyan
+            VizRgb{ 0x7C, 0x6B, 0xD9 }, // violet
+            VizRgb{ 0xC6, 0x5D, 0x8F }, // rose
+            VizRgb{ 0xD9, 0xA4, 0x41 }, // amber
+            VizRgb{ 0x4F, 0xB2, 0x86 }, // fern green
+        };
+        return kPal[((i % kOrbPaletteSize) + kOrbPaletteSize) % kOrbPaletteSize];
     }
 
     // --- grading hooks (DESIGN build notes): one committed table,
@@ -415,8 +451,14 @@ public:
     // dots are not killed — spawning simply stops until they age out.
     void setSwarmCap(int cap) { swarmCap_ = cap < 0 ? 0 : cap > kSwarmCap ? kSwarmCap : cap; }
     void setDustCap(int cap) { dustCap_ = cap < 0 ? 0 : cap > kDustCap ? kDustCap : cap; }
+    // v0.28.9: orb cap, same pattern — Full == kOrbCount; Low-End
+    // halves it (Performance.hpp). Orbs past the cap are parked
+    // (alpha 0, no motion, renderer skips them), never respawned.
+    void setOrbCap(int cap) { orbCap_ = cap < 0 ? 0 : cap > kOrbCount ? kOrbCount : cap; }
     int swarmCap() const { return swarmCap_; }
     int dustCap() const { return dustCap_; }
+    int orbCap() const { return orbCap_; }
+    int activeOrbCount() const { return orbCap_ < kOrbCount ? orbCap_ : kOrbCount; }
 
     void setSafeRects(const std::vector<UndertowSafeRect>& r) { safe_ = r; }
     void setKickTau(float tauSec) { pulseTau_[0] = tauSec < 0.040f ? 0.040f : tauSec > 0.120f ? 0.120f : tauSec; }
@@ -581,7 +623,7 @@ public:
         int n = dustCount_;
         for (auto& p : swarm_) if (p.alive) ++n;
         for (auto& t : ticks_) if (t.alive) ++n;
-        return n + kOrbCount;
+        return n + activeOrbCount();
     }
     double time() const { return time_; }
 
@@ -725,10 +767,16 @@ private:
         for (auto& r : rings_) if (r.active) { r.age += dt; if (r.age >= 0.280f) r.active = false; }
         // --- low orbs: drift AGAINST the swarm's swirl so the
         // layers read as separate (DESIGN §(a)); pulse from the low
-        // band's own transient envelope, radius from its level. ---
+        // band's own transient envelope, radius from its level.
+        // v0.28.9: 30 orbs (was 12), each with its own palette colour
+        // and effect (see UndertowOrbEffect); orbs past the runtime
+        // orb cap (Low-End mode) park at alpha 0. ---
         {
             const float speed = (still_ ? 0.003f : 0.02f + 0.10f * levelEnv_[1]);
-            for (auto& o : orbs_) {
+            const int orbN = activeOrbCount();
+            for (int oi = 0; oi < kOrbCount; ++oi) {
+                auto& o = orbs_[(size_t)oi];
+                if (oi >= orbN) { o.alpha = 0; o.radius = 0; continue; } // parked by the cap
                 const float dx = 0.5f - o.x, dy = 0.5f - o.y;
                 const float dist = std::sqrt(dx * dx + dy * dy) + 1e-5f;
                 // tangential (negative = against the swarm) + weak inward pull
@@ -744,6 +792,15 @@ private:
                 float a = 0.10f + 0.18f * std::max(levelEnv_[1], bandPulse_[1] * 0.85f);
                 if (still_) a = std::min(a, 0.10f); // Still: orbs fade to ≤0.10
                 o.alpha = a * preArmGlow_[1];
+                // v0.28.9 per-orb effect: Pulse orbs breathe on their
+                // own rate/phase — radius ±30%, alpha ±40% around the
+                // level-driven values above (a modulation, never a
+                // second envelope on the signal path).
+                if (o.effect == UndertowOrbEffect::Pulse) {
+                    const float s = std::sin((float)time_ * o.pulseRate + o.phase);
+                    o.radius *= 1.f + 0.30f * s;
+                    o.alpha *= 1.f + 0.40f * s;
+                }
                 o.trailTimer += dt;
                 if (o.trailTimer >= 0.018f) { o.trailTimer = 0; o.trail.push(o.x, o.y); }
                 o.trail.advance(dt);
@@ -756,7 +813,7 @@ private:
         // inhales, then relaxes in the gap (DESIGN §(a)). ---
         {
             int target = (int)std::lround(220.f * densityDrive_ * habitScale_);
-            const int others = kOrbCount + dustCount_ + countTicks();
+            const int others = activeOrbCount() + dustCount_ + countTicks();
             if (target > kDotTarget - others) target = std::max(0, kDotTarget - others);
             if (target > swarmCap_) target = swarmCap_; // v0.28.2: runtime cap (default == kSwarmCap)
             int alive = 0; for (auto& p : swarm_) if (p.alive) ++alive;
@@ -951,6 +1008,7 @@ private:
     int dustCount_ = 0;
     int swarmCap_ = kSwarmCap; // v0.28.2: runtime caps (see setSwarmCap/setDustCap)
     int dustCap_ = kDustCap;
+    int orbCap_ = kOrbCount;   // v0.28.9: runtime orb cap (see setOrbCap)
     float dustAlpha_ = 0;
     uint32_t dustEpoch_ = 0;
     std::vector<UndertowSafeRect> safe_;

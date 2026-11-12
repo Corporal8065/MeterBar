@@ -120,7 +120,7 @@ struct PresetState {
     std::array<float, 6> moduleFlex = { 1.f, 1.f, 1.f, 1.f, 1.f, 1.f };
     // Shell (§1)
     bool pinned = false, stick = false, showToolbar = true, showRepositionHint = true;
-    bool reserveScreenSpace = false; // v0.18: Windows AppBar reservation — while the bar is docked at a monitor's top edge, Windows shrinks that monitor's work area so maximised windows stop below the bar. Default OFF (Jackson's ask; it changes how OTHER windows behave, so it is strictly opt-in). The "Default" recipe does not set it.
+    bool reserveScreenSpace = false; // v0.18: Windows AppBar reservation — while the bar is docked at a monitor's top edge, Windows shrinks that monitor's work area so maximised windows stop below the bar. Default OFF (Jackson's ask; it changes how OTHER windows behave, so it is strictly opt-in). The "Default" recipe does not set it. v0.28.9: no longer a separate control — Stick drives this field (applyStickReserveMerge keeps the pair in sync on every write and load).
     int windowX = 100, windowY = 40, windowW = 1100, windowH = 170;
 };
 } // namespace meterbar

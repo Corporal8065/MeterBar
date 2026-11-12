@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <meterbar/State.hpp>
+#include <meterbar/ReserveState.hpp> // v0.28.9: applyStickReserveMerge (preset/last-state load fold)
 // JSON presets in <Documents>/MeterBar/Presets, via JUCE built-in JSON (no extra deps).
 namespace presetio {
 inline juce::File presetFolder() {
@@ -104,6 +105,7 @@ inline meterbar::PresetState fromVar(const juce::var& v, const meterbar::PresetS
     { int pm = gi("perfMode", s.performanceMode); s.performanceMode = pm < 0 ? 0 : pm > 2 ? 0 : pm; } // v0.28.2 (absent in old presets -> Full; out-of-range -> Full)
     s.pinned = gb("pinned", s.pinned); s.stick = gb("stick", s.stick);
     s.reserveScreenSpace = gb("reserveSpace", s.reserveScreenSpace); // v0.18 (absent in old presets -> default off)
+    meterbar::applyStickReserveMerge(s.stick, s.reserveScreenSpace); // v0.28.9: Stick = Reserve — a pre-merge file with either flag on loads as stuck, the pair in sync
     s.linkEnabled = gb("linkEnabled", s.linkEnabled); // v0.20.0 (k) (absent -> OFF)
     s.linkBackground = gb("linkBackground", s.linkBackground); // v0.21.3 (absent -> ON)
     s.visualizerEnabled = gb("vizEnabled", s.visualizerEnabled); // v0.20.0 (absent -> recipe default; v0.28.0 recipe: ON)

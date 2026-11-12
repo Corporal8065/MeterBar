@@ -165,6 +165,7 @@ public:
     std::function<void()> onChanged, onSourceChanged, onFpsChanged;
     std::function<juce::String()> appSourceStatus; // v0.27.0 (item 8): live per-app source state line (wired by MainComponent)
     std::function<void()> onArrange, onRestore; // v0.18: Window panel buttons (wired by MainComponent)
+    std::function<void(bool)> onStickToggled; // v0.28.9: Stick flipped here (wired by MainComponent — docks, merges, syncs; the toggle must not just write the flag)
     std::function<void()> onBgLinkToggled; // v0.21.3: "Link background" flipped (wired by MainComponent)
     SettingsContent() { setSize(760, 640); }
     // v0.19: Settings paints its OWN background in the fixed palette —
@@ -262,8 +263,8 @@ public:
             note("Click sounds only ever play in the Anime theme; switching themes silences them completely.");
         });
         panel("Window", nullptr, [&]{
-            toggle("Reserve screen space when docked at a screen edge (Windows)", st->reserveScreenSpace, [&](bool b){ st->reserveScreenSpace = b; });
-            note("Windows only: while ON and the bar is docked flush at any edge of a monitor (top, bottom, or a side), the bar registers as an App Bar on that edge — Windows shrinks that monitor's work area, so maximised windows stop at the bar instead of sliding under it. Same control as the Reposition menu's Reserve Screen Space item. Moving the bar off its edge releases the space again; dragging it to another edge moves the reservation with it.");
+            toggle("Stick — dock at the nearest edge and reserve its screen space (Windows)", st->stick, [&](bool b){ if (onStickToggled) onStickToggled(b); else { st->stick = b; st->reserveScreenSpace = b; } });
+            note("Windows only: Stick is the one dock control (v0.28.9 — the old separate Reserve Screen Space control merged into it, same as the Reposition menu's Stick item). ON docks the bar flush at its nearest edge (top or bottom) at full monitor width and registers it as an App Bar there — Windows shrinks that monitor's work area by exactly the bar's height, so maximised windows stop at the bar instead of sliding under it, and the bar cannot be dragged while stuck. OFF releases the space; the bar stays where it sits and can be dragged again.");
             buttonRow("Arrange windows clear of the bar", "Restore arranged windows");
             note("Arrange slides every other window on the bar's monitor into the space clear of the bar's docked edge — maximised windows included (they are un-maximised, fitted, and Restore puts them back maximised). Restore puts every window back where it was. The Debug window's 'Screen space' line shows the current state, including which edge is reserved. On non-Windows builds these do nothing.");
         });

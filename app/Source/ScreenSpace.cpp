@@ -135,7 +135,29 @@ bool ScreenSpace::reserveEdge(void* hwndV, meterbar::ReserveEdge edge,
         want.left == g_appBar.requested.left && want.top == g_appBar.requested.top &&
         want.right == g_appBar.requested.right && want.bottom == g_appBar.requested.bottom)
         return true; // already exactly this bar — nothing to do
-    if (g_appBar.registered) release(); // moved / resized / other monitor / edge switch: clean re-register
+    // v0.28.9 LIFECYCLE FIX (the 2026-11-04 field pattern: "reservation
+    // registers momentarily, windows comply, then everything snaps
+    // back"): a same-window, same-edge MOVE (reposition, resize,
+    // monitor slide) used to fall through to release() + ABM_NEW —
+    // a full teardown/rebuild. ABM_REMOVE restores the full work
+    // area (maximised windows jump to full size), ABM_SETPOS then
+    // shrinks it again (they jump back), and any geometry event
+    // landing between the two left the work area in the expanded
+    // state until the next event. A registered AppBar is MOVED by
+    // re-asking its position (ABM_QUERYPOS/ABM_SETPOS) with no
+    // ABM_REMOVE at all — the documented sequence — so the work
+    // area transitions directly to the new strip. Full re-register
+    // now happens only for a different window or a different edge.
+    if (g_appBar.registered && g_appBar.hwnd == hwnd && g_appBar.edge == abe) {
+        g_appBar.requested = want;
+        setAppBarPosIfChanged();
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "appbar active - %s strip %ld px reserved",
+                      edgeName(edge), (long)stripThickness(g_appBar.applied, abe));
+        impl_->status = buf;
+        return true;
+    }
+    if (g_appBar.registered) release(); // other window / edge switch: clean re-register
     APPBARDATA abd{}; abd.cbSize = sizeof abd; abd.hWnd = hwnd;
     abd.uCallbackMessage = g_appBar.callbackMsg;
     if (!SHAppBarMessage(ABM_NEW, &abd)) {
@@ -170,6 +192,17 @@ void ScreenSpace::release() {
 }
 
 bool ScreenSpace::isReserved() const { return g_appBar.registered; }
+
+bool ScreenSpace::windowVisibleRect(void* hwndV, meterbar::IntRect& out) const {
+    HWND hwnd = static_cast<HWND>(hwndV);
+    if (!hwnd) return false;
+    RECT fr{};
+    if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &fr, sizeof fr)))
+        return false;
+    if (fr.right <= fr.left || fr.bottom <= fr.top) return false;
+    out = meterbar::IntRect{ fr.left, fr.top, fr.right - fr.left, fr.bottom - fr.top };
+    return true;
+}
 
 // ---- Arrange sweep ------------------------------------------------------
 namespace {
@@ -297,6 +330,7 @@ struct ScreenSpace::Impl {
 bool ScreenSpace::reserveEdge(void*, meterbar::ReserveEdge, int, int, int, int) { return false; }
 void ScreenSpace::release() {}
 bool ScreenSpace::isReserved() const { return false; }
+bool ScreenSpace::windowVisibleRect(void*, meterbar::IntRect&) const { return false; }
 int ScreenSpace::arrange(void*, meterbar::ReserveEdge, int) { return 0; }
 int ScreenSpace::restore() { return 0; }
 std::string ScreenSpace::statusInfo() const { return impl_->status; }

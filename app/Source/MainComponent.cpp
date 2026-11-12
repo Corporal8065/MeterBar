@@ -350,6 +350,7 @@ MainComponent::MainComponent() {
     settingsWin->content.onBgLinkToggled = [this]{ linkClient_.notifyBgLinkChanged(); }; // v0.21.3
     settingsWin->content.onArrange = [this]{ doArrangeWindows(); };   // v0.18: Settings > Window buttons
     settingsWin->content.onRestore = [this]{ doRestoreWindows(); };   // v0.18
+    settingsWin->content.onStickToggled = [this](bool b){ setStick(b); }; // v0.28.9: Settings' Stick lands in the same merged action as the menu's
     settingsWin->content.build();
     debugWin = std::make_unique<HideOnCloseWindow>("MeterBar Debug", juce::Colour(0xff231f31), juce::DocumentWindow::closeButton); // v0.28.2: X hides the window (stock DocumentWindow's X did nothing)
     debugLabel.setFont(12.5f); // v0.13: endpoint IDs are long — smaller font + wider window keeps them on one line
@@ -587,6 +588,13 @@ void MainComponent::applyFps() { int fps = perfLimits().fpsCap; startTimerHz(fps
 // edge to another (release the old edge, register the new, once each).
 // The rect registered is the machine's full edge strip
 // (requestedRect), not the bar's own rect.
+//
+// v0.28.9 STICK = RESERVE (Jackson's dock-merge ruling): the toggle
+// this machine is fed (engine.state.reserveScreenSpace) is now driven
+// by the Stick control — doStick() keeps the two state fields merged
+// (meterbar::applyStickReserveMerge) and docks the bar first, so this
+// function sees the same single flag it always did. The observation
+// rect is the bar's VISIBLE rect (see below).
 void MainComponent::syncScreenSpace() {
 #if JUCE_WINDOWS
     auto* w = findParentComponentOfClass<juce::DocumentWindow>();
@@ -595,7 +603,15 @@ void MainComponent::syncScreenSpace() {
         RECT wr{}; GetWindowRect(hwnd, &wr);
         HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{}; mi.cbSize = sizeof mi; GetMonitorInfoW(mon, &mi);
-        const meterbar::IntRect rect{ wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top };
+        // v0.28.9: the machine judges the bar's VISIBLE rect (DWM
+        // extended frame bounds), not the raw window rect — the
+        // window rect includes the invisible resize border, which
+        // ate the machine's 2 px dock band whole (the reservation
+        // only engaged at one very specific dragged spot) and padded
+        // the reserved strip thicker than the visible bar. Fallback
+        // to the window rect if the DWM query ever refuses.
+        meterbar::IntRect rect{ wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top };
+        { meterbar::IntRect vis; if (screenSpace.windowVisibleRect(hwnd, vis)) rect = vis; }
         const meterbar::IntRect monRect{ mi.rcMonitor.left, mi.rcMonitor.top,
                                          mi.rcMonitor.right - mi.rcMonitor.left,
                                          mi.rcMonitor.bottom - mi.rcMonitor.top };
@@ -635,8 +651,8 @@ void MainComponent::syncScreenSpace() {
 #endif
     // The toolbar Link toggle mirrors state whichever surface
     // changed it. (Reserve's old toolbar mirror went with its
-    // button in v0.21.2 — the Reposition menu reads
-    // engine.state.reserveScreenSpace fresh each time it opens.)
+    // button in v0.21.2; since v0.28.9 the Reposition menu's Stick
+    // item reads the merged stick state fresh each time it opens.)
     if (linkBtn.getToggleState() != engine.state.linkEnabled)
         linkBtn.setToggleState(engine.state.linkEnabled, juce::dontSendNotification);
 }
@@ -657,7 +673,10 @@ void MainComponent::doArrangeWindows() {
         RECT wr{}; GetWindowRect(hwnd, &wr);
         HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{}; mi.cbSize = sizeof mi; GetMonitorInfoW(mon, &mi);
-        const meterbar::IntRect rect{ wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top };
+        // v0.28.9: visible rect, same as syncScreenSpace (strip is
+        // measured to the visible bar's far edge, not the frame's).
+        meterbar::IntRect rect{ wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top };
+        { meterbar::IntRect vis; if (screenSpace.windowVisibleRect(hwnd, vis)) rect = vis; }
         const meterbar::IntRect monRect{ mi.rcMonitor.left, mi.rcMonitor.top,
                                          mi.rcMonitor.right - mi.rcMonitor.left,
                                          mi.rcMonitor.bottom - mi.rcMonitor.top };
@@ -668,10 +687,10 @@ void MainComponent::doArrangeWindows() {
         const meterbar::ReserveEdge edge = meterbar::ReserveMachine::nearestEdge(gaps, rect);
         int strip = 0;
         switch (edge) {
-            case meterbar::ReserveEdge::Top:    strip = wr.bottom - mi.rcMonitor.top; break;
-            case meterbar::ReserveEdge::Bottom: strip = mi.rcMonitor.bottom - wr.top; break;
-            case meterbar::ReserveEdge::Left:   strip = wr.right - mi.rcMonitor.left; break;
-            case meterbar::ReserveEdge::Right:  strip = mi.rcMonitor.right - wr.left; break;
+            case meterbar::ReserveEdge::Top:    strip = rect.bottom() - monRect.y; break;
+            case meterbar::ReserveEdge::Bottom: strip = monRect.bottom() - rect.y; break;
+            case meterbar::ReserveEdge::Left:   strip = rect.right() - monRect.x; break;
+            case meterbar::ReserveEdge::Right:  strip = monRect.right() - rect.x; break;
         }
         screenSpace.arrange(hwnd, edge, strip);
         return;
@@ -848,6 +867,11 @@ void MainComponent::mouseDown(const juce::MouseEvent& e) {
     // v0.12: only the LEFT button may start a window move — a right/middle
     // press on the bar previously also entered the drag path.
     if (!e.mods.isLeftButtonDown()) return;
+    // v0.28.9: while STUCK the bar cannot be dragged (Jackson's
+    // 2026-11-03 ruling, carried into the dock merge) — Stick off
+    // first. The flag alone never enforced this before: Stick only
+    // snapped the bar to the top and the drag stayed live.
+    if (engine.state.stick) return;
     if (engine.state.showToolbar && e.eventComponent == this && e.getPosition().y < 30) {
         if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) {
             windowDragger.startDraggingComponent(w, e);
@@ -1013,13 +1037,24 @@ void MainComponent::drawUndertowLayer(juce::Graphics& ig, int iw, int ih) {
             ig.drawLine(x0, y0, x1, y1, headW * meterbar::tailWidthFactor(age));
         }
     };
-    // ---- low orbs: slate discs drifting against the swarm ----
+    // ---- low orbs: discs drifting against the swarm ----
+    // v0.28.9: each orb wears its OWN palette colour (was: all 12 in
+    // the one slate); Halo-effect orbs get a wide soft under-disc
+    // (the bloom pass blurs it into a glow); orbs parked by the
+    // Low-End orb cap (alpha 0) are skipped entirely.
     for (auto& o : undertow_.orbs()) {
+        if (o.alpha <= 0.001f || o.radius <= 0.f) continue;
         float px, py;
         meterbar::fieldToLocal(fm, o.x, o.y, px, py);
         const float r = o.radius * sc;
-        drawTrail(o.trail, col(meterbar::UndertowModel::bandColour(1)), r * 2.f, o.alpha * gain);
-        ig.setColour(col(meterbar::UndertowModel::bandColour(1)).withAlpha(o.alpha * gain));
+        const auto oc = col(o.colour);
+        drawTrail(o.trail, oc, r * 2.f, o.alpha * gain);
+        if (o.effect == meterbar::UndertowOrbEffect::Halo) {
+            const float hr = r * 2.3f;
+            ig.setColour(oc.withAlpha(o.alpha * 0.22f * gain));
+            ig.fillEllipse(px - hr, py - hr, hr * 2.f, hr * 2.f);
+        }
+        ig.setColour(oc.withAlpha(o.alpha * gain));
         ig.fillEllipse(px - r, py - r, r * 2.f, r * 2.f);
     }
     // ---- mid swarm: warm-white inward swirl, the hero ----
@@ -1735,7 +1770,7 @@ void MainComponent::prepareFrame() {
                 addSafe({ b.getX(), b.getBottom() - 13, b.getWidth(), 13 });
             }
             undertow_.setSafeRects(safeU);
-            { auto pl = perfLimits(); undertow_.setSwarmCap(pl.swarmCap); undertow_.setDustCap(pl.dustCap); } // v0.28.2: Performance Mode caps (Full values == the model's own constants)
+            { auto pl = perfLimits(); undertow_.setSwarmCap(pl.swarmCap); undertow_.setDustCap(pl.dustCap); undertow_.setOrbCap(pl.orbCap); } // v0.28.2: Performance Mode caps (Full values == the model's own constants); v0.28.9: orb cap rides along
             undertow_.preArmEnabled = st.undertowPreArm;
             undertow_.setKickTau(st.undertowKickTauMs / 1000.f);
             meterbar::UndertowBeatFeed bf; engine.undertowBeatFeed(bf);
@@ -1908,23 +1943,62 @@ void MainComponent::doTopBottom(bool top) {
     // v0.28.2 ADDENDUM (Jackson, 2026-11-03: Reposition must stretch
     // to the full width of THE SCREEN THE BAR IS ON): resolve the
     // display from the window's current rect, not always the primary
-    // display. Full-width + userArea semantics are otherwise the
-    // historical behaviour here. Primary remains the fallback if the
-    // current rect resolves to no display.
+    // display. Primary remains the fallback if the current rect
+    // resolves to no display.
+    // v0.28.9 (Jackson's dock-merge ruling): the target is the
+    // display's TOTAL area, not its user area — flush to the edge,
+    // x = monitor left, width = the monitor's full width, height
+    // unchanged (core: meterbar::dockedBarRect). User-area semantics
+    // subtracted the taskbar and any live AppBar reservation, so a
+    // reposition with the reservation up landed the bar below its
+    // own reserved strip and short of the screen's edges.
     auto* w = findParentComponentOfClass<juce::DocumentWindow>();
     const auto curRect = w ? w->getBounds() : getScreenBounds();
     auto& displays = juce::Desktop::getInstance().getDisplays();
     auto disp = displays.getDisplayForRect(curRect);
     if (!disp) disp = displays.getPrimaryDisplay();
-    if (!disp) return; auto ua = disp->userArea;
+    if (!disp) return; auto ta = disp->totalArea;
+    const auto target = meterbar::dockedBarRect(
+        { curRect.getX(), curRect.getY(), curRect.getWidth(), getHeight() },
+        { ta.getX(), ta.getY(), ta.getWidth(), ta.getHeight() }, top);
     if (w) {
-        w->setBounds(ua.getX(), top ? ua.getY() : ua.getBottom() - getHeight(), ua.getWidth(), getHeight());
+        w->setBounds(target.x, target.y, target.w, target.h);
     }
     syncScreenSpace(); // v0.18: docking to the top is what arms the reservation (v0.18.1: the window's moved/resized events feed it too)
 }
-void MainComponent::doStick() {
-    engine.state.stick = !engine.state.stick;
-    if (engine.state.stick) doTopBottom(true);
+void MainComponent::doStick() { setStick(!engine.state.stick); }
+void MainComponent::setStick(bool on) {
+    // v0.28.9 STICK = RESERVE (Jackson's dock-merge ruling): the one
+    // control. ON: dock flush + full width at the bar's nearest
+    // edge (top or bottom) and register the AppBar reservation for
+    // exactly the bar's height there — the two state fields are kept
+    // merged (applyStickReserveMerge) so presets, the last-state
+    // record and the reserve machine all read the one decision. OFF:
+    // reservation released (syncScreenSpace's Release path also
+    // restores arranged windows, as the old Reserve toggle-off did);
+    // the bar stays where it sits, free to drag again.
+    engine.state.stick = on;
+    meterbar::applyStickReserveMerge(engine.state.stick, engine.state.reserveScreenSpace);
+    if (engine.state.stick) {
+        auto* w = findParentComponentOfClass<juce::DocumentWindow>();
+        const auto curRect = w ? w->getBounds() : getScreenBounds();
+        auto& displays = juce::Desktop::getInstance().getDisplays();
+        auto disp = displays.getDisplayForRect(curRect);
+        if (!disp) disp = displays.getPrimaryDisplay();
+        // Nearest horizontal edge of the bar's own monitor wins; a
+        // bar exactly mid-screen sticks to the top (its historical
+        // home). If no display resolves, doTopBottom's own fallback
+        // chain handles the top.
+        bool toTop = true;
+        if (disp) {
+            const int gapTop = curRect.getY() - disp->totalArea.getY();
+            const int gapBottom = disp->totalArea.getBottom() - curRect.getBottom();
+            toTop = gapTop <= gapBottom;
+        }
+        doTopBottom(toTop); // docks + syncs the reservation in
+    } else {
+        syncScreenSpace(); // toggle-off: the machine releases
+    }
 }
 void MainComponent::doMoveToDisplay(int idx) {
     auto disp = juce::Desktop::getInstance().getDisplays().displays[idx];
@@ -1942,7 +2016,8 @@ juce::PopupMenu MainComponent::buildRepositionSubMenu() {
     juce::PopupMenu m; auto& st = engine.state;
     m.addItem(idTop, "At the Top"); m.addItem(idBottom, "At the Bottom");
     m.addItem(idStick, "Stick", true, st.stick); m.addItem(idPin, "Pin Above Other Windows", true, st.pinned);
-    m.addItem(idReserve, "Reserve Screen Space", true, st.reserveScreenSpace); // v0.21.2: the old Reserve button, same state + sync path
+    // v0.28.9: the separate "Reserve Screen Space" item is GONE —
+    // Stick IS the reservation now (Jackson's dock-merge ruling).
     juce::PopupMenu disp; auto displays = juce::Desktop::getInstance().getDisplays().displays;
     for (int i = 0; i < displays.size(); ++i) disp.addItem(idDisplayBase + i, "Display " + juce::String(i + 1));
     m.addSubMenu("Move to Display", disp);
@@ -2175,7 +2250,7 @@ void MainComponent::showHamburgerMenu() {
         else if (r >= idLoadBase && r < idLoadBase + (int)presetFiles.size()) loadPresetFile(presetFiles[(size_t)(r - idLoadBase)]);
         else if (r == idArrange) doArrangeWindows();
         else if (r == idRestore) doRestoreWindows();
-        else if (r == idTop || r == idBottom || r == idStick || r == idPin || r == idReserve
+        else if (r == idTop || r == idBottom || r == idStick || r == idPin
                  || (r >= idDisplayBase && r < idDisplayBase + numDisplays)) {
             // Reposition actions defer until the popup has fully
             // closed — the old dropdown's discipline (see
@@ -2185,7 +2260,6 @@ void MainComponent::showHamburgerMenu() {
                 else if (r == idStick) doStick();
                 else if (r == idPin) { engine.state.pinned = !engine.state.pinned;
                     if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setAlwaysOnTop(engine.state.pinned); }
-                else if (r == idReserve) { engine.state.reserveScreenSpace = !engine.state.reserveScreenSpace; syncScreenSpace(); }
                 else if (r >= idDisplayBase) doMoveToDisplay(r - idDisplayBase);
             });
         }

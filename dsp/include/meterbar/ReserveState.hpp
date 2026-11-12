@@ -54,6 +54,21 @@ enum class ReserveAction { None, Register, Update, Release, Switch };
 // absolute values).
 struct EdgeGaps { int top = 0, bottom = 0, left = 0, right = 0; };
 
+// STICK = RESERVE MERGE (v0.28.9, Jackson's 2026-11-11 ruling): the
+// separate Reserve Screen Space control is gone — the Stick toggle
+// IS the reservation. One flag drives both fields from here on:
+// stick on = docked + reserved, stick off = free + released. State
+// and preset files carry both booleans (they did since v0.18), so
+// every load path folds them through this merge: a file saved by an
+// older build with EITHER flag on loads as stuck (the user had
+// asked for the reservation, or for the dock — the merged control
+// is the union), and the pair is written back in sync. Pure and
+// idempotent: merging an already-merged pair changes nothing.
+inline void applyStickReserveMerge(bool& stick, bool& reserveScreenSpace) {
+    stick = stick || reserveScreenSpace;
+    reserveScreenSpace = stick;
+}
+
 class ReserveMachine {
 public:
     static constexpr int kDockGapPx = 2;   // gap at/below which a non-reserved bar docks

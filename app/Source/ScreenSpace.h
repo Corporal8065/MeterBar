@@ -45,6 +45,16 @@ public:
                      int physX, int physY, int physW, int physH);
     void release(); // ABM_REMOVE; safe to call at any time
     bool isReserved() const;
+    // v0.28.9: the window's VISIBLE rect in physical pixels —
+    // DWMWA_EXTENDED_FRAME_BOUNDS, which excludes the invisible
+    // resize border Windows adds around a resizable window's
+    // GetWindowRect. Dock gaps and strip geometry judged on the raw
+    // window rect are off by that border (~7 px a side): the bar had
+    // to be dragged to one very specific spot before the visible bar
+    // read as "docked", and the reserved strip came out thicker
+    // than the visible bar. False = unavailable (non-Windows or the
+    // DWM query failed); the caller falls back to GetWindowRect.
+    bool windowVisibleRect(void* hwnd, meterbar::IntRect& out) const;
     struct SavedWindow { void* hwnd; meterbar::IntRect rect; bool wasMaximized = false; }; // wasMaximized: v0.21.4 — Restore re-maximizes it
     // Fit every other top-level window on hwnd's monitor into the area
     // clear of a strip of stripPhysPx pixels along `edge` of that

@@ -30,6 +30,7 @@ namespace meterbar {
 // the numbers live here and are checked there in the tests).
 inline constexpr int kPerfFullSwarmCap = 240;
 inline constexpr int kPerfFullDustCap = 60;
+inline constexpr int kPerfFullOrbCap = 30; // v0.28.9: == UndertowModel::kOrbCount (suite-pinned)
 
 struct EffectiveLimits {
     int fpsCap;            // effective UI timer rate (Hz)
@@ -39,6 +40,7 @@ struct EffectiveLimits {
     int scopePitchEvery;   // run the scope pitch estimate at most every Nth frame
     int swarmCap;          // Undertow swarm live-dot cap
     int dustCap;           // Undertow presence-dust cap
+    int orbCap;            // v0.28.9: Undertow low-orb live cap
     float sgScale;         // v0.28.6: spectrogram cache resolution scale (the bilinear render makes a reduced cache read smooth, not blocky)
     bool lowActive;        // true when the Low-End limits are in force
 };
@@ -59,6 +61,7 @@ inline EffectiveLimits effectiveLimits(bool lowActive, int userFps,
         e.scopePitchEvery = 1;
         e.swarmCap = kPerfFullSwarmCap;
         e.dustCap = kPerfFullDustCap;
+        e.orbCap = kPerfFullOrbCap;
         e.sgScale = 1.0f;                  // full-res spectrogram cache
     } else {
         e.fpsCap = uf < 30 ? uf : 30;       // cap at 30, never raise a lower user limit
@@ -68,6 +71,7 @@ inline EffectiveLimits effectiveLimits(bool lowActive, int userFps,
         e.scopePitchEvery = 3;
         e.swarmCap = kPerfFullSwarmCap / 2; // 120
         e.dustCap = kPerfFullDustCap / 2;   // 30
+        e.orbCap = kPerfFullOrbCap / 2;     // 15 (v0.28.9: orbs halve with the other caps)
         e.sgScale = 0.5f;                  // half-res spectrogram cache (quarter the pixels); the v0.28.6 bilinear sample + blit keep it smooth
     }
     return e;

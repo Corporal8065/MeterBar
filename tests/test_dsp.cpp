@@ -3226,6 +3226,136 @@ int main() {
         }
     }
 
+    // ---------- v0.28.9: dock merge (Reposition geometry, Stick =
+    // Reserve, Undertow orbs) ----------
+    {
+        // dockedBarRect: flush + full width on the bar's OWN monitor,
+        // height unchanged (Jackson's 2026-11-11 ruling).
+        const IntRect monP{ 0, 0, 1920, 1080 };
+        CHECK(dockedBarRect({ 300, 400, 800, 120 }, monP, true)  == (IntRect{ 0, 0, 1920, 120 }));
+        CHECK(dockedBarRect({ 300, 400, 800, 120 }, monP, false) == (IntRect{ 0, 960, 1920, 120 }));
+        // non-primary display: x/width follow THAT monitor
+        const IntRect mon2{ 1920, 0, 2560, 1440 };
+        CHECK(dockedBarRect({ 2500, 300, 900, 100 }, mon2, true)  == (IntRect{ 1920, 0, 2560, 100 }));
+        CHECK(dockedBarRect({ 2500, 300, 900, 100 }, mon2, false) == (IntRect{ 1920, 1340, 2560, 100 }));
+        // negative-origin monitor (left of primary)
+        const IntRect monL{ -1920, 0, 1920, 1080 };
+        CHECK(dockedBarRect({ -1500, 500, 700, 90 }, monL, true) == (IntRect{ -1920, 0, 1920, 90 }));
+        // degenerate inputs keep the bar as-is
+        CHECK(dockedBarRect({ 10, 10, 100, 50 }, { 0, 0, 0, 0 }, true) == (IntRect{ 10, 10, 100, 50 }));
+        CHECK(dockedBarRect({ 10, 10, 100, 0 }, monP, true) == (IntRect{ 10, 10, 100, 0 }));
+
+        // applyStickReserveMerge: either legacy flag on loads as
+        // stuck; the pair always ends in sync; idempotent.
+        { bool s = false, r = false; applyStickReserveMerge(s, r); CHECK(!s && !r); }
+        { bool s = true,  r = false; applyStickReserveMerge(s, r); CHECK(s && r); }
+        { bool s = false, r = true;  applyStickReserveMerge(s, r); CHECK(s && r); }
+        { bool s = true,  r = true;  applyStickReserveMerge(s, r); CHECK(s && r); }
+
+        // Performance: the orb cap halves in Low-End like the others.
+        CHECK(kPerfFullOrbCap == UndertowModel::kOrbCount);
+        { auto e = effectiveLimits(false, 60, true, true); CHECK(e.orbCap == 30); }
+        { auto e = effectiveLimits(true, 60, true, true);  CHECK(e.orbCap == 15); }
+
+        // Orb palette: 8 colours, wraps, first entry is the
+        // historical slate (bandColour(1)).
+        { auto c = UndertowModel::orbPalette(0); CHECK(c.r == 0x33 && c.g == 0x50 && c.b == 0x7A); }
+        { auto a = UndertowModel::orbPalette(0), b = UndertowModel::orbPalette(8);
+          CHECK(a.r == b.r && a.g == b.g && a.b == b.b); }
+        { int distinct = 0;
+          for (int i = 0; i < UndertowModel::kOrbPaletteSize; ++i) {
+              bool seen = false; auto c = UndertowModel::orbPalette(i);
+              for (int j = 0; j < i; ++j) { auto d = UndertowModel::orbPalette(j);
+                  if (c.r == d.r && c.g == d.g && c.b == d.b) seen = true; }
+              if (!seen) ++distinct;
+          }
+          CHECK(distinct == UndertowModel::kOrbPaletteSize); }
+
+        // Model seeding: 30 orbs, varied colours AND effects,
+        // deterministic across instances.
+        CHECK(UndertowModel::kOrbCount == 30);
+        { UndertowModel m1, m2;
+          int distinctColours = 0; bool fxSeen[3] = { false, false, false };
+          for (int i = 0; i < UndertowModel::kOrbCount; ++i) {
+              const auto& o = m1.orbs()[(size_t)i];
+              fxSeen[(int)o.effect] = true;
+              bool seen = false;
+              for (int j = 0; j < i; ++j) { const auto& p = m1.orbs()[(size_t)j];
+                  if (o.colour.r == p.colour.r && o.colour.g == p.colour.g && o.colour.b == p.colour.b) seen = true; }
+              if (!seen) ++distinctColours;
+              const auto& q = m2.orbs()[(size_t)i];
+              CHECK(o.colour.r == q.colour.r && o.effect == q.effect && o.phase == q.phase);
+          }
+          CHECK(distinctColours >= 6);
+          CHECK(fxSeen[0] && fxSeen[1] && fxSeen[2]); }
+
+        // Orb cap: parked orbs sit at alpha 0 while live orbs fade
+        // in on the low band; pulse orbs modulate radius off the
+        // plain level mapping.
+        { UndertowModel m; m.setOrbCap(5);
+          CHECK(m.orbCap() == 5 && m.activeOrbCount() == 5);
+          FiveBandLevels lv; lv.band[1] = 0.8f;
+          UndertowBeatFeed bf; UndertowOnsetFeed of;
+          for (int f = 0; f < 90; ++f) m.update(1.f / 60.f, lv, -20.f, bf, of);
+          CHECK(m.orbs()[4].alpha > 0.f);
+          CHECK(m.orbs()[5].alpha == 0.f && m.orbs()[29].alpha == 0.f);
+          bool radiusVaries = false;
+          for (int i = 1; i < 5; ++i) {
+              const float r0 = m.orbs()[0].radius / m.orbs()[0].baseRadius;
+              const float ri = m.orbs()[(size_t)i].radius / m.orbs()[(size_t)i].baseRadius;
+              if (std::fabs(r0 - ri) > 1e-4f) radiusVaries = true;
+          }
+          CHECK(radiusVaries); // per-orb slice + pulse: radii are not one uniform mapping
+        }
+        { UndertowModel m; m.setOrbCap(1000); CHECK(m.orbCap() == UndertowModel::kOrbCount); // clamps
+          m.setOrbCap(-3); CHECK(m.orbCap() == 0); }
+
+        // --- dock-merge wiring pins (app sources, same pattern as
+        // the v0.28.8 pins above; SKIP with a note when unreachable).
+        auto readApp2 = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string mc9  = readApp2("app/Source/MainComponent.cpp");
+        const std::string pio9 = readApp2("app/Source/PresetIO.h");
+        const std::string ss9  = readApp2("app/Source/ScreenSpace.cpp");
+        const std::string sh9  = readApp2("app/Source/Settings.h");
+        if (mc9.empty() || pio9.empty() || ss9.empty() || sh9.empty()) {
+            std::printf("v0.28.9 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            // Reposition: total-area geometry through the core fn
+            CHECK(mc9.find("meterbar::dockedBarRect") != std::string::npos);
+            CHECK(mc9.find("disp->totalArea") != std::string::npos);
+            // the merged control: menu item gone, one action path
+            CHECK(mc9.find("idReserve, \"Reserve Screen Space\"") == std::string::npos);
+            CHECK(mc9.find("void MainComponent::setStick(bool on)") != std::string::npos);
+            CHECK(mc9.find("applyStickReserveMerge(engine.state.stick") != std::string::npos);
+            CHECK(sh9.find("onStickToggled") != std::string::npos);
+            // presets + last-state fold legacy pairs on load
+            CHECK(pio9.find("applyStickReserveMerge(s.stick") != std::string::npos);
+            // drag lock while stuck (2026-11-03 ruling)
+            CHECK(mc9.find("if (engine.state.stick) return;") != std::string::npos);
+            // geometry judged on the visible rect, both feed sites
+            CHECK(mc9.find("screenSpace.windowVisibleRect") != std::string::npos);
+            // AppBar lifecycle: same-edge moves reposition in place
+            CHECK(ss9.find("g_appBar.requested = want;") != std::string::npos);
+            CHECK(ss9.find("bool ScreenSpace::windowVisibleRect") != std::string::npos);
+            // orbs: per-orb colour reaches the renderer, cap wired
+            CHECK(mc9.find("col(o.colour)") != std::string::npos);
+            CHECK(mc9.find("setOrbCap(pl.orbCap)") != std::string::npos);
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

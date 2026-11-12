@@ -200,6 +200,26 @@ inline IntRect captionGrownBarRect(IntRect bar, int stripH, ReserveEdge anchor) 
     return IntRect{ bar.x, bar.y - stripH, bar.w, bar.h + stripH };
 }
 
+// ------------------------------------------------------------------
+// REPOSITION DOCK RECT (v0.28.9) — Jackson's rule, restated in his
+// 2026-11-11 dock-merge ruling (and the 2026-11-03 family rule):
+// Reposition -> At the Top / At the Bottom moves the bar FLUSH to
+// that edge of the monitor it is on, sets x = the monitor's left
+// edge and width = the monitor's FULL width, and keeps the bar's
+// current height. The monitor rect here is the display's TOTAL
+// area, never its work/user area: the user area is the monitor
+// minus the taskbar and any AppBar reservations — including this
+// bar's own — so user-area math landed a stuck bar BELOW its own
+// reserved strip (Jackson's "reserve drops it lower" report) and
+// could leave the width short of the screen's edges. Pure: the app
+// resolves the display for the bar's current rect and feeds its
+// total area. A degenerate monitor or bar height returns the bar
+// unchanged (the caller keeps its own fallback chain).
+inline IntRect dockedBarRect(IntRect bar, IntRect mon, bool top) {
+    if (mon.w <= 0 || mon.h <= 0 || bar.h <= 0) return bar;
+    return IntRect{ mon.x, top ? mon.y : mon.bottom() - bar.h, mon.w, bar.h };
+}
+
 inline IntRect captionShrunkBarRect(IntRect bar, int stripH, ReserveEdge anchor) {
     if (stripH <= 0 || bar.w <= 0 || bar.h <= 0) return bar;
     const int minH = 48;
