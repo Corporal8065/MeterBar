@@ -1244,7 +1244,12 @@ int main() {
         CHECK(planStackAll(sh, now, 0, targets) == 2);
         CHECK(targets[1].w == 0);
         // audio: unpublished slot reads false; published values round-trip
-        float pkt[4] = { -1, -1, -1, -1 };
+        // (v0.28.12 CI fix: the buffer is [5] — BLK5 widened the
+        // packet to out[5] in v0.25.0 and this block kept the stale
+        // [4]; the one-float stack overwrite it caused was inert
+        // under the old frame layout and fatal under MSVC once this
+        // round's larger frames shifted it. Found by ASan.)
+        float pkt[5] = { -1, -1, -1, -1, -1 };
         CHECK(!audioPacket(m, now, pkt));
         m.audioSeq = 3; m.audioLow = 0.75f; m.audioMid = 0.5f; m.audioHigh = 0.25f; m.audioLevel = 0.6f;
         CHECK(audioPacket(m, now, pkt));
