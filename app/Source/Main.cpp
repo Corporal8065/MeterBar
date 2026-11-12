@@ -23,14 +23,24 @@ public:
         {
             // v0.20.1: never restore off-screen — clamp the saved
             // rect into a visible work area (core WindowGeom).
+            // v0.28.11: the clamp is now the FLOOR case of the core
+            // restore rule — a saved rect that is meaningfully
+            // visible (an ordinary floating position, and in
+            // particular a DOCKED rect, whose window sits one frame
+            // inset outside the monitor edge by design since
+            // v0.28.10) is restored verbatim; the full clamp still
+            // rescues genuinely lost rects. The bare clamp dragged
+            // every restored dock fully inside the user area, one
+            // inset off the edge, and the reserve machine judged
+            // that gap a no-dock forever (Jackson, 2026-11-12).
             std::vector<meterbar::IntRect> areas;
             for (auto& d : juce::Desktop::getInstance().getDisplays().displays) {
                 auto ua = d.userArea;
                 areas.push_back({ ua.getX(), ua.getY(), ua.getWidth(), ua.getHeight() });
             }
-            auto clamped = meterbar::clampRectToWorkAreas(
+            auto placed = meterbar::restoreRectToWorkAreas(
                 { mc->engine.state.windowX, mc->engine.state.windowY, mc->engine.state.windowW, mc->engine.state.windowH }, areas);
-            setBounds(clamped.x, clamped.y, clamped.w, clamped.h);
+            setBounds(placed.x, placed.y, placed.w, placed.h);
         }
         setAlwaysOnTop(mc->engine.state.pinned);
         setVisible(true);

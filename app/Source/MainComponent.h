@@ -217,6 +217,7 @@ private:
     void adjustMascotFlex(int dxPx);                              // v0.16: mascot cell splitter drag
     void uiClick(ClickSounds::Which w);                           // v0.16: Anime-gated cute click
     void syncScreenSpace();                                       // v0.18.1: feed one geometry/toggle observation to the reserve machine; act only on its transitions
+    void scheduleDeferredSync();                                  // v0.28.11: arm the one-shot settled re-sync (deadline honoured in timerCallback) — after dock actions, first show, and mid-drag geometry events
     void syncCaptionDock();                                       // v0.24.0: reconcile the bar's height with the docked-caption state (grow/shrink on transitions only) + feed the strip
     meterbar::ReserveEdge captionAnchorEdge();                    // v0.24.0: the edge dock growth anchors at (reserved edge, else nearest)
     void doArrangeWindows();                                      // v0.18: sweep other windows clear of the bar (v0.19.1: on its docked edge)
@@ -271,6 +272,7 @@ private:
     uint64_t pulseOnsetCount_ = 0; unsigned pulseSeq_ = 0; int pulseColour_ = 0; float pulseStrength_ = 0.f;
     ScreenSpace screenSpace;                                      // v0.18: AppBar + arrange service (Windows-real, stub elsewhere)
     meterbar::ReserveMachine reserveMachine;                      // v0.18.1: event-driven dock/reserve decisions (hysteresis) — replaces the v0.18 ~4x/sec timer poll
+    juce::int64 deferredSyncAtMs_ = 0;                            // v0.28.11: when the deferred re-sync is due (0 = disarmed); set by scheduleDeferredSync, honoured once in timerCallback
     juce::Label logoLabel, versionLabel, hintLabel;
     // v0.28.6: the TRIM slider on the bar itself (Jackson's ask) — a
     // second surface for the SAME PresetState::trimDb the Settings

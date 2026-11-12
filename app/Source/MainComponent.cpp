@@ -134,6 +134,12 @@ MainComponent::MainComponent() {
         engine.state.linkEnabled = linkBtn.getToggleState(); };
     linkClient_.getBounds = [this]{ return getScreenBounds(); };
     linkClient_.setBounds = [this](juce::Rectangle<int> r){
+        // v0.28.11: a STUCK bar is immovable — Jackson's drag-lock
+        // ruling (enforced for local drags at mouseDown) covers
+        // remote applies too. A linked peer's stack / drag-follow /
+        // group-dock plan must not pull a stuck bar off the edge it
+        // is reserving; unsticking hands the bar back to the group.
+        if (engine.state.stick) return;
         if (auto* tl = getTopLevelComponent()) {
             // v0.21.1: EVERY remote apply (stack / follow / snap /
             // group-dock) passes the visibility floor (core
@@ -656,7 +662,38 @@ void MainComponent::syncScreenSpace() {
     if (linkBtn.getToggleState() != engine.state.linkEnabled)
         linkBtn.setToggleState(engine.state.linkEnabled, juce::dontSendNotification);
 }
-void MainComponent::notifyWindowGeometryChanged() { syncScreenSpace(); linkClient_.notifyLocalGeometry(); }
+// v0.28.11: the deferred reserve re-sync. Arms a one-shot deadline
+// (~250 ms out) that timerCallback honours with a single
+// syncScreenSpace() — a deadline, NOT a poll: it fires at most once
+// per arming, only ever in response to a dock action, a startup
+// visibility sync, or geometry events that arrived mid-drag, and
+// the machine's transitions-only semantics make it a no-op when
+// the geometry it reads has already been acted on. It exists for
+// the two moments the immediate feed cannot be trusted to be the
+// final word: (a) right after a dock action / first show, where
+// the sync inside the action judges a compositor-paced DWM rect
+// that may still describe the pre-move window — one settled
+// re-read means a stale first read is never the last word; and
+// (b) at the end of a drag/resize, where the feeders below hold
+// their observations while the mouse is down (see
+// notifyWindowGeometryChanged) — one settled feed with the final
+// rect replaces the per-step AppBar re-registrations that made
+// maximised windows chase the drag (Jackson's "freak out",
+// 2026-11-12; the v0.18 flicker re-entered through the drag path).
+void MainComponent::scheduleDeferredSync() {
+    deferredSyncAtMs_ = juce::Time::getCurrentTime().toMilliseconds() + 250;
+}
+void MainComponent::notifyWindowGeometryChanged() {
+    // v0.28.11: coalesce the reserve feed during drags/resizes —
+    // while a mouse button is down, arm the deferred re-sync
+    // instead of feeding the machine an intermediate rect (each
+    // mid-drag Update re-registers the AppBar strip and moves the
+    // work area at drag-event rate). The link publish is NOT held:
+    // drag-follow needs the local geometry live.
+    if (juce::Component::isMouseButtonDownAnywhere()) scheduleDeferredSync();
+    else syncScreenSpace();
+    linkClient_.notifyLocalGeometry();
+}
 void MainComponent::visibilityChanged() {
     // v0.28.10 (DIAGNOSIS candidate 2): the post-show hook the
     // event-driven reserve design was missing. The constructor's
@@ -669,7 +706,10 @@ void MainComponent::visibilityChanged() {
     // guaranteed to exist: run the sync then. The machine acts on
     // transitions only, so a visibility change that alters nothing
     // costs one None.
-    if (isVisible()) syncScreenSpace();
+    if (isVisible()) {
+        syncScreenSpace();
+        scheduleDeferredSync(); // v0.28.11: one settled re-read once the compositor has presented the shown window (see scheduleDeferredSync)
+    }
 }
 // v0.18 ARRANGE: slide every other window on this bar's monitor clear
 // of the bar. The strip the sweep clears is the bar's far edge measured
@@ -807,7 +847,13 @@ void MainComponent::resized() {
     if (captionStripInHeight_)
         captionStrip_.setBounds(0, getHeight() - kCaptionStripHeight, getWidth(), kCaptionStripHeight);
     layoutModules();
-    syncScreenSpace(); // v0.18.1: a resize is a reserve-machine event (bar height / position may have changed)
+    // v0.18.1: a resize is a reserve-machine event (bar height /
+    // position may have changed). v0.28.11: mid-drag steps are
+    // coalesced into the deferred re-sync, exactly as in
+    // notifyWindowGeometryChanged — one settled feed at drag end,
+    // not an AppBar re-registration per mouse-move.
+    if (juce::Component::isMouseButtonDownAnywhere()) scheduleDeferredSync();
+    else syncScreenSpace();
 }
 // v0.24.0: which edge caption-dock growth anchors at — the edge the
 // reserve machine currently holds when the bar is reserved (growth
@@ -1471,6 +1517,14 @@ void MainComponent::timerCallback() {
     captions_.poll(); // v0.23.0: Live Captions — drain helper events, track pause/source/epoch edges, drive the overlay
     syncCaptionDock(); // v0.24.0: docked presentation — feed the strip; grow/shrink the bar on state transitions
     auto now = juce::Time::getCurrentTime().toMilliseconds();
+    // v0.28.11: honour the deferred reserve re-sync deadline (see
+    // scheduleDeferredSync). This is a one-shot settle read armed
+    // by an event, not a poll — the v0.18.1 rule below stands for
+    // everything else: no periodic screen-space work happens here.
+    if (deferredSyncAtMs_ != 0 && now >= deferredSyncAtMs_) {
+        deferredSyncAtMs_ = 0;
+        syncScreenSpace();
+    }
     // v0.18.1: NO screen-space work happens here any more. The v0.18
     // ~4x/sec timer poll of syncScreenSpace() was the flicker's engine;
     // the reservation is event-driven now (see syncScreenSpace).
@@ -1927,15 +1981,20 @@ void MainComponent::loadPresetFile(const juce::File& f) {
         // v0.20.1 (item 2 audit): presets always SAVED the window
         // position (winX/winY/winW/winH ride in PresetState) but
         // loading one never MOVED the window — Jackson's requirement
-        // is that a preset includes position. Apply it now, clamped
-        // into a visible work area (core WindowGeom).
+        // is that a preset includes position. Apply it now, through
+        // the core restore rule (v0.28.11: verbatim when the saved
+        // rect is meaningfully visible — a preset saved while
+        // docked carries the dock's inset offset and must land
+        // flush again — clamped only when genuinely lost; the bare
+        // v0.20.1 clamp un-docked every restored dock by one frame
+        // inset, same defect as the startup path in Main.cpp).
         if (auto* tl = getTopLevelComponent()) {
             std::vector<meterbar::IntRect> areas;
             for (auto& d : juce::Desktop::getInstance().getDisplays().displays) {
                 auto ua = d.userArea;
                 areas.push_back({ ua.getX(), ua.getY(), ua.getWidth(), ua.getHeight() });
             }
-            auto clamped = meterbar::clampRectToWorkAreas(
+            auto clamped = meterbar::restoreRectToWorkAreas(
                 { engine.state.windowX, engine.state.windowY, engine.state.windowW, engine.state.windowH }, areas);
             // v0.24.0: a preset's saved size is the USER's bar size —
             // while the docked strip is in the height, the applied
@@ -2018,6 +2077,7 @@ void MainComponent::doTopBottom(bool top) {
         w->setBounds(target.x, target.y, target.w, target.h);
     }
     syncScreenSpace(); // v0.18: docking to the top is what arms the reservation (v0.18.1: the window's moved/resized events feed it too)
+    scheduleDeferredSync(); // v0.28.11: one settled re-read — the sync above judges inside the SetWindowPos cascade, where the DWM visible rect can still describe the pre-move window; a stale first read must not be the final word (see scheduleDeferredSync)
 }
 void MainComponent::doStick() { setStick(!engine.state.stick); }
 void MainComponent::setStick(bool on) {

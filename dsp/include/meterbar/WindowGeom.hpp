@@ -100,6 +100,36 @@ inline IntRect ensureRectVisible(IntRect r, const std::vector<IntRect>& areas) {
 }
 
 // ------------------------------------------------------------------
+// RESTORE RECT (v0.28.11) — the startup / preset-apply placement of
+// a SAVED rect (MainWindow's constructor, MainComponent's preset
+// load). Until now both fed the saved rect straight through
+// clampRectToWorkAreas against the displays' USER areas — correct
+// for the v0.3.0 rescue it was built for (a rect saved against a
+// monitor that is gone, or dragged mostly off-screen, must come
+// back reachable), but wrong for a rect that is exactly where the
+// user left it. The case that broke in the field (Jackson,
+// 2026-11-12, on v0.28.10): a bar docked by the app's own dock
+// action saves its WINDOW rect, whose edge-adjacent side sits one
+// frame inset OUTSIDE the monitor (that offset is the whole
+// v0.28.10 placement fix — the visible edge is what lands flush).
+// The user area starts at the monitor edge, so the clamp dragged
+// the restored rect fully inside it: the visible edge landed one
+// inset BELOW the edge, the reserve machine judged its ~8-12 px
+// dead-zone gap, and a Stick-on relaunch never registered — every
+// update install walked the bar into this. The rule here is the
+// link path's floor applied to restores (restoreRect is to saved
+// rects what ensureRectVisible is to remote applies): a saved
+// rect that is MEANINGFULLY VISIBLE in some work area is the
+// user's placement and is restored VERBATIM, dock offsets and
+// straddles included; only a rect below that floor — genuinely
+// lost — is clamped, exactly as before.
+inline IntRect restoreRectToWorkAreas(IntRect r, const std::vector<IntRect>& areas) {
+    if (areas.empty() || r.w <= 0 || r.h <= 0) return r;
+    if (rectMeaningfullyVisible(r, areas)) return r;
+    return clampRectToWorkAreas(r, areas);
+}
+
+// ------------------------------------------------------------------
 // CAPTION OVERLAY HOMING (v0.24.0) — Jackson's field report on
 // v0.23.2: he enabled captions and the overlay appeared on his
 // OTHER monitor, behind his game. Cause: when captions are shown,

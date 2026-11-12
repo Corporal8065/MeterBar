@@ -3520,7 +3520,7 @@ int main() {
             // fix 2: the post-show hook exists and syncs
             CHECK(mhA.find("void visibilityChanged() override;") != std::string::npos);
             CHECK(mcA.find("void MainComponent::visibilityChanged()") != std::string::npos);
-            CHECK(mcA.find("if (isVisible()) syncScreenSpace();") != std::string::npos);
+            CHECK(mcA.find("if (isVisible()) {") != std::string::npos); // v0.28.11: braced block — sync + deferred arm (see the v0.28.11 block)
             // fix 3: the visible-rect feed now reaches every rect
             // consumer — the three gap-judging sites (syncScreenSpace,
             // doArrangeWindows, captionAnchorEdge) plus doTopBottom's
@@ -3530,7 +3530,126 @@ int main() {
             CHECK(ssA.find("RegisterWindowMessageW(L\"TaskbarCreated\")") != std::string::npos);
             CHECK(ssA.find("reregisterAfterShellRestart") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmA.find("project(MeterBar VERSION 0.28.10") != std::string::npos);
+            CHECK(cmA.find("project(MeterBar VERSION 0.28.11") != std::string::npos);
+        }
+    }
+
+    // ---------- v0.28.11: restore rule (S1-A) — a saved DOCKED
+    // rect must survive restore verbatim. The shipped restore
+    // paths (MainWindow ctor, preset apply) fed the saved rect
+    // through clampRectToWorkAreas against the USER areas: a
+    // 0.28.10 dock saves its window rect one frame inset OUTSIDE
+    // the monitor edge, the clamp dragged it fully inside the
+    // work area, and the machine judged the visible edge one
+    // inset off the monitor edge — the no-dock dead zone — so a
+    // Stick-on relaunch never registered. These checks run the
+    // restore arithmetic itself: old path vs new rule, then the
+    // restored rect through the machine. ----------
+    {
+        using RA = ReserveAction;
+        const IntRect ua{0, 0, 1920, 1032}; // 1080p, taskbar at the bottom
+        const std::vector<IntRect> areas{ ua };
+        auto gapsOf = [](IntRect r, IntRect m) {
+            auto iabs = [](int a, int b) { return a > b ? a - b : b - a; };
+            return EdgeGaps{ iabs(r.y, m.y), iabs(m.bottom(), r.bottom()),
+                             iabs(r.x, m.x), iabs(m.right(), r.right()) };
+        };
+        const IntRect mon{0, 0, 1920, 1080};
+        const FrameInsets in8{8, 8, 8, 8};
+
+        // Top dock, saved as the 0.28.10 placement leaves it.
+        const IntRect dockedTop{-8, -8, 1936, 136};
+        // THE DEFECT on the old path: the clamp pulls it inside.
+        CHECK(clampRectToWorkAreas(dockedTop, areas) == (IntRect{0, 0, 1936, 136}));
+        // ...and the machine judges the clamped rect's visible
+        // edge 8 px off the monitor top: dead zone, never docks.
+        { const IntRect vis = visibleRectFromWindowRect(clampRectToWorkAreas(dockedTop, areas), in8);
+          ReserveMachine m;
+          CHECK(m.update(true, gapsOf(vis, mon), vis, mon, 1) == RA::None);
+          CHECK(!m.reserved()); }
+        // THE FIX: the restore rule returns it verbatim...
+        CHECK(restoreRectToWorkAreas(dockedTop, areas) == dockedTop);
+        // ...and its visible rect registers, exactly as placed.
+        { const IntRect vis = visibleRectFromWindowRect(restoreRectToWorkAreas(dockedTop, areas), in8);
+          CHECK(vis == (IntRect{0, 0, 1920, 120}));
+          ReserveMachine m;
+          CHECK(m.update(true, gapsOf(vis, mon), vis, mon, 1) == RA::Register); }
+        // Bottom dock against a bottom taskbar's user area: the
+        // old clamp hauled it up by the inset; the rule keeps it.
+        const IntRect dockedBot{-8, 952, 1936, 136};
+        CHECK(clampRectToWorkAreas(dockedBot, areas) == (IntRect{0, 896, 1936, 136}));
+        CHECK(restoreRectToWorkAreas(dockedBot, areas) == dockedBot);
+        // A docked rect on a negative-origin monitor restores too.
+        const std::vector<IntRect> areas2{ IntRect{-1920, 0, 1920, 1032}, ua };
+        CHECK(restoreRectToWorkAreas((IntRect{-1928, -8, 1936, 136}), areas2) == (IntRect{-1928, -8, 1936, 136}));
+        // Ordinary floating rects were never the clamp's victims
+        // and are untouched by the rule.
+        CHECK(restoreRectToWorkAreas((IntRect{300, 200, 900, 150}), areas) == (IntRect{300, 200, 900, 150}));
+        // The floor is the family's own: exactly 40 px visible
+        // passes verbatim; 20 px visible is a lost rect and the
+        // clamp rescues it exactly as before.
+        CHECK(restoreRectToWorkAreas((IntRect{100, -80, 800, 120}), areas) == (IntRect{100, -80, 800, 120}));
+        CHECK(restoreRectToWorkAreas((IntRect{100, -100, 800, 120}), areas) == (IntRect{100, 0, 800, 120}));
+        // Saved against a monitor that is gone: clamped home.
+        CHECK(restoreRectToWorkAreas((IntRect{-3000, 200, 800, 120}), areas) == (IntRect{0, 200, 800, 120}));
+        // Degenerate inputs pass through (the callers keep their
+        // own fallback chains).
+        CHECK(restoreRectToWorkAreas((IntRect{5, 5, 100, 50}), {}) == (IntRect{5, 5, 100, 50}));
+        CHECK(restoreRectToWorkAreas((IntRect{5, 5, 0, 50}), areas) == (IntRect{5, 5, 0, 50}));
+
+        // --- v0.28.11 wiring pins (app sources, same pattern as
+        // the earlier blocks; SKIP with a note when unreachable).
+        // These pin the app-side halves: the two restore call
+        // sites, the deferred-sync machinery, the drag-coalesced
+        // feeders, and the link Stick guard. The OS-facing bodies
+        // remain compile-proven by the Windows CI build, not
+        // executable here — see the receipt's honesty note.
+        auto readApp4 = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        auto countOf4 = [](const std::string& hay, const std::string& needle) {
+            int n = 0; std::string::size_type p = 0;
+            while ((p = hay.find(needle, p)) != std::string::npos) { ++n; p += needle.size(); }
+            return n;
+        };
+        const std::string mcB  = readApp4("app/Source/MainComponent.cpp");
+        const std::string mhB  = readApp4("app/Source/MainComponent.h");
+        const std::string mnB  = readApp4("app/Source/Main.cpp");
+        const std::string cmB  = readApp4("CMakeLists.txt");
+        if (mcB.empty() || mhB.empty() || mnB.empty() || cmB.empty()) {
+            std::printf("v0.28.11 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            // S1-A: both restore call sites use the restore rule;
+            // no bare clamp call remains at either site.
+            CHECK(mnB.find("meterbar::restoreRectToWorkAreas") != std::string::npos);
+            CHECK(countOf4(mnB, "clampRectToWorkAreas(") == 0);
+            CHECK(mcB.find("meterbar::restoreRectToWorkAreas") != std::string::npos);
+            CHECK(countOf4(mcB, "clampRectToWorkAreas(") == 0);
+            // S1-B guard + S2 coalescing: the deferred re-sync
+            // exists, is deadline-honoured in the frame timer, and
+            // is armed from the dock action and the visibility hook.
+            CHECK(mcB.find("void MainComponent::scheduleDeferredSync()") != std::string::npos);
+            CHECK(mhB.find("deferredSyncAtMs_") != std::string::npos);
+            CHECK(mcB.find("deferredSyncAtMs_ != 0 && now >= deferredSyncAtMs_") != std::string::npos);
+            CHECK(countOf4(mcB, "scheduleDeferredSync();") >= 4);
+            // S2: both geometry feeders hold their feed while a
+            // mouse button is down (drag/resize in progress).
+            CHECK(countOf4(mcB, "juce::Component::isMouseButtonDownAnywhere()") == 2);
+            // S1-B guard: remote link applies yield while stuck.
+            CHECK(mcB.find("if (engine.state.stick) return;") != std::string::npos);
+            // the version source of truth moved
+            CHECK(cmB.find("project(MeterBar VERSION 0.28.11") != std::string::npos);
         }
     }
 
