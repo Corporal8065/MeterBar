@@ -34,6 +34,7 @@
 #include "../dsp/include/meterbar/CrashWatch.hpp"
 #include "../dsp/include/meterbar/PinSource.hpp" // v0.28.7
 #include "../dsp/include/meterbar/CloseSave.hpp" // v0.28.8
+#include "../dsp/include/meterbar/DockDiag.hpp" // v0.28.15
 static int failures = 0, checks = 0;
 #define CHECK(cond) do{ ++checks; if(!(cond)){ ++failures; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);} else { std::printf("ok   %s\n", #cond);} }while(0)
 int main() {
@@ -3620,7 +3621,7 @@ int main() {
             CHECK(ssA.find("RegisterWindowMessageW(L\"TaskbarCreated\")") != std::string::npos);
             CHECK(ssA.find("reregisterAfterShellRestart") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmA.find("project(MeterBar VERSION 0.28.14") != std::string::npos);
+            CHECK(cmA.find("project(MeterBar VERSION 0.28.15") != std::string::npos);
         }
     }
 
@@ -3739,7 +3740,7 @@ int main() {
             // S1-B guard: remote link applies yield while stuck.
             CHECK(mcB.find("if (engine.state.stick) return;") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmB.find("project(MeterBar VERSION 0.28.14") != std::string::npos);
+            CHECK(cmB.find("project(MeterBar VERSION 0.28.15") != std::string::npos);
         }
     }
 
@@ -3840,6 +3841,126 @@ int main() {
         } else {
             CHECK(blH.find("meterbar::groupDockLeaderSlot(snap, appId_, now)") != std::string::npos);
             CHECK(blH.find("!meterbar::dragLive(mine, now)") != std::string::npos);
+        }
+    }
+
+    // ---------- v0.28.15: dock diagnostic records (round-6 log-only build) ----------
+    {
+        using namespace meterbar;
+        // JSON escaping: quotes, backslashes and control characters
+        // in free text (window titles are arbitrary app text) must
+        // never break the record's JSON shape.
+        CHECK(diagJsonEscape("plain") == "plain");
+        CHECK(diagJsonEscape("a\"b") == "a\\\"b");
+        CHECK(diagJsonEscape("a\\b") == "a\\\\b");
+        CHECK(diagJsonEscape("a\nb\t") == "a\\nb\\t");
+        CHECK(diagJsonEscape(std::string("a\x01" "b")) == "a\\u0001b");
+        // rect + double formatting is exact and stable
+        CHECK(diagRectJson(IntRect{1, -8, 2560, 164}) == "{\"x\":1,\"y\":-8,\"w\":2560,\"h\":164}");
+        CHECK(diagDoubleJson(1.0) == "1");
+        CHECK(diagDoubleJson(1.25) == "1.25");
+        CHECK(diagDoubleJson(1.5) == "1.5");
+        CHECK(diagDoubleJson(96.0) == "96");
+        // the sample schedule: nothing due before +300 ms, then one
+        // sample per offset, capped at the schedule size, monotonic
+        // in alreadyDone (a late tick can never un-due a sample)
+        CHECK(kDiagSampleCount == 4);
+        CHECK(diagSamplesDue(1000, 1299, 0) == 0);
+        CHECK(diagSamplesDue(1000, 1300, 0) == 1);
+        CHECK(diagSamplesDue(1000, 2000, 0) == 2);
+        CHECK(diagSamplesDue(1000, 3000, 0) == 3);
+        CHECK(diagSamplesDue(1000, 4000, 0) == 4);
+        CHECK(diagSamplesDue(1000, 99999, 0) == 4);
+        CHECK(diagSamplesDue(1000, 1300, 3) == 3);
+        // drift rule: any field difference counts, identity does not
+        CHECK(!diagRectMoved(IntRect{0, 0, 100, 50}, IntRect{0, 0, 100, 50}));
+        CHECK(diagRectMoved(IntRect{0, 0, 100, 50}, IntRect{0, 196, 100, 50}));
+        CHECK(diagRectMoved(IntRect{0, 0, 100, 50}, IntRect{0, 0, 100, 51}));
+        // startup record: every display rides with its areas/scale
+        {
+            DiagDisplay d0; d0.index = 0; d0.name = "\\\\.\\DISPLAY1"; d0.isMain = true;
+            d0.totalArea = {0, 0, 2560, 1440}; d0.userArea = {0, 0, 2560, 1392}; d0.scale = 1.0; d0.dpi = 96.0;
+            DiagDisplay d1; d1.index = 1; d1.isMain = false;
+            d1.totalArea = {-1920, 196, 1920, 1080}; d1.userArea = {-1920, 196, 1920, 1032}; d1.scale = 1.25; d1.dpi = 120.0;
+            const std::string rec = diagStartupRecord("2026-11-12T22:30:00.000-08:00", 1794550000000LL, "0.28.15", {d0, d1});
+            CHECK(rec.find("\"type\":\"startup\"") != std::string::npos);
+            CHECK(rec.find("\"appVersion\":\"0.28.15\"") != std::string::npos);
+            CHECK(rec.find("\"index\":1") != std::string::npos);
+            CHECK(rec.find("\"scale\":1.25") != std::string::npos);
+            CHECK(rec.find("\"y\":196") != std::string::npos);
+            CHECK(rec.find("\"isMain\":true") != std::string::npos);
+        }
+        // click record: target, insets, link state and an escaped
+        // foreground title all land in the one line
+        {
+            DiagClick c;
+            c.edge = "top";
+            c.windowRectBefore = {100, 300, 1200, 164};
+            c.display.index = 0; c.display.isMain = true;
+            c.display.totalArea = {0, 0, 2560, 1440}; c.display.userArea = {0, 0, 2560, 1392};
+            c.display.scale = 1.0; c.display.dpi = 96.0;
+            c.insetsMeasured = true;
+            c.insetsPhys = FrameInsets{8, 8, 8, 8}; c.insetsLogical = FrameInsets{8, 8, 8, 8};
+            c.targetRect = {0, -8, 2560, 164}; c.requestedRect = c.targetRect; c.rectAfterSetBounds = {0, -8, 2560, 164};
+            c.linkEnabled = false; c.stick = true;
+            c.foreground.available = true; c.foreground.title = "Slay the \"Spire\""; c.foreground.className = "UnrealWindow"; c.foreground.exe = "SlayTheSpire2.exe";
+            const std::string rec = diagClickRecord("2026-11-12T22:31:00.000-08:00", 1794550060000LL, c);
+            CHECK(rec.find("\"type\":\"dock-click\"") != std::string::npos);
+            CHECK(rec.find("\"edge\":\"top\"") != std::string::npos);
+            CHECK(rec.find("\"targetRect\":{\"x\":0,\"y\":-8,\"w\":2560,\"h\":164}") != std::string::npos);
+            CHECK(rec.find("\"insetsMeasured\":true") != std::string::npos);
+            CHECK(rec.find("\"linkEnabled\":false") != std::string::npos);
+            CHECK(rec.find("Slay the \\\"Spire\\\"") != std::string::npos);
+            CHECK(rec.find("\"exe\":\"SlayTheSpire2.exe\"") != std::string::npos);
+        }
+        // sample + drift records: the first sample has no reference
+        // (null), a later one reports the move; the drift record
+        // names both rects
+        {
+            DiagFg fg; fg.available = true; fg.exe = "MeterBar.exe";
+            const std::string s0 = diagSampleRecord("t", 2000, 1000, 0, 300, 312, IntRect{0, -8, 2560, 164}, false, false, fg);
+            CHECK(s0.find("\"movedSinceFirst\":null") != std::string::npos);
+            const std::string s1 = diagSampleRecord("t", 3000, 1000, 1, 1000, 1005, IntRect{0, 196, 2560, 164}, true, true, fg);
+            CHECK(s1.find("\"movedSinceFirst\":true") != std::string::npos);
+            const std::string dr = diagDriftRecord("t", 3000, 1000, 1005, IntRect{0, -8, 2560, 164}, IntRect{0, 196, 2560, 164}, fg);
+            CHECK(dr.find("\"type\":\"rect-drift\"") != std::string::npos);
+            CHECK(dr.find("\"fromRect\":{\"x\":0,\"y\":-8") != std::string::npos);
+            CHECK(dr.find("\"toRect\":{\"x\":0,\"y\":196") != std::string::npos);
+        }
+        // app-source pins: the wiring exists and the sampler's only
+        // window call is a read (no setBounds inside pollDockDiag)
+        auto readApp7 = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string mcD = readApp7("app/Source/MainComponent.cpp");
+        const std::string mhD = readApp7("app/Source/MainComponent.h");
+        const std::string ddH = readApp7("app/Source/DockDiag.h");
+        if (mcD.empty() || mhD.empty() || ddH.empty()) {
+            std::printf("v0.28.15 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            CHECK(mcD.find("dockdiag::logStartup(meterbar::kVersionString)") != std::string::npos);
+            CHECK(mcD.find("meterbar::diagClickRecord") != std::string::npos);
+            CHECK(mcD.find("void MainComponent::pollDockDiag(juce::int64 now)") != std::string::npos);
+            CHECK(mcD.find("pollDockDiag(now);") != std::string::npos);
+            CHECK(mhD.find("dockDiagArmed_") != std::string::npos);
+            CHECK(ddH.find("dock-diag.jsonl") != std::string::npos);
+            CHECK(ddH.find("GetForegroundWindow") != std::string::npos);
+            // the sampler body contains no window-moving call
+            const auto p0 = mcD.find("void MainComponent::pollDockDiag(juce::int64 now)");
+            const auto p1 = mcD.find("void MainComponent::notifyWindowGeometryChanged()", p0);
+            CHECK(p0 != std::string::npos && p1 != std::string::npos
+                  && mcD.substr(p0, p1 - p0).find("setBounds") == std::string::npos);
         }
     }
 

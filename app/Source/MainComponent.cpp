@@ -3,6 +3,7 @@
 #include <meterbar/Recordings.hpp> // v0.21.4: Recordings submenu model
 #include <meterbar/CrashWatch.hpp> // v0.28.3: crash-record naming/notice logic (core)
 #include "CrashHandler.h"          // v0.28.3: hard-crash handler (installed in Main.cpp)
+#include "DockDiag.h"              // v0.28.15: DIAGNOSTIC BUILD — dock observation log (reads + appends only)
 #if JUCE_WINDOWS
  #include <windows.h> // native window move (v0.11)
 #endif
@@ -411,6 +412,10 @@ MainComponent::MainComponent() {
     // are all silent at launch; only a NEWER release surfaces, as
     // the toolbar "Update!" indicator (see pollUpdater).
     if (mbupdate::configured()) startUpdateCheck(true);
+    // v0.28.15 DIAGNOSTIC BUILD (log-only): the startup record —
+    // version + the full display enumeration JUCE sees on this
+    // machine, appended to Documents\MeterBar\dock-diag.jsonl.
+    dockdiag::logStartup(meterbar::kVersionString);
 }
 MainComponent::~MainComponent() { captions_.shutdown(); stopTimer(); screenSpace.release(); screenSpace.restore(); if (engine.isRecording()) engine.stopRecording(); }
 void MainComponent::applyTheme() {
@@ -683,6 +688,41 @@ void MainComponent::syncScreenSpace() {
 // 2026-11-12; the v0.18 flicker re-entered through the drag path).
 void MainComponent::scheduleDeferredSync() {
     deferredSyncAtMs_ = juce::Time::getCurrentTime().toMilliseconds() + 250;
+}
+// v0.28.15 DIAGNOSTIC BUILD (log-only): the post-click sampler.
+// Armed by doTopBottom; each due step READS the window's actual
+// rect and appends a sample record. The first sample (+300 ms) is
+// the reference — the click's own landing, past the deferred sync;
+// a later sample that differs means something moved the bar AFTER
+// it landed, and the first such difference also appends the
+// greppable rect-drift record. This function never sets bounds,
+// never feeds the reserve machine, never touches a dock input.
+void MainComponent::pollDockDiag(juce::int64 now) {
+    if (!dockDiagArmed_) return;
+    const int due = meterbar::diagSamplesDue((long long) dockDiagClickMs_, (long long) now, dockDiagSamplesDone_);
+    while (dockDiagSamplesDone_ < due) {
+        auto* w = findParentComponentOfClass<juce::DocumentWindow>();
+        const auto r = w ? w->getBounds() : getScreenBounds();
+        const meterbar::IntRect rect{ r.getX(), r.getY(), r.getWidth(), r.getHeight() };
+        const bool isFirst = !dockDiagRefSet_;
+        bool moved = false;
+        if (isFirst) { dockDiagRefRect_ = rect; dockDiagRefSet_ = true; }
+        else moved = meterbar::diagRectMoved(dockDiagRefRect_, rect);
+        const auto fg = dockdiag::foregroundInfo();
+        const long long actualOffset = (long long) now - (long long) dockDiagClickMs_;
+        dockdiag::appendRecord(meterbar::diagSampleRecord(
+            dockdiag::isoNow(), (long long) now, (long long) dockDiagClickMs_,
+            dockDiagSamplesDone_, meterbar::kDiagSampleOffsetsMs[dockDiagSamplesDone_], actualOffset,
+            rect, dockDiagRefSet_ && !isFirst, moved, fg));
+        if (moved && !dockDiagDriftLogged_) {
+            dockDiagDriftLogged_ = true;
+            dockdiag::appendRecord(meterbar::diagDriftRecord(
+                dockdiag::isoNow(), (long long) now, (long long) dockDiagClickMs_, actualOffset,
+                dockDiagRefRect_, rect, fg));
+        }
+        ++dockDiagSamplesDone_;
+    }
+    if (dockDiagSamplesDone_ >= meterbar::kDiagSampleCount) dockDiagArmed_ = false;
 }
 void MainComponent::notifyWindowGeometryChanged() {
     // v0.28.11: coalesce the reserve feed during drags/resizes —
@@ -1526,6 +1566,7 @@ void MainComponent::timerCallback() {
         deferredSyncAtMs_ = 0;
         syncScreenSpace();
     }
+    pollDockDiag(now); // v0.28.15 DIAGNOSTIC BUILD: read-only post-click rect sampling (no-op unless a dock click armed it)
     // v0.18.1: NO screen-space work happens here any more. The v0.18
     // ~4x/sec timer poll of syncScreenSpace() was the flicker's engine;
     // the reservation is event-driven now (see syncScreenSpace).
@@ -2036,6 +2077,15 @@ void MainComponent::doTopBottom(bool top) {
     // own reserved strip and short of the screen's edges.
     auto* w = findParentComponentOfClass<juce::DocumentWindow>();
     const auto curRect = w ? w->getBounds() : getScreenBounds();
+    // v0.28.15 DIAGNOSTIC BUILD (log-only): capture the click-time
+    // observation BEFORE anything moves — the foreground window at
+    // this instant is part of the evidence (the fullscreen-game
+    // condition). Pure reads; the record itself is composed and
+    // appended after the setBounds below, from values captured
+    // here and along the unchanged dock path.
+    const juce::int64 diagClickMs = juce::Time::getCurrentTime().toMilliseconds();
+    const auto diagClickIso = dockdiag::isoNow();
+    const auto diagFg = dockdiag::foregroundInfo();
     auto& displays = juce::Desktop::getInstance().getDisplays();
     auto disp = displays.getDisplayForRect(curRect);
     if (!disp) disp = displays.getPrimaryDisplay();
@@ -2054,6 +2104,7 @@ void MainComponent::doTopBottom(bool top) {
     // scale. No peer or no DWM answer: zero insets, and the
     // placement reduces to the plain v0.28.9 dock.
     meterbar::FrameInsets insets{};
+    meterbar::FrameInsets diagInsetsPhys{}; bool diagInsetsMeasured = false; // v0.28.15: diagnostic mirror of the live inset read below (observation only — the dock consumes `insets` exactly as before)
 #if JUCE_WINDOWS
     if (w && w->getPeer()) {
         HWND hwnd = static_cast<HWND>(w->getPeer()->getNativeHandle());
@@ -2061,6 +2112,7 @@ void MainComponent::doTopBottom(bool top) {
         if (hwnd && GetWindowRect(hwnd, &wr) && screenSpace.windowVisibleRect(hwnd, vis)) {
             const auto phys = meterbar::frameInsetsOf(
                 { wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top }, vis);
+            diagInsetsPhys = phys; diagInsetsMeasured = true; // v0.28.15: record what was measured (no value changes hands)
             const double scale = disp->scale > 0.0 ? disp->scale : 1.0;
             auto toLogical = [scale](int px) {
                 const int v = (int)(px / scale + 0.5); // phys >= 0 (frameInsetsOf clamps)
@@ -2076,6 +2128,32 @@ void MainComponent::doTopBottom(bool top) {
         { ta.getX(), ta.getY(), ta.getWidth(), ta.getHeight() }, top, insets);
     if (w) {
         w->setBounds(target.x, target.y, target.w, target.h);
+    }
+    // v0.28.15 DIAGNOSTIC BUILD (log-only): append the click record
+    // and arm the read-only post-click sampler (pollDockDiag). The
+    // dock above is the unchanged v0.28.14 path; this block only
+    // reads values and writes the log.
+    {
+        meterbar::DiagClick rec;
+        rec.edge = top ? "top" : "bottom";
+        rec.windowRectBefore = dockdiag::toDiagRect(curRect);
+        rec.display = dockdiag::toDiagDisplay(*disp, dockdiag::displayIndex(disp));
+        rec.insetsMeasured = diagInsetsMeasured;
+        rec.insetsPhys = diagInsetsPhys;
+        rec.insetsLogical = insets;
+        rec.targetRect = target;
+        rec.requestedRect = target; // the rect passed to setBounds above is the target, verbatim
+        const auto afterRect = w ? w->getBounds() : getScreenBounds();
+        rec.rectAfterSetBounds = dockdiag::toDiagRect(afterRect);
+        rec.linkEnabled = engine.state.linkEnabled;
+        rec.stick = engine.state.stick;
+        rec.foreground = diagFg;
+        dockdiag::appendRecord(meterbar::diagClickRecord(diagClickIso, (long long) diagClickMs, rec));
+        dockDiagArmed_ = true;
+        dockDiagClickMs_ = diagClickMs;
+        dockDiagSamplesDone_ = 0;
+        dockDiagRefSet_ = false;
+        dockDiagDriftLogged_ = false;
     }
     syncScreenSpace(); // v0.18: docking to the top is what arms the reservation (v0.18.1: the window's moved/resized events feed it too)
     scheduleDeferredSync(); // v0.28.11: one settled re-read — the sync above judges inside the SetWindowPos cascade, where the DWM visible rect can still describe the pre-move window; a stale first read must not be the final word (see scheduleDeferredSync)
