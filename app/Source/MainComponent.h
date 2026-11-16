@@ -212,6 +212,7 @@ private:
     void syncWindowRectToState(); // v0.28.8: stamp the top level's live rect into state.windowX/Y/W/H, the docked-caption strip height normalised back out
     void loadPresetFile(const juce::File&);
     void doTopBottom(bool top); void doStick(); void setStick(bool on); void doMoveToDisplay(int idx); // v0.28.9: setStick = the merged Stick=Reserve action (menu + Settings both land here)
+    void setStickImpl(bool on, const char* surface); // v0.28.16: the merged action itself; setStick/doStick/Settings are thin surface-labelled wrappers over it (the surface feeds the stick-toggle DockDiag record)
     void toggleRecord(); void exportClip(double seconds);
     void setDeviceByName(bool input, const juce::String& name);
     void adjustFlex(int leftFlexIdx, int rightFlexIdx, int dxPx); // v0.15 splitter drag

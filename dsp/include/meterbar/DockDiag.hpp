@@ -250,4 +250,29 @@ inline std::string diagDriftRecord(const std::string& isoTs, long long epochMs,
     s += "}";
     return s;
 }
+
+// Stick-toggle record (v0.28.16) — the deciding diagnostic the
+// round-7 diagnosis asked the fix build to carry. The v0.28.15 log
+// could not grade the Stick button at all: the build never
+// instrumented the control, so "Jackson never clicked it" and
+// "clicks never landed" were indistinguishable (stick read true in
+// all 13 dock-click records). This record is emitted at the top of
+// the one merged Stick action (MainComponent::setStickImpl) BEFORE
+// any state changes: the state it found, the state requested, and
+// the surface the request came from ("menu" | "settings" |
+// "direct" for any other caller of the public wrapper). One field
+// session settles the question either way: records present and the
+// state flipping => the button was always fine and the round-7
+// ping-pong was the whole story; Jackson clicks and no record =>
+// the dispatch path is broken in the field.
+inline std::string diagStickToggleRecord(const std::string& isoTs, long long epochMs,
+                                         bool oldState, bool newState,
+                                         const std::string& surface) {
+    std::string s = diagHead("stick-toggle", isoTs, epochMs);
+    s += ",\"old\":" + std::string(oldState ? "true" : "false");
+    s += ",\"new\":" + std::string(newState ? "true" : "false");
+    s += ",\"surface\":" + diagQuoted(surface);
+    s += "}";
+    return s;
+}
 } // namespace meterbar

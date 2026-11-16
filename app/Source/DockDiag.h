@@ -134,4 +134,13 @@ inline void logStartup(const char* appVersion) {
                                              appVersion ? appVersion : "?",
                                              enumerateDisplays()));
 }
+
+// v0.28.16: one record per Stick request, emitted by the merged
+// Stick action before it changes any state (see core DockDiag.hpp
+// for why this record exists). Read + append only, like everything
+// else here.
+inline void logStickToggle(bool oldState, bool newState, const char* surface) {
+    appendRecord(meterbar::diagStickToggleRecord(isoNow(), nowMs(), oldState, newState,
+                                                 surface ? surface : "?"));
+}
 } // namespace dockdiag

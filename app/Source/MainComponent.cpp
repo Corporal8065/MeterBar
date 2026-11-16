@@ -358,7 +358,7 @@ MainComponent::MainComponent() {
     settingsWin->content.onArrange = [this]{ doArrangeWindows(); };   // v0.18: Settings > Window buttons
     settingsWin->content.onLinkAll = [this](int edge){ doLinkAll(edge); }; // v0.28.13: Settings > Window Link All buttons
     settingsWin->content.onRestore = [this]{ doRestoreWindows(); };   // v0.18
-    settingsWin->content.onStickToggled = [this](bool b){ setStick(b); }; // v0.28.9: Settings' Stick lands in the same merged action as the menu's
+    settingsWin->content.onStickToggled = [this](bool b){ setStickImpl(b, "settings"); }; // v0.28.9: Settings' Stick lands in the same merged action as the menu's (v0.28.16: surface-labelled for the stick-toggle record)
     settingsWin->content.build();
     debugWin = std::make_unique<HideOnCloseWindow>("MeterBar Debug", juce::Colour(0xff231f31), juce::DocumentWindow::closeButton); // v0.28.2: X hides the window (stock DocumentWindow's X did nothing)
     debugLabel.setFont(12.5f); // v0.13: endpoint IDs are long — smaller font + wider window keeps them on one line
@@ -2158,8 +2158,17 @@ void MainComponent::doTopBottom(bool top) {
     syncScreenSpace(); // v0.18: docking to the top is what arms the reservation (v0.18.1: the window's moved/resized events feed it too)
     scheduleDeferredSync(); // v0.28.11: one settled re-read — the sync above judges inside the SetWindowPos cascade, where the DWM visible rect can still describe the pre-move window; a stale first read must not be the final word (see scheduleDeferredSync)
 }
-void MainComponent::doStick() { setStick(!engine.state.stick); }
-void MainComponent::setStick(bool on) {
+void MainComponent::doStick() { setStickImpl(!engine.state.stick, "menu"); }
+void MainComponent::setStick(bool on) { setStickImpl(on, "direct"); }
+void MainComponent::setStickImpl(bool on, const char* surface) {
+    // v0.28.16: the stick-toggle DockDiag record goes FIRST, before
+    // any state changes — it is the deciding evidence for the
+    // round-7 "Stick is dead" grade (the v0.28.15 log never watched
+    // this control, so a click and a no-click were indistinguishable
+    // in it). Surface labels the caller: "menu" (doStick, above),
+    // "settings" (the Settings toggle's wiring), "direct" (any other
+    // caller of the public setStick wrapper).
+    dockdiag::logStickToggle(engine.state.stick, on, surface);
     // v0.28.9 STICK = RESERVE (Jackson's dock-merge ruling): the one
     // control. ON: dock flush + full width at the bar's nearest
     // edge (top or bottom) and register the AppBar reservation for

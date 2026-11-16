@@ -3621,7 +3621,7 @@ int main() {
             CHECK(ssA.find("RegisterWindowMessageW(L\"TaskbarCreated\")") != std::string::npos);
             CHECK(ssA.find("reregisterAfterShellRestart") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmA.find("project(MeterBar VERSION 0.28.15") != std::string::npos);
+            CHECK(cmA.find("project(MeterBar VERSION 0.28.16") != std::string::npos);
         }
     }
 
@@ -3740,7 +3740,7 @@ int main() {
             // S1-B guard: remote link applies yield while stuck.
             CHECK(mcB.find("if (engine.state.stick) return;") != std::string::npos);
             // the version source of truth moved
-            CHECK(cmB.find("project(MeterBar VERSION 0.28.15") != std::string::npos);
+            CHECK(cmB.find("project(MeterBar VERSION 0.28.16") != std::string::npos);
         }
     }
 
@@ -3961,6 +3961,104 @@ int main() {
             const auto p1 = mcD.find("void MainComponent::notifyWindowGeometryChanged()", p0);
             CHECK(p0 != std::string::npos && p1 != std::string::npos
                   && mcD.substr(p0, p1 - p0).find("setBounds") == std::string::npos);
+        }
+    }
+
+    // ---------- v0.28.16: dock-safe constrainer (WindowGeom) ----------
+    {
+        const OnScreenAmounts juceAmt{ 0x10000, 16, 24, 16 }; // JUCE's default minimum-on-screen amounts
+        // limits from TOTAL areas: Jackson's two displays (main
+        // 2048x1152 at the origin, second 1360x768 to its right)
+        const std::vector<IntRect> totals{ IntRect{0, 0, 2048, 1152}, IntRect{2048, 0, 1360, 768} };
+        const IntRect totalLimits{ 0, 0, 3408, 1152 };
+        CHECK(totalAreaUnionRect(totals) == totalLimits);
+        CHECK(totalAreaUnionRect({}) == IntRect({ 0, 0, 0, 0 }));
+        const IntRect negLimits{ -1920, 0, 3968, 1152 };
+        CHECK((totalAreaUnionRect({ IntRect{-1920, 0, 1920, 1080}, IntRect{0, 0, 2048, 1152} }) == negLimits));
+        // THE FIELD GEOMETRY (round-7 log): the bar is 128 tall; once
+        // its own top reservation lands, the user-area union JUCE's
+        // default constrainer clamps against starts at y=128.
+        const IntRect userLimits{ 0, 128, 2048, 848 };
+        const IntRect topDock{ 0, 0, 2048, 128 };
+        const IntRect trapped{ 0, 128, 2048, 128 };
+        // the trap itself, under user-area limits: the dock is
+        // rewritten to y=128 — the log's landing spot in 4 of 5 failures
+        CHECK(onScreenClampedRect(topDock, userLimits, juceAmt, false, false, false, false) == trapped);
+        // the fix, under total-area limits: the same dock passes
+        // through unchanged
+        CHECK(onScreenClampedRect(topDock, totalLimits, juceAmt, false, false, false, false) == topDock);
+        // bottom dock: under the shrunk user limits (bottom at 1026)
+        // JUCE's rules alone land it at y=1002 — NOT the field's 898,
+        // which is why the diagnosis names a second carrier for that
+        // one failure; under total limits the dock passes unchanged
+        const IntRect bottomDock{ 0, 1026, 2048, 128 };
+        const IntRect shrunkBottom{ 0, 0, 2048, 1026 };
+        CHECK(onScreenClampedRect(bottomDock, shrunkBottom, juceAmt, false, false, false, false).y == 1002);
+        CHECK(onScreenClampedRect(bottomDock, totalLimits, juceAmt, false, false, false, false) == bottomDock);
+        // the guard still guards ordinary drags: a window dragged
+        // almost fully off the left is pulled back to keep 16 px on
+        // screen; one sunk past the bottom keeps the 24 px amount
+        const IntRect draggedOff{ -2000, 100, 800, 128 };
+        const IntRect pulledBack{ -784, 100, 800, 128 };
+        CHECK(onScreenClampedRect(draggedOff, totalLimits, juceAmt, false, false, false, false) == pulledBack);
+        const IntRect draggedDown{ 100, 1200, 800, 128 };
+        const IntRect liftedBack{ 100, 1128, 800, 128 };
+        CHECK(onScreenClampedRect(draggedDown, totalLimits, juceAmt, false, false, false, false) == liftedBack);
+        // stretching variant: a top-edge resize dragged above the
+        // limit pins the edge to the limits' top and shrinks height
+        const IntRect stretch{ 0, -50, 2048, 128 };
+        const IntRect stretchPinned{ 0, 0, 2048, 78 };
+        CHECK(onScreenClampedRect(stretch, totalLimits, juceAmt, true, false, false, false) == stretchPinned);
+        // empty bounds pass through (JUCE's early-out)
+        const IntRect empty{ 0, 0, 0, 0 };
+        CHECK(onScreenClampedRect(empty, totalLimits, juceAmt, false, false, false, false) == empty);
+    }
+    // ---------- v0.28.16: stick-toggle DockDiag record ----------
+    {
+        const std::string st = diagStickToggleRecord("2026-11-16T07:16:00.000-08:00", 1794842160000LL, true, false, "menu");
+        CHECK(st.find("\"type\":\"stick-toggle\"") != std::string::npos);
+        CHECK(st.find("\"old\":true") != std::string::npos);
+        CHECK(st.find("\"new\":false") != std::string::npos);
+        CHECK(st.find("\"surface\":\"menu\"") != std::string::npos);
+        const std::string st2 = diagStickToggleRecord("t", 1, false, true, "settings");
+        CHECK(st2.find("\"old\":false") != std::string::npos);
+        CHECK(st2.find("\"new\":true") != std::string::npos);
+        CHECK(st2.find("\"surface\":\"settings\"") != std::string::npos);
+    }
+    // ---------- v0.28.16: app-source pins ----------
+    {
+        auto readApp8 = [](const char* rel) {
+            std::string src;
+            const std::string base(rel);
+            const char* prefixes[] = { "", "../", "../../" };
+            for (auto* pre : prefixes) {
+                std::FILE* fh = std::fopen((std::string(pre) + base).c_str(), "rb");
+                if (!fh) continue;
+                char chunk[8192]; std::size_t n;
+                while ((n = std::fread(chunk, 1, sizeof chunk, fh)) > 0) src.append(chunk, n);
+                std::fclose(fh);
+                if (!src.empty()) break;
+            }
+            return src;
+        };
+        const std::string mainCpp = readApp8("app/Source/Main.cpp");
+        const std::string mcE = readApp8("app/Source/MainComponent.cpp");
+        const std::string mhE = readApp8("app/Source/MainComponent.h");
+        const std::string ddE = readApp8("app/Source/DockDiag.h");
+        if (mainCpp.empty() || mcE.empty() || mhE.empty() || ddE.empty()) {
+            std::printf("v0.28.16 app-source pins SKIPPED (app sources not reachable from CWD)\n");
+        } else {
+            CHECK(mainCpp.find("class DockSafeConstrainer") != std::string::npos);
+            CHECK(mainCpp.find("setConstrainer(&dockConstrainer_)") != std::string::npos);
+            CHECK(mainCpp.find("meterbar::onScreenClampedRect") != std::string::npos);
+            CHECK(mainCpp.find("meterbar::totalAreaUnionRect") != std::string::npos);
+            CHECK(mcE.find("dockdiag::logStickToggle(engine.state.stick, on, surface)") != std::string::npos);
+            CHECK(mcE.find("setStickImpl(!engine.state.stick, \"menu\")") != std::string::npos);
+            CHECK(mcE.find("setStickImpl(b, \"settings\")") != std::string::npos);
+            CHECK(mcE.find("\"Check For Updates\"") != std::string::npos); // hamburger-menu item (contract deliverable 4)
+            CHECK(mhE.find("setStickImpl") != std::string::npos);
+            CHECK(ddE.find("logStickToggle") != std::string::npos);
+            CHECK(ddE.find("diagStickToggleRecord") != std::string::npos);
         }
     }
 

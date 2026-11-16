@@ -331,4 +331,109 @@ inline IntRect captionShrunkBarRect(IntRect bar, int stripH, ReserveEdge anchor)
     if (anchor == ReserveEdge::Top) return IntRect{ bar.x, bar.y, bar.w, h };
     return IntRect{ bar.x, bar.y + delta, bar.w, h };
 }
+
+// ------------------------------------------------------------------
+// DOCK-SAFE CONSTRAINER (v0.28.16) — the round-7 fix. The field
+// geometry (DIAGNOSIS 2026-11-16, from v0.28.15's own dock-diag log):
+// the dock action lands perfectly every time (13/13 rectAfterSetBounds
+// = target); on 5 of 9 travel clicks the bar is then displaced by
+// exactly its own height (128 px) toward the screen centre, parking
+// flush against its own AppBar strip from inside the work area. The
+// only clamp in the process with that signature is JUCE's default
+// bounds constrainer: the Windows peer runs every position change
+// through checkBounds against getTotalBounds(true) — the union of the
+// displays' USER areas — with minOffTop = 0x10000 ("never above the
+// limits' top"). The bar's own ABM_SETPOS shrinks that user area, the
+// shell's WM_SETTINGCHANGE refreshes JUCE's cached displays, and the
+// next position change is rewritten to sit inside the shrunken area:
+// a top dock at y=0 comes back as y=128. A race — the rewrite needs
+// the refresh AND a later position change — which is why identical
+// clicks landed differently and later repositions settled.
+//
+// The fix keeps a bounds constrainer on the window (drags and border
+// resizes still get their keep-on-screen guard) but feeds the guard
+// the displays' TOTAL areas, which the bar's reservation can never
+// shrink: a docked rect is then inside the limits by construction
+// and passes through unchanged. The two functions below are the pure
+// half — the limits computation, and the on-screen clamp arithmetic
+// transcribed rule-for-rule from JUCE 8.0.4's
+// ComponentBoundsConstrainer::checkBounds (the four minimum-on-screen
+// rules, in JUCE's order, stretching variants included; size limits
+// and aspect ratio are NOT here — the app's constrainer runs those
+// through JUCE's own code first). The app-side adapter
+// (app/Source/Main.cpp, DockSafeConstrainer) feeds live total areas
+// in and applies this clamp; the suite pins the arithmetic against
+// the field geometry, including the trap itself under user-area
+// limits.
+
+// The union of the displays' TOTAL areas — the constrainer limits.
+// Empty input (no displays enumerated) yields a zero rect; the
+// caller treats that as "no limits known" and skips the clamp.
+inline IntRect totalAreaUnionRect(const std::vector<IntRect>& totalAreas) {
+    if (totalAreas.empty()) return IntRect{};
+    int x0 = totalAreas[0].x, y0 = totalAreas[0].y;
+    int x1 = totalAreas[0].right(), y1 = totalAreas[0].bottom();
+    for (size_t i = 1; i < totalAreas.size(); ++i) {
+        if (totalAreas[i].x < x0) x0 = totalAreas[i].x;
+        if (totalAreas[i].y < y0) y0 = totalAreas[i].y;
+        if (totalAreas[i].right() > x1) x1 = totalAreas[i].right();
+        if (totalAreas[i].bottom() > y1) y1 = totalAreas[i].bottom();
+    }
+    return IntRect{ x0, y0, x1 - x0, y1 - y0 };
+}
+
+// JUCE's minimum-on-screen amounts, in JUCE's own argument order
+// (setMinimumOnscreenAmounts: top, left, bottom, right). The values
+// ResizableWindow::initialise installs on its default constrainer
+// are (0x10000, 16, 24, 16) — the app's constrainer carries the
+// same amounts; only the LIMITS change.
+struct OnScreenAmounts { int top = 0, left = 0, bottom = 0, right = 0; };
+
+// JUCE checkBounds' four on-screen rules, transcribed exactly
+// (juce_ComponentBoundsConstrainer.cpp, JUCE 8.0.4): a rule fires
+// only when its amount is > 0; a non-stretching move is shifted
+// back to the limit, a stretching edge is pinned to the limits'
+// edge (the window's far edge — and so its size — is preserved by
+// the caller-side semantics: setTop/setLeft move the near edge and
+// shrink, setBottom/setRight grow to the edge). Rules run in
+// JUCE's order (top, left, bottom, right) against the possibly
+// already-adjusted rect, exactly as JUCE mutates `bounds` in place.
+inline IntRect onScreenClampedRect(IntRect b, const IntRect& limits, OnScreenAmounts amt,
+                                    bool stretchingTop, bool stretchingLeft,
+                                    bool stretchingBottom, bool stretchingRight) {
+    if (b.w <= 0 || b.h <= 0) return b; // JUCE: empty bounds pass through
+    if (amt.top > 0) {
+        const int d = amt.top - b.h;
+        const int limit = limits.y + (d < 0 ? d : 0);
+        if (b.y < limit) {
+            if (stretchingTop) { b.h = b.bottom() - limits.y; b.y = limits.y; }
+            else b.y = limit;
+        }
+    }
+    if (amt.left > 0) {
+        const int d = amt.left - b.w;
+        const int limit = limits.x + (d < 0 ? d : 0);
+        if (b.x < limit) {
+            if (stretchingLeft) { b.w = b.right() - limits.x; b.x = limits.x; }
+            else b.x = limit;
+        }
+    }
+    if (amt.bottom > 0) {
+        const int m = amt.bottom < b.h ? amt.bottom : b.h;
+        const int limit = limits.bottom() - m;
+        if (b.y > limit) {
+            if (stretchingBottom) b.h = limits.bottom() - b.y;
+            else b.y = limit;
+        }
+    }
+    if (amt.right > 0) {
+        const int m = amt.right < b.w ? amt.right : b.w;
+        const int limit = limits.right() - m;
+        if (b.x > limit) {
+            if (stretchingRight) b.w = limits.right() - b.x;
+            else b.x = limit;
+        }
+    }
+    return b;
+}
 } // namespace meterbar
